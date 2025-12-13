@@ -565,6 +565,7 @@ SaveAll(){
     global asrModel,trModel,audioProvider,geminiAudioModel
     global imgProvider,imgModel,geminiImgModel
     global rmsThresh,minVoiced,hangSil,iniPath
+    global capMaxKB,capMode,capRect
     global boxBgHex,bdrOutHex,bdrInHex,txtHex
     global fontName,fontSize
     global bdrOutW,bdrInW
@@ -575,10 +576,17 @@ SaveAll(){
     IniWrite(pythonExe,       iniPath, "cfg", "pythonExe")
 	IniWrite(captureDir,      iniPath, "paths", "captureDir")
 
-    ; --- NEW: persist capture settings ---
+    ; --- Capture: refresh values from INI (picker writes them) before saving ---
+    capModeLive := IniRead(iniPath, "capture", "mode", capMode)
+    capRectLive := IniRead(iniPath, "capture", "rect", capRect)
+
     IniWrite(capMaxKB,        iniPath, "capture", "maxKB")
-    IniWrite(capMode,         iniPath, "capture", "mode")
-    IniWrite(capRect,         iniPath, "capture", "rect")
+    IniWrite(capModeLive,     iniPath, "capture", "mode")
+    IniWrite(capRectLive,     iniPath, "capture", "rect")
+
+    ; keep UI variables in sync too
+    capMode := capModeLive
+    capRect := capRectLive
 
     IniWrite(audioScript,     iniPath, "cfg", "audioScript")
     IniWrite(overlayAhk,      iniPath, "cfg", "overlayAhk")
@@ -820,6 +828,11 @@ StartTempHideWatcher(kind := "region") {
     global __OldMode := oldMode
     global __OldRect := oldRect
     global __OldTit  := oldTit
+	; also snapshot INI modified time so "same rect again" still counts as done
+    oldMTime := ""
+    try oldMTime := FileGetTime(iniPath, "M")
+    global __OldIniMTime := oldMTime
+
 
     ; hide the Control Panel now
     try ui.Hide()
@@ -832,20 +845,22 @@ StartTempHideWatcher(kind := "region") {
 }
 
 WatchCapDone(*) {
-    global ui, iniPath, __HideWatchKind, __OldMode, __OldRect, __OldTit
+    global ui, iniPath, __HideWatchKind, __OldMode, __OldRect, __OldTit, __OldIniMTime
 
     curMode := IniRead(iniPath, "capture", "mode", "")
+	    curMTime := ""
+    try curMTime := FileGetTime(iniPath, "M")
     if (__HideWatchKind = "region") {
         curRect := IniRead(iniPath, "capture", "rect", "")
         ; re-show when a new rect is written under mode=region
-        if (curMode = "region" && curRect != "" && curRect != __OldRect) {
+            if (curMode = "region" && curRect != "" && (curRect != __OldRect || curMTime != __OldIniMTime)) {
             SetTimer(WatchCapDone, 0)
             try ui.Show()
         }
     } else if (__HideWatchKind = "window") {
         curTit := IniRead(iniPath, "capture", "winTitle", "")
         ; re-show when a new window title is written under mode=window
-        if (curMode = "window" && curTit != "" && curTit != __OldTit) {
+            if (curMode = "window" && curTit != "" && (curTit != __OldTit || curMTime != __OldIniMTime)) {
             SetTimer(WatchCapDone, 0)
             try ui.Show()
         }
