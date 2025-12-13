@@ -1034,11 +1034,40 @@ PickWindowClick(*) {
 ; Produce a screenshot file from current selection (persisted)
 CaptureOnceToFile(&outPath) {
     global Cap_Mode, Cap_Rect, Cap_MaxKB, captureDir
+    global ControlIni, Cap_RectStr
+
+    ; Always re-sync capture mode + rect from control.ini so that
+    ; hotkeys / controller buttons see the latest region/window
+    ; without needing to restart the overlay.
+    try {
+        ; mode: "region" | "window"
+        Cap_Mode := IniRead(ControlIni, "capture", "mode", Cap_Mode)
+
+        ; rect: "x,y,w,h"
+        newRectStr := IniRead(ControlIni, "capture", "rect", Cap_RectStr)
+        if (newRectStr != "") {
+            rectParts := StrSplit(newRectStr, ",")
+            if (rectParts.Length = 4) {
+                Cap_Rect["x"] := Integer(rectParts[1])
+                Cap_Rect["y"] := Integer(rectParts[2])
+                Cap_Rect["w"] := Integer(rectParts[3])
+                Cap_Rect["h"] := Integer(rectParts[4])
+                Cap_RectStr := newRectStr
+            }
+        }
+
+        ; max PNG size
+        Cap_MaxKB := Integer(IniRead(ControlIni, "capture", "maxKB", Cap_MaxKB))
+    } catch as __e {
+        ; If INI is missing/broken, just keep the in-memory values.
+    }
+
     InitGDIPlus()
     if (!__GDI_Ready) {
         showText("GDI+ not available.")
         return false
     }
+
     cd := ResolvePath(captureDir)
     if !DirExist(cd)
         DirCreate(cd)
