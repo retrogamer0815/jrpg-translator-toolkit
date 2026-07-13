@@ -22,9 +22,9 @@ def atomic_write_text(path: str, text: str):
     with open(tmp, "w", encoding="utf-8", newline="\r\n") as f:
         f.write(text)
     # Retry a few times in case another process has the file open without FILE_SHARE_DELETE
-    for _ in range(10):              # total ≈ 500 ms
+    for _ in range(10):              # total â‰ˆ 500 ms
         try:
-            os.replace(tmp, path)    # atomic on Win/NTFS if target isn’t locked
+            os.replace(tmp, path)    # atomic on Win/NTFS if target isnâ€™t locked
             break
         except PermissionError:
             time.sleep(0.05)
@@ -90,22 +90,22 @@ Input is a short Japanese line (from a JRPG). Produce a concise, readable explan
 No markdown, no code fences.
 
 Vocabulary:
-- word (kana/kanji) – reading – succinct meaning; brief grammar/nuance if relevant
+- word (kana/kanji) â€“ reading â€“ succinct meaning; brief grammar/nuance if relevant
 
 Grammar points:
 - Particles, conjugations, set phrases; show tiny breakdowns when helpful.
 
 Nuance & culture:
-- Politeness level, speech style, cultural/cliché references if present.
+- Politeness level, speech style, cultural/clichÃ© references if present.
 
 Literal gloss (optional):
 - A simple word-by-word gloss.
 
 Natural English paraphrase:
-- 1–2 smooth translations that fit likely context.
+- 1â€“2 smooth translations that fit likely context.
 
 Key takeaways:
-- 2–4 bullets to remember.
+- 2â€“4 bullets to remember.
 
 Japanese:
 {jp}
@@ -130,7 +130,13 @@ try:
     text = ""
 
     if PROVIDER == "gemini":
-        import google.generativeai as genai
+        try:
+            from google import genai
+            from google.genai import types
+        except Exception as e:
+            raise RuntimeError(
+                "Missing google-genai package. Install with: python -m pip install -U google-genai"
+            ) from e
 
         # Accept normal + local names
         api_key = (
@@ -152,39 +158,20 @@ try:
         if not api_key:
             raise RuntimeError("Missing GEMINI_API_KEY/GOOGLE_API_KEY (or *_LOCAL / _FILE)")
 
-        # Try to relax safety filters so eroge / adult dialogue aren't blocked.
-        safety_settings = None
-        try:
-            from google.generativeai.types.safety_types import HarmBlockThreshold, HarmCategory
+        model_name = GEM_MODEL
+        if model_name.startswith("models/"):
+            model_name = model_name[len("models/"):]
 
-            # NOTE:
-            # If your account complains about BLOCK_NONE being "restricted",
-            # change BLOCK_NONE below to BLOCK_ONLY_HIGH.
-            safety_settings = {
-                HarmCategory.HARM_CATEGORY_HARASSMENT:         HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH:        HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT:  HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT:  HarmBlockThreshold.BLOCK_NONE,
-            }
-        except Exception:
-            safety_settings = None
+        client = genai.Client(api_key=api_key)
+        resp = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+            ),
+        )
 
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(GEM_MODEL)
-
-        if safety_settings is not None:
-            resp = model.generate_content(
-                prompt,
-                generation_config={"temperature": 0.2},
-                safety_settings=safety_settings,
-            )
-        else:
-            resp = model.generate_content(
-                prompt,
-                generation_config={"temperature": 0.2},
-            )
-
-        # Handle the "blocked → no candidates" case cleanly.
+        # Handle the "blocked â†’ no candidates" case cleanly.
         try:
             text = (getattr(resp, "text", "") or "").strip()
         except Exception:
@@ -197,7 +184,33 @@ try:
             if block_reason:
                 text = f"(Gemini blocked the explanation; block_reason={block_reason})"
             else:
-                text = "(Gemini returned no text candidates – likely blocked by safety settings.)"
+                text = "(Gemini returned no text candidates â€“ likely blocked by safety settings.)"
+
+        if not text:
+            try:
+                candidates = getattr(resp, "candidates", None) or []
+                out_parts = []
+                for cand in candidates:
+                    content = getattr(cand, "content", None)
+                    if not content:
+                        continue
+                    parts = getattr(content, "parts", None) or []
+                    for part in parts:
+                        t = getattr(part, "text", None)
+                        if t:
+                            out_parts.append(t)
+                text = "".join(out_parts).strip()
+            except Exception:
+                pass
+        if not text:
+            try:
+                prompt_feedback = getattr(resp, "prompt_feedback", None)
+                if prompt_feedback:
+                    text = f"(Gemini returned no text; prompt_feedback={prompt_feedback})"
+            except Exception:
+                pass
+        if not text:
+            text = "(Gemini returned no text candidates.)"
 
     elif PROVIDER == "openai":
         from openai import OpenAI
@@ -278,3 +291,4 @@ if save_flag:
         print(f"(Archived) {out_path}")
     except Exception as e:
         print(f"(Archive skipped) Could not write to {out_path}: {e}", file=sys.stderr)
+
