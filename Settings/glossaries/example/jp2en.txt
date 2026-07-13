@@ -1,0 +1,4 @@
+# One mapping per line:
+# Japanese term -> preferred English term
+
+
