@@ -1,0 +1,4 @@
+# One mapping per line:
+# Existing English text -> preferred replacement
+
+
