@@ -20,10 +20,10 @@ The system combines **AutoHotkey GUIs** and **Python back-end scripts**, with su
   Translate in-game dialogue boxes or menus instantly. Capture any region or window and see the result appear in the overlay.
 
 * 🎙️ **Audio Translation**
-  Transcribe and translate voice acting or spoken Japanese in using OpenAI Whisper, Gemini Audio, or local faster-whisper.
+  Translate Japanese voice acting with near real time text output by using OpenAIs and Geminis realtime/live audio models.
 
 * 💬 **Grammar Explainer**
-  Turn any captured line into an English breakdown of grammar, vocabulary, and nuance — perfect for Japanese learners.
+  Turn any captured line into an English breakdown of grammar, vocabulary, and nuance — perfect for Japanese learners. Save these optional as text files automatically to use them as study material.
 
 * 🧩 **Dual Glossary System**
   Custom JP→EN and EN→EN glossaries ensure consistent terminology and phrasing across translations.
@@ -59,11 +59,9 @@ All output is written to a shared temporary folder (`%TEMP%\JRPG_Overlay\`), whe
 ### 🧩 Requirements
 
 * **Windows 10 / 11**
-* **Microsoft Visual C++ 2015–2022 Redistributable (x64)** (for local audio transcription included under `redist/`)
 * **Python 3.12.** (portable environment included in the release)
 * OpenAI and/or Gemini API keys
 * Internet connection (for OpenAI / Gemini modes)
-* Optional GPU (for faster-whisper local ASR)
 
 ---
 
@@ -109,7 +107,7 @@ Each overlay remembers its size, position, and colors between sessions.
 
 | Purpose                | Provider                                             | Default Model                                         |
 | ---------------------- | ---------------------------------------------------- | ----------------------------------------------------- |
-| Screenshot Translation | OpenAI / Gemini                                      | `gpt-4o`, `gemini-2.5-flash`                          |
+| Screenshot Translation | OpenAI / Gemini                                      | `gpt-4o`, `gemini-3.5-flash`                          |
 | Audio Transcription    | OpenAI Whisper / Gemini Audio / Local faster-whisper | `gpt-4o-mini-transcribe`, `gemini-2.5-flash`, `small` |
 | Audio Translation      | OpenAI / Gemini                                      | `gpt-4o-mini`                                         |
 | Explanation            | OpenAI / Gemini                                      | `gpt-4o-mini`, `gemini-2.5-flash`                     |
