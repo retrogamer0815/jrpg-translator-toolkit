@@ -134,6 +134,17 @@ Settings/
 Overlay size, position, appearance, and scrolling behavior are stored
 independently for the Translator and Explainer.
 
+The source repository and release include three default prompt profiles:
+
+| Prompt file | Purpose |
+| --- | --- |
+| `Settings/prompts/default_en.txt` | English screenshot translation with a plain transcript |
+| `Settings/prompts/default_with_kanji_reading_en.txt` | English screenshot translation with hiragana readings added to kanji words |
+| `Settings/prompts_explain/default_en.txt` | English Japanese-learning explanation |
+
+Additional prompt profiles created through the control panel remain local and
+are ignored by Git.
+
 ## Project Structure
 
 | File | Purpose |
@@ -153,6 +164,10 @@ Install AutoHotkey v2 and run `JRPG_Translator.ahk`. The source version launches
 `bin/jrpg_overlay_C.ahk`; compiled releases launch the corresponding executable.
 The Python scripts require Python 3.12 and their listed dependencies, or the
 portable Python environment included in a release package.
+
+```powershell
+py -3.12 -m pip install -r requirements.txt
+```
 
 Before sharing a build, verify that it does not contain `Settings/.env`, API
 credentials, personal profiles, screenshots, logs, or other local settings.
