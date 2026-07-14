@@ -1,199 +1,202 @@
-## 🕹️ JRPG Translator
+# JRPG Translator Toolkit
 
-**JRPG Translator** is a live on-screen translation toolkit for Japanese retro and modern games.
-It provides **screen**, **audio**, and **contextual explanation** overlays — ideal for learning Japanese while playing, or simply enjoying untranslated games.
+JRPG Translator is a Windows toolkit for translating Japanese games while you
+play. It combines screenshot translation, direct live-audio translation, and a
+separate Japanese-learning explainer with customizable overlay windows.
 
-The system combines **AutoHotkey GUIs** and **Python back-end scripts**, with support for **OpenAI**, **Google Gemini**, and **local faster-whisper** speech recognition.
+The control panel works with a mouse and keyboard or entirely from a controller
+through mapping tools such as JoyToKey, Steam Input, or DS4Windows.
 
----
+## Features
 
-### ✨ Features
+- Screenshot translation with OpenAI and Google Gemini vision models.
+- Near-live audio translation using OpenAI Realtime Translate or Gemini Live
+  Translate models, without a separate transcription step.
+- A dedicated Explainer for vocabulary, kanji readings, grammar, literal
+  meaning, natural translations, nuance, and cultural context.
+- Optional automatic saving of explanations as text files for later study.
+- Independent Translator and Explainer overlays with configurable colors,
+  fonts, borders, transparency, position, and size.
+- Translation and explanation prompt profiles editable from the control panel.
+- Shared OpenAI and Gemini model lists across translation and explanation.
+- Selectable output language for live audio translation.
+- JP-to-EN and EN-to-EN glossary profiles for names and terminology.
+- Configurable hotkeys, spatial controller navigation, and optional dark mode.
+- Non-activating overlays that can remain visible without taking focus from the
+  game or pausing an emulator.
 
-* 🎮 **Fully Hotkey-Driven**
-  Every function — from screenshot capture and translation to toggling overlays or starting audio transcription — can be mapped to custom hotkeys.
-  Works great with controller mapping tools like *JoyToKey*, *Steam Input*, or *DS4Windows* for seamless in-game control.
+## Requirements
 
-* 🧠 **Prompt & Model Flexibility**
-  Change or edit system prompts, try different OpenAI / Gemini models, and even add new providers directly through the UI — without restarting the app or touching config files.
+- Windows 10 or Windows 11.
+- An OpenAI API key, a Gemini API key, or both.
+- Internet access for translation and explanation requests.
 
-* 🖼️ **Screenshot Translation**
-  Translate in-game dialogue boxes or menus instantly. Capture any region or window and see the result appear in the overlay.
+The downloadable release includes a portable Python environment and compiled
+AutoHotkey executables. A separate Python or AutoHotkey installation is not
+needed when using the release package.
 
-* 🎙️ **Audio Translation**
-  Translate Japanese voice acting with near real time text output by using OpenAIs and Geminis realtime/live audio models.
+## Quick Start
 
-* 💬 **Grammar Explainer**
-  Turn any captured line into an English breakdown of grammar, vocabulary, and nuance — perfect for Japanese learners. Save these optional as text files automatically to use them as study material.
+1. Download and extract the
+   [latest release](https://github.com/retrogamer0815/jrpg-translator-toolkit/releases/latest).
+2. Run `JRPG Translator.exe`.
+3. Add your API keys in the **API Keys** tab, or set `OPENAI_API_KEY` and/or
+   `GEMINI_API_KEY` as Windows user environment variables.
+4. Open the Translator overlay.
+5. Choose a capture region or game window from
+   **Screenshot Translation > Capture**.
+6. Select the provider, model, prompt, and hotkeys you want to use.
 
-* 🧩 **Dual Glossary System**
-  Custom JP→EN and EN→EN glossaries ensure consistent terminology and phrasing across translations.
+The control panel saves settings automatically where appropriate. The **Save**
+button becomes available when a manual save is needed.
 
-* 🪟 **JRPG-Style Overlays**
-  Clean, resizable floating windows that mimic RPG text boxes — with customizable fonts, borders, and transparency.
+## Translation Workflows
 
-* 🧰 **All Settings in One Place**
-  The Control Panel manages everything — paths, models, colors, hotkeys, and provider settings — with changes applied instantly.
+### Screenshot Translation
 
----
+Use **Screenshot + Translate** for the fastest one-button workflow. You can also
+take one or more screenshots first and translate them together, which is useful
+when a sentence spans multiple dialogue boxes.
 
-### 🏗️ How It Works
+The screenshot prompt controls the requested output, so it can include a plain
+translation, the original Japanese, kanji readings, speaker names, or any other
+format useful for playing or studying.
 
-The project has three main layers:
+### Live Audio Translation
 
-| Component                                                                      | Purpose                                                                                                  | Language   |
-| ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- | ---------- |
-| `JRPG_Control_Panel.ahk`                                                       | Main control panel – lets you start/stop overlays, manage API keys, choose models, and set color themes. | AutoHotkey |
-| `jrpg_overlay.ahk`                                                             | On-screen “JRPG-style” overlay window that displays live translations or explanations.                   | AutoHotkey |
-| `scripts/` (`screenshot_translator.py`, `audio_translator.py`, `explainer.py`) | Python back-ends handling OCR, ASR, translation, and prompt processing.                                  | Python 3   |
+In the **Audio Translation** tab:
 
-The AHK control panel sets environment variables and launches the relevant Python modules:
+1. Select the Windows playback device.
+2. Choose OpenAI or Gemini and a compatible live translation model.
+3. Select the output language.
+4. Choose **Start Audio**, then enable or disable listening as needed.
 
-* `screenshot_translator.py` → translates captured screenshots using AI vision models
-* `audio_translator.py` → transcribes and translates live audio
-* `explainer.py` → generates grammar and vocabulary breakdowns for the last translated Japanese line
+Audio is streamed directly to the selected live translation model. Translated
+lines appear at the bottom of the Translator overlay while older lines move
+upward and remain available for scrolling.
 
-All output is written to a shared temporary folder (`%TEMP%\JRPG_Overlay\`), where the overlays read it in real time.
+### Japanese Explainer
 
----
+The Explainer uses the most recent Japanese screenshot text. Choose
+**Explain last jp. Text** or its configured hotkey to generate a separate
+learning-focused explanation without replacing the translation.
 
-### 🧩 Requirements
+Explanation prompts are independent from translation prompts, so they can be
+tuned for a learner's level and preferred amount of detail.
 
-* **Windows 10 / 11**
-* **Python 3.12.** (portable environment included in the release)
-* OpenAI and/or Gemini API keys
-* Internet connection (for OpenAI / Gemini modes)
+When **Save explanations to textfiles** is enabled, generated explanations are
+also stored in `Settings/Explanations` for use as study material.
 
----
+## Controller Use
 
-### 🪄 Quick Start
+Map controller inputs to keyboard keys or JRPG Translator hotkeys with JoyToKey
+or another controller mapper. In the control panel:
 
-1. **Download** or clone the repository
+- Arrow keys move spatially between visible controls.
+- Enter activates buttons, checkboxes, and dropdown selections.
+- Page Up and Page Down switch tabs and work well when mapped to shoulder
+  buttons.
+- Mouse-wheel or arrow-key mappings can scroll the visible Translator or
+  Explainer overlay even when it does not own game focus.
 
-   ```
-   git clone https://github.com/<yourname>/JRPG-Translator.git
-   ```
-2. **Run** `JRPG Translator.exe` (or `.ahk` if using AutoHotkey v2)
-3. **Enter your API keys** in the API Keys tab or in Windows under System Environment Variables.
- 
-   OPENAI_API_KEY="your_openai_key"
-   GEMINI_API_KEY="your_google_key"
-   ```
-4. **Choose provider and models** under the “Audio” and “Screenshot” tabs.
-5. **Start overlays** for Translator and Explainer windows.
-6. Capture screenshots, or let the audio translator listen — results appear in the overlay.
+The overlays can be brought forward without becoming the active window. This
+allows emulator options such as RetroArch's pause-when-inactive behavior to
+remain enabled while translations are visible. Opening the control panel still
+activates it normally.
 
----
+## API Keys and Privacy
 
-### 🗝️ Configuration
+The recommended key-storage method is Windows user environment variables:
 
-All settings are stored in:
-
+```text
+OPENAI_API_KEY=your_key
+GEMINI_API_KEY=your_key
 ```
+
+The control panel can alternatively store keys in `Settings/.env`. This is a
+plain-text file: do not commit it, upload it, or include it in shared archives.
+
+Screenshots and audio sent for translation are processed by the selected API
+provider. Review the provider's current data and privacy terms before use.
+
+## Settings and Profiles
+
+Portable settings live in the local `Settings` folder:
+
+```text
 Settings/
- ├── .env                     ← API keys and defaults
- ├── control.ini              ← UI layout and last profile
- ├── glossaries/
- │    ├── default/jp2en.txt   ← Custom term mappings (JP → EN)
- │    └── default/en2en.txt   ← Phrase consistency (EN → EN)
- ├── prompts/                 ← Custom translation/explanation prompts
- └── profiles/                ← Saved overlay color schemes
+|-- control.ini
+|-- .env                         # optional local API-key storage
+|-- Screenshots/
+|-- prompts/                     # screenshot translation prompts
+|-- prompts_explain/             # explanation prompts
+|-- glossaries/
+|-- profiles/                    # Translator overlay profiles
+`-- profiles_explainer/          # Explainer overlay profiles
 ```
 
-Each overlay remembers its size, position, and colors between sessions.
+Overlay size, position, appearance, and scrolling behavior are stored
+independently for the Translator and Explainer.
 
----
+The source repository and release include three default prompt profiles:
 
-### ⚡ Providers & Models
+| Prompt file | Purpose |
+| --- | --- |
+| `Settings/prompts/default_en.txt` | English screenshot translation with a plain transcript |
+| `Settings/prompts/default_with_kanji_reading_en.txt` | English screenshot translation with hiragana readings added to kanji words |
+| `Settings/prompts_explain/default_en.txt` | English Japanese-learning explanation |
 
-| Purpose                | Provider                                             | Default Model                                         |
-| ---------------------- | ---------------------------------------------------- | ----------------------------------------------------- |
-| Screenshot Translation | OpenAI / Gemini                                      | `gpt-4o`, `gemini-3.5-flash`                          |
-| Audio Transcription    | OpenAI Whisper / Gemini Audio / Local faster-whisper | `gpt-4o-mini-transcribe`, `gemini-2.5-flash`, `small` |
-| Audio Translation      | OpenAI / Gemini                                      | `gpt-4o-mini`                                         |
-| Explanation            | OpenAI / Gemini                                      | `gpt-4o-mini`, `gemini-2.5-flash`                     |
+Additional prompt profiles created through the control panel remain local and
+are ignored by Git.
 
----
+## Project Structure
 
-### 🖼️ Fonts & Visuals
+| File | Purpose |
+| --- | --- |
+| `JRPG_Translator.ahk` | Main control panel and workflow orchestration |
+| `bin/jrpg_overlay_C.ahk` | Translator and Explainer overlay windows |
+| `scripts/screenshot_translator.py` | Screenshot vision translation and output formatting |
+| `scripts/live_audio_translator.py` | Direct streaming audio translation |
+| `scripts/explainer.py` | Japanese-learning explanations |
 
-The overlays use **[PixelMPlus](https://itouhiro.github.io/mplus-fonts/)**, licensed under the **Open Font License (OFL 1.1)**.
-Place additional `.ttf` fonts in the `fonts/` folder to customize appearance.
+Runtime messages and generated overlay text are exchanged through
+`%TEMP%\JRPG_Overlay`.
 
-The default app icon was sourced from **[Flaticon.com](https://www.flaticon.com/)** and used under their free license.
-Please credit the original artist Miguel C Balandrano in derivative works.
+## Running from Source
 
----
+Install AutoHotkey v2 and run `JRPG_Translator.ahk`. The source version launches
+`bin/jrpg_overlay_C.ahk`; compiled releases launch the corresponding executable.
+The Python scripts require Python 3.12 and their listed dependencies, or the
+portable Python environment included in a release package.
 
-### 🧠 Local ASR (Optional)
-
-If you select **Local Audio (faster-whisper)** in the Control Panel:
-
-* The script automatically imports `faster-whisper` (CTranslate2)
-* Requires the **VC++ 2015–2022 x64 runtime** (auto-installer included)
-* Model can be set via `FW_MODEL_NAME` (tiny/base/small/medium/large-v3)
-* `FW_COMPUTE` supports `auto`, `int8`, `float16`, or `float32`
-
-GPU (CUDA) use is automatic if available.
-
----
-
-### 🔍 Glossary Example
-
-`Settings/glossaries/default/jp2en.txt`
-
-```
-魔導士 → Mage
-神殿 → Temple
-癒し → Healing
+```powershell
+py -3.12 -m pip install -r requirements.txt
 ```
 
-`Settings/glossaries/default/en2en.txt`
+Before sharing a build, verify that it does not contain `Settings/.env`, API
+credentials, personal profiles, screenshots, logs, or other local settings.
 
-```
-HP → Health
-MP → Mana
-```
+## Troubleshooting
 
----
+- If a request fails, verify the selected model name and confirm that the API
+  key has access to that model.
+- If the wrong playback source is translated, refresh and reselect the device
+  in **Audio Translation**.
+- If an overlay is missing, use the Open Translator or Open Explainer button and
+  check its saved position on connected displays.
+- If source files do not start, confirm that AutoHotkey v2 is being used rather
+  than AutoHotkey v1.
 
-### 🧑‍💻 Contributing
+## Credits
 
-Contributions are welcome!
-Developers can improve the translation pipeline, add provider support, or enhance the AutoHotkey UI.
+- [AutoHotkey](https://www.autohotkey.com/): GNU GPLv2.
+- [Python](https://www.python.org/): PSF License.
+- [PixelMplus](https://itouhiro.github.io/mplus-fonts/): SIL Open Font License
+  1.1.
+- Application icon by Miguel C Balandrano via Flaticon; attribution is required
+  by the source license.
 
-Typical areas for contribution:
+## License
 
-* Better VAD (voice detection) logic
-* OCR integration improvements
-* Caching / offline fallback
-* UI performance and cross-window sync
+The project source is released under the MIT License. See [LICENSE](LICENSE).
 
-Please open an issue or pull request with clear descriptions and test cases.
-
----
-
-### ⚖️ Licenses & Credits
-
-| Component                                                                                                                        | License                             | Attribution                                                                                           |
-| -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| JRPG Translator source code                                                                                                      | MIT License                         | © Philipp Reichel                                                                                     |
-| [AutoHotkey](https://www.autohotkey.com/)                                                                                        | GNU GPLv2                           |                                                                                                       |
-| [Python](https://www.python.org/)                                                                                                | PSF License                         |                                                                                                       |
-| [PixelMPlus Font](https://itouhiro.github.io/mplus-fonts/)                                                                       | SIL Open Font License 1.1           |                                                                                                       |
-| [Flaticon Icon](https://www.flaticon.com/)                                                                                       | Free License (attribution required) |                                                                                                       |
-| [Microsoft Visual C++ Redistributable 2015–2022 (x64)](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) | © Microsoft Corporation             |                                                                                                       |
-| Optional dependencies:                                                                                                           | —                                   | `openai`, `google-generativeai`, `faster-whisper`, `soundcard`, `soundfile`, `numpy`, `python-dotenv` |
-
----
-
-### 📜 License
-
-This project is licensed under the **MIT License** — see `LICENSE` for details.
-
-```
-Copyright (c) 2025 Philipp Reichel
-
-Permission is hereby granted, free of charge, to any person obtaining a copy...
-```
-
----

@@ -17,11 +17,11 @@ Environment:
 
   --- Google Gemini ---
   GEMINI_API_KEY          (required if PROVIDER=gemini)
-  GEMINI_MODEL_NAME       (optional, default: "gemini-1.5-flash")
+  GEMINI_MODEL_NAME       (optional, default: "gemini-2.5-flash")
 
   --- Glossaries ---
-  JP2EN_GLOSSARY_PATH     (optional, default: ./jp2en_glossary.txt)
-  EN2EN_GLOSSARY_PATH     (optional, default: ./en2en_glossary.txt)
+  JP2EN_GLOSSARY_PATH     (optional, default: resolved from Settings profile)
+  EN2EN_GLOSSARY_PATH     (optional, default: resolved from Settings profile)
 
   --- Prompt override ---
   PROMPT_FILE             (optional) path to a UTF-8 prompt file
@@ -46,6 +46,7 @@ from typing import List, Tuple
 try:
     from dotenv import load_dotenv, find_dotenv
     from pathlib import Path
+
     # Project root = parent of /scripts
     _ROOT = Path(__file__).resolve().parents[1]
 
@@ -55,13 +56,13 @@ try:
 
     # 2) Fallbacks
     _ENV_SETTINGS = _ROOT / "Settings" / ".env"
-    _ENV_ROOT     = _ROOT / ".env"
+    _ENV_ROOT = _ROOT / ".env"
 
     # Try in priority order
     for _p in (
         _ENV_FROM_SETTINGS_DIR if _ENV_FROM_SETTINGS_DIR and _ENV_FROM_SETTINGS_DIR.exists() else None,
         _ENV_SETTINGS if _ENV_SETTINGS.exists() else None,
-        _ENV_ROOT     if _ENV_ROOT.exists()     else None,
+        _ENV_ROOT if _ENV_ROOT.exists() else None,
     ):
         if _p:
             load_dotenv(_p, override=False, encoding="utf-8-sig")
@@ -73,7 +74,8 @@ try:
             load_dotenv(p, override=False, encoding="utf-8-sig")
 except Exception:
     pass
-    
+
+
 def _get_key(*names, file_var=None):
     """Return first non-empty env var among names; if none, read from file path var."""
     bom = "\ufeff"
@@ -95,15 +97,15 @@ def _get_key(*names, file_var=None):
                 pass
     return ""
 
-# (dotenv already loaded above; no second pass needed)
+
 # --- Paths shared with the AHK overlay (same folder audio uses) ---
-TEMP_DIR    = os.environ.get("TEMP") or tempfile.gettempdir()
+TEMP_DIR = os.environ.get("TEMP") or tempfile.gettempdir()
 OVERLAY_DIR = os.path.join(TEMP_DIR, "JRPG_Overlay")
-LAST_JP     = os.path.join(OVERLAY_DIR, "last_jp.txt")
-# (optional) keep track of the source images too
-LAST_SRC    = os.path.join(OVERLAY_DIR, "last_src.txt")
-OCR_TXT     = os.path.join(OVERLAY_DIR, "ocr.txt")
+LAST_JP = os.path.join(OVERLAY_DIR, "last_jp.txt")
+LAST_SRC = os.path.join(OVERLAY_DIR, "last_src.txt")
+OCR_TXT = os.path.join(OVERLAY_DIR, "ocr.txt")
 os.makedirs(OVERLAY_DIR, exist_ok=True)
+
 
 def atomic_write_text(path: str, text: str):
     """UTF-8 atomic write so AHK never reads partial content (tolerant of brief locks)."""
@@ -125,6 +127,7 @@ def atomic_write_text(path: str, text: str):
         except Exception:
             pass
 
+
 # ---- Post-processing mode -----------------------------------------------------
 # "tt" (default): enforce Transcript/Translation and normalize headers
 # "translation": return only the Translation block (no headings)
@@ -135,7 +138,7 @@ POSTPROC_MODE = (
     or "tt"
 ).strip().lower()
 
-# ---- Console UTF-8 on Windows ------------------------------------------------
+# ---- Console UTF-8 on Windows -------------------------------------------------
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
@@ -152,8 +155,8 @@ if PROVIDER == "openai":
         sys.exit(1)
 
     OPENAI_API_KEY = _get_key(
-    "OPENAI_API_KEY", "OPENAI_LOCAL_KEY", "OPENAI_API_KEY_LOCAL", "OPENAI_KEY",
-    file_var="OPENAI_API_KEY_FILE",
+        "OPENAI_API_KEY", "OPENAI_LOCAL_KEY", "OPENAI_API_KEY_LOCAL", "OPENAI_KEY",
+        file_var="OPENAI_API_KEY_FILE",
     )
     if not OPENAI_API_KEY:
         print("Missing OPENAI_API_KEY (or *_LOCAL / _FILE).", file=sys.stderr)
@@ -162,13 +165,14 @@ if PROVIDER == "openai":
     MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o")
     _openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-
 # ---- Gemini (optional) --------------------------------------------------------
+_gemini_client = None
 if PROVIDER == "gemini":
     try:
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types
     except Exception as e:
-        print("Missing google-generativeai package. Install with: pip install google-generativeai", file=sys.stderr)
+        print("Missing google-genai package. Install with: python -m pip install -U google-genai", file=sys.stderr)
         print(f"Import error: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -180,13 +184,12 @@ if PROVIDER == "gemini":
         print("Missing GEMINI_API_KEY/GOOGLE_API_KEY (or *_LOCAL / _FILE).", file=sys.stderr)
         sys.exit(1)
 
-    GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL_NAME", "gemini-1.5-flash")
-    genai.configure(api_key=GEMINI_API_KEY)
+    GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL_NAME", "gemini-2.5-flash").strip()
+    _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ---- Common paths -------------------------------------------------------------
-SCRIPT_DIR   = os.path.dirname(__file__)
+SCRIPT_DIR = os.path.dirname(__file__)
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)  # one level up from /scripts
-
 
 # 1) If env vars are set, they win. If not, leave as None for profile resolution.
 JP2EN_GLOSSARY_PATH = (os.environ.get("JP2EN_GLOSSARY_PATH", "").strip() or None)
@@ -250,6 +253,7 @@ except Exception:
     # Never break translation if INI/path handling fails
     pass
 
+
 # ==============================================================================
 # Glossaries
 # ==============================================================================
@@ -291,6 +295,7 @@ def load_glossary(path) -> List[Tuple[str, str]]:
             entries.append((src, dst))
     return entries
 
+
 def apply_en_glossary(text: str, en2en: List[Tuple[str, str]]) -> str:
     """Apply EN→EN replacements.
        - Phrases: literal, case-insensitive
@@ -309,20 +314,17 @@ def apply_en_glossary(text: str, en2en: List[Tuple[str, str]]) -> str:
             out = pattern.sub(lambda m: dst + (m.group("suf") or ""), out)
     return out
 
-# --- NEW: mark guessed spans (anything backticked) as italics when enabled ---
-def _mark_guessed_pronouns(text: str) -> str:
-    import os, re
 
-    # Allow changing the delimiter via env var; default to backtick `
+def _mark_guessed_pronouns(text: str) -> str:
+    import os
+    import re
+
     delim = os.getenv("SHOT_GUESS_DELIM", "`")
     escaped = re.escape(delim)
 
-    # Support single-char delimiters (fast path) and multi-char (fallback).
     if len(delim) == 1:
-        # Any content except the delimiter itself; allow spaces, punctuation, apostrophes, etc.
         pattern = re.compile(rf"{escaped}([^{escaped}\r\n]+){escaped}")
     else:
-        # Non-greedy match between multi-char delimiters
         pattern = re.compile(rf"{escaped}(.+?){escaped}", flags=re.DOTALL)
 
     italics_on = (os.getenv("SHOT_ITALICIZE_GUESSED", "1") == "1")
@@ -333,86 +335,81 @@ def _mark_guessed_pronouns(text: str) -> str:
 
     return pattern.sub(repl, text)
 
-# --- NEW: optionally mark first Translation header line 「…」 as a name/title span ---
+
 def _mark_translation_name_line(en_block: str) -> str:
     import os
     if (os.getenv("SHOT_COLOR_SPEAKER", "1") != "1"):
         return en_block
     lines = en_block.splitlines()
-    # Find first non-empty line
     idx = next((i for i, ln in enumerate(lines) if ln.strip() != ""), None)
     if idx is None:
         return en_block
     first = lines[idx].strip()
-    # Strict: must be enclosed in Japanese corner brackets
     if len(first) >= 2 and first[0] == "「" and first[-1] == "」":
-        inner = first[1:-1].strip()  # strip the 「…」 so only the name remains
-        # keep any left padding/indentation on that line
+        inner = first[1:-1].strip()
         left = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
         lines[idx] = f"{left}⟦name⟧{inner}⟦/name⟧"
         return "\n".join(lines)
     return en_block
-    
-# --- NEW: optionally mark first Transcript header line 「…」 as a name/title span ---
+
+
 def _mark_transcript_name_line(jp_block: str) -> str:
     import os
     if (os.getenv("SHOT_COLOR_SPEAKER", "1") != "1"):
         return jp_block
     lines = jp_block.splitlines()
-    # Find first non-empty line
     idx = next((i for i, ln in enumerate(lines) if ln.strip() != ""), None)
     if idx is None:
         return jp_block
     first = lines[idx].strip()
-    # Strict: must be enclosed in Japanese corner brackets
     if len(first) >= 2 and first[0] == "「" and first[-1] == "」":
-        inner = first[1:-1].strip()  # strip the 「…」
+        inner = first[1:-1].strip()
         left = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
         lines[idx] = f"{left}⟦name⟧{inner}⟦/name⟧"
         return "\n".join(lines)
     return jp_block
 
-# ===============================================================
 
 # ==============================================================================
 # Kana → romaji (fallback name romanization)
 # ==============================================================================
 
-# Basic katakana mapping + digraphs + long vowels/small tsu handling
 KATAKANA_ROMAJI = {
-    "ア":"a","イ":"i","ウ":"u","エ":"e","オ":"o",
-    "カ":"ka","キ":"ki","ク":"ku","ケ":"ke","コ":"ko",
-    "サ":"sa","シ":"shi","ス":"su","セ":"se","ソ":"so",
-    "タ":"ta","チ":"chi","ツ":"tsu","テ":"te","ト":"to",
-    "ナ":"na","ニ":"ni","ヌ":"nu","ネ":"ne","ノ":"no",
-    "ハ":"ha","ヒ":"hi","フ":"fu","ヘ":"he","ホ":"ho",
-    "マ":"ma","ミ":"mi","ム":"mu","メ":"me","モ":"mo",
-    "ヤ":"ya","ユ":"yu","ヨ":"yo",
-    "ラ":"ra","リ":"ri","ル":"ru","レ":"re","ロ":"ro",
-    "ワ":"wa","ヲ":"o","ン":"n",
-    "ガ":"ga","ギ":"gi","グ":"gu","ゲ":"ge","ゴ":"go",
-    "ザ":"za","ジ":"ji","ズ":"zu","ゼ":"ze","ゾ":"zo",
-    "ダ":"da","ヂ":"ji","ヅ":"zu","デ":"de","ド":"do",
-    "バ":"ba","ビ":"bi","ブ":"bu","ベ":"be","ボ":"bo",
-    "パ":"pa","ピ":"pi","プ":"pu","ペ":"pe","ポ":"po",
-    "ヴ":"vu",
-    "ァ":"a","ィ":"i","ゥ":"u","ェ":"e","ォ":"o",
-    "ャ":"ya","ュ":"yu","ョ":"yo",
-    "ー":"-",
+    "ア": "a", "イ": "i", "ウ": "u", "エ": "e", "オ": "o",
+    "カ": "ka", "キ": "ki", "ク": "ku", "ケ": "ke", "コ": "ko",
+    "サ": "sa", "シ": "shi", "ス": "su", "セ": "se", "ソ": "so",
+    "タ": "ta", "チ": "chi", "ツ": "tsu", "テ": "te", "ト": "to",
+    "ナ": "na", "ニ": "ni", "ヌ": "nu", "ネ": "ne", "ノ": "no",
+    "ハ": "ha", "ヒ": "hi", "フ": "fu", "ヘ": "he", "ホ": "ho",
+    "マ": "ma", "ミ": "mi", "ム": "mu", "メ": "me", "モ": "mo",
+    "ヤ": "ya", "ユ": "yu", "ヨ": "yo",
+    "ラ": "ra", "リ": "ri", "ル": "ru", "レ": "re", "ロ": "ro",
+    "ワ": "wa", "ヲ": "o", "ン": "n",
+    "ガ": "ga", "ギ": "gi", "グ": "gu", "ゲ": "ge", "ゴ": "go",
+    "ザ": "za", "ジ": "ji", "ズ": "zu", "ゼ": "ze", "ゾ": "zo",
+    "ダ": "da", "ヂ": "ji", "ヅ": "zu", "デ": "de", "ド": "do",
+    "バ": "ba", "ビ": "bi", "ブ": "bu", "ベ": "be", "ボ": "bo",
+    "パ": "pa", "ピ": "pi", "プ": "pu", "ペ": "pe", "ポ": "po",
+    "ヴ": "vu",
+    "ァ": "a", "ィ": "i", "ゥ": "u", "ェ": "e", "ォ": "o",
+    "ャ": "ya", "ュ": "yu", "ョ": "yo",
+    "ー": "-",
 }
+
 DIGRAPHS = {
-    "キャ":"kya","キュ":"kyu","キョ":"kyo",
-    "シャ":"sha","シュ":"shu","ショ":"sho",
-    "ジャ":"ja","ジュ":"ju","ジョ":"jo",
-    "チャ":"cha","チュ":"chu","チョ":"cho",
-    "ニャ":"nya","ニュ":"nyu","ニョ":"nyo",
-    "ヒャ":"hya","ヒュ":"hyu","ヒョ":"hyo",
-    "ミャ":"mya","ミュ":"myu","ミョ":"myo",
-    "リャ":"rya","リュ":"ryu","リョ":"ryo",
-    "ギャ":"gya","ギュ":"gyu","ギョ":"gyo",
-    "ビャ":"bya","ビュ":"byu","ビョ":"byo",
-    "ピャ":"pya","ピュ":"pyu","ピョ":"pyo",
+    "キャ": "kya", "キュ": "kyu", "キョ": "kyo",
+    "シャ": "sha", "シュ": "shu", "ショ": "sho",
+    "ジャ": "ja", "ジュ": "ju", "ジョ": "jo",
+    "チャ": "cha", "チュ": "chu", "チョ": "cho",
+    "ニャ": "nya", "ニュ": "nyu", "ニョ": "nyo",
+    "ヒャ": "hya", "ヒュ": "hyu", "ヒョ": "hyo",
+    "ミャ": "mya", "ミュ": "myu", "ミョ": "myo",
+    "リャ": "rya", "リュ": "ryu", "リョ": "ryo",
+    "ギャ": "gya", "ギュ": "gyu", "ギョ": "gyo",
+    "ビャ": "bya", "ビュ": "byu", "ビョ": "byo",
+    "ピャ": "pya", "ピュ": "pyu", "ピョ": "pyo",
 }
+
 
 def hira_to_kata(s: str) -> str:
     out = []
@@ -426,11 +423,12 @@ def hira_to_kata(s: str) -> str:
             out.append(ch)
     return "".join(out)
 
+
 def is_all_kana(s: str) -> bool:
     return re.fullmatch(r"[ぁ-ゖァ-ヶー・]+", s) is not None
 
+
 def katakana_to_romaji(name: str) -> str:
-    out = ""
     parts = name.split("・")
     rom_parts = []
     for segment in parts:
@@ -438,27 +436,36 @@ def katakana_to_romaji(name: str) -> str:
         i = 0
         rom = ""
         while i < len(seg):
-            if i+2 <= len(seg) and seg[i:i+2] in DIGRAPHS:
-                rom += DIGRAPHS[seg[i:i+2]]; i += 2; continue
+            if i + 2 <= len(seg) and seg[i:i + 2] in DIGRAPHS:
+                rom += DIGRAPHS[seg[i:i + 2]]
+                i += 2
+                continue
             ch = seg[i]
-            if ch == "ッ" and i+1 < len(seg):
-                nxt = seg[i+1:i+3] if i+3 <= len(seg) and seg[i+1:i+3] in DIGRAPHS else seg[i+1]
+            if ch == "ッ" and i + 1 < len(seg):
+                nxt = seg[i + 1:i + 3] if i + 3 <= len(seg) and seg[i + 1:i + 3] in DIGRAPHS else seg[i + 1]
                 base = DIGRAPHS.get(nxt) or KATAKANA_ROMAJI.get(nxt, "")
-                if base: rom += base[0]
-                i += 1; continue
+                if base:
+                    rom += base[0]
+                i += 1
+                continue
             if ch == "ー":
                 if rom:
                     for v in "aeiou"[::-1]:
-                        if rom.endswith(v): rom += v; break
-                i += 1; continue
+                        if rom.endswith(v):
+                            rom += v
+                            break
+                i += 1
+                continue
             rom += KATAKANA_ROMAJI.get(ch, "")
             i += 1
         rom_parts.append(rom)
     romaji = " ".join(p.capitalize() for p in rom_parts if p)
     return romaji if romaji else name
 
+
 def kana_to_romaji(s: str) -> str:
     return katakana_to_romaji(hira_to_kata(s))
+
 
 # ==============================================================================
 # Prompt & messages
@@ -478,6 +485,7 @@ Translation:
 <Fluent English translation of the Transcript block. If a speaker/tag line exists, output it on its own line inside corner brackets, e.g., 「Gus from Casta」. Apply the rule XのY → “Y from X”/“Y of X” only when it is a speaker identifier. Ignore everything outside the box. If no box text exists, output exactly: No Japanese text found.>
 """
 
+
 def load_system_prompt() -> str:
     """
     Priority:
@@ -487,7 +495,6 @@ def load_system_prompt() -> str:
       4) ./prompt.txt next to this script
       5) built-in SYSTEM_PROMPT
     """
-    # 1) PROMPT_FILE
     p = os.environ.get("PROMPT_FILE", "").strip()
     if p:
         try:
@@ -497,20 +504,18 @@ def load_system_prompt() -> str:
         except Exception:
             pass
 
-    # 2) PROMPT_TEXT
     prompt_text = os.environ.get("PROMPT_TEXT", "")
     if prompt_text:
         return prompt_text
 
-    # 3) PROMPT_PROFILE (default/furigana/etc.)
     prof = os.environ.get("PROMPT_PROFILE", "").strip()
     if prof:
-      for candidate in (
-    os.path.join(PROJECT_ROOT, "Settings", "prompts", prof),
-    os.path.join(PROJECT_ROOT, "Settings", "prompts", f"{prof}.txt"),
-    os.path.join(PROJECT_ROOT, "prompts", prof),
-    os.path.join(PROJECT_ROOT, "prompts", f"{prof}.txt"),
-):
+        for candidate in (
+            os.path.join(PROJECT_ROOT, "Settings", "prompts", prof),
+            os.path.join(PROJECT_ROOT, "Settings", "prompts", f"{prof}.txt"),
+            os.path.join(PROJECT_ROOT, "prompts", prof),
+            os.path.join(PROJECT_ROOT, "prompts", f"{prof}.txt"),
+        ):
             try:
                 if os.path.isfile(candidate):
                     with open(candidate, "r", encoding="utf-8") as fh:
@@ -518,7 +523,6 @@ def load_system_prompt() -> str:
             except Exception:
                 pass
 
-    # 4) local prompt.txt (optional)
     try_path = os.path.join(SCRIPT_DIR, "prompt.txt")
     try:
         if os.path.isfile(try_path):
@@ -527,8 +531,8 @@ def load_system_prompt() -> str:
     except Exception:
         pass
 
-    # 5) fallback
     return SYSTEM_PROMPT
+
 
 def build_jp2en_prompt(jp2en: List[Tuple[str, str]]) -> str:
     if not jp2en:
@@ -538,6 +542,7 @@ def build_jp2en_prompt(jp2en: List[Tuple[str, str]]) -> str:
         lines.append(f"- {jp} → {en}")
     return "\n".join(lines)
 
+
 def file_to_data_url(path: str) -> str:
     mime, _ = mimetypes.guess_type(path)
     if not mime:
@@ -545,6 +550,7 @@ def file_to_data_url(path: str) -> str:
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("ascii")
     return f"data:{mime};base64,{b64}"
+
 
 def make_messages_for_openai(image_paths: List[str], jp2en: List[Tuple[str, str]]) -> List[dict]:
     glossary_block = build_jp2en_prompt(jp2en)
@@ -570,8 +576,10 @@ def make_messages_for_openai(image_paths: List[str], jp2en: List[Tuple[str, str]
         {"role": "user", "content": content},
     ]
 
-def gemini_image_parts(paths: List[str]) -> List[dict]:
-    """Gemini accepts parts like {'mime_type': 'image/png', 'data': b'...'}."""
+
+def gemini_image_parts(paths: List[str]):
+    from google.genai import types
+
     parts = []
     for p in paths:
         abs_p = os.path.abspath(p)
@@ -581,20 +589,22 @@ def gemini_image_parts(paths: List[str]) -> List[dict]:
         if not mime:
             mime = "image/png"
         with open(abs_p, "rb") as f:
-            parts.append({"mime_type": mime, "data": f.read()})
+            parts.append(types.Part.from_bytes(data=f.read(), mime_type=mime))
     return parts
+
 
 # ==============================================================================
 # Output post-processing (sanitize / enforce / name header normalization)
 # ==============================================================================
 
-OPEN_BRACKETS  = "「『〈《［（[<"
+OPEN_BRACKETS = "「『〈《［（[<"
 CLOSE_BRACKETS = "」』〉》］）]>"
-OPEN_CLASS     = "[" + re.escape(OPEN_BRACKETS)  + "]"
-CLOSE_CLASS    = "[" + re.escape(CLOSE_BRACKETS) + "]"
+OPEN_CLASS = "[" + re.escape(OPEN_BRACKETS) + "]"
+CLOSE_CLASS = "[" + re.escape(CLOSE_BRACKETS) + "]"
 
-NAME_LINE_RE     = re.compile(rf"^\s*{OPEN_CLASS}\s*(.+?)\s*{CLOSE_CLASS}\s*$")
+NAME_LINE_RE = re.compile(rf"^\s*{OPEN_CLASS}\s*(.+?)\s*{CLOSE_CLASS}\s*$")
 INLINE_HEADER_RE = re.compile(rf"^\s*{OPEN_CLASS}\s*(.+?)\s*{CLOSE_CLASS}\s*[:：]?\s*(.+)$")
+
 
 def strip_code_fences(s: str) -> str:
     if not s:
@@ -603,17 +613,22 @@ def strip_code_fences(s: str) -> str:
     s = re.sub(r"[\r\n]*(?:```|''')\s*$", "", s)
     return s
 
+
 def enforce_transcript_translation(s: str) -> str:
     if not s:
         return "Transcript:\n\nTranslation:\n"
     s = s.strip()
-    # normalize legacy tags
-    s = re.sub(r'^\s*<\s*block1(?:-jp)?\s*>\s*', 'Transcript:\n', s, flags=re.I|re.M)
-    s = re.sub(r'^\s*<\s*block2(?:-en)?\s*>\s*', '\n\nTranslation:\n', s, flags=re.I|re.M)
+    s = re.sub(r'^\s*<\s*block1(?:-jp)?\s*>\s*', 'Transcript:\n', s, flags=re.I | re.M)
+    s = re.sub(r'^\s*<\s*block2(?:-en)?\s*>\s*', '\n\nTranslation:\n', s, flags=re.I | re.M)
 
     if re.search(r'(?mi)^Transcript:\s*', s) and re.search(r'(?mi)^Translation:\s*', s):
-        s = re.sub(r'(?is)(^Transcript:\s*.*?)(?:\n{1,3})?^Translation:\s*',
-                   lambda m: m.group(1).rstrip() + "\n\nTranslation:\n", s, count=1, flags=re.M)
+        s = re.sub(
+            r'(?is)(^Transcript:\s*.*?)(?:\n{1,3})?^Translation:\s*',
+            lambda m: m.group(1).rstrip() + "\n\nTranslation:\n",
+            s,
+            count=1,
+            flags=re.M,
+        )
         return s.strip()
 
     parts = re.split(r'\n\s*\n', s, maxsplit=1)
@@ -622,6 +637,7 @@ def enforce_transcript_translation(s: str) -> str:
     else:
         jp, en = s, ""
     return f"Transcript:\n{jp.strip()}\n\nTranslation:\n{en.strip()}"
+
 
 def split_tt(s: str) -> Tuple[str, str]:
     s = s.replace("\r\n", "\n")
@@ -633,11 +649,6 @@ def split_tt(s: str) -> Tuple[str, str]:
     en = (m.group(2) if m else "").strip()
     return jp, en
 
-def looks_like_jp_name(line: str) -> bool:
-    ln = line.strip()
-    if len(ln) == 0 or len(ln) > 12:
-        return False
-    return re.fullmatch(r"[ぁ-ゖァ-ヶ一-龯々〆ヶー・\s]+", ln) is not None
 
 def normalize_jp_speaker_line(jp_block: str) -> Tuple[str, str]:
     if not jp_block:
@@ -654,11 +665,8 @@ def normalize_jp_speaker_line(jp_block: str) -> Tuple[str, str]:
         lines[idx] = f"「{name}」"
         return "\n".join(lines).strip(), name
 
-    if looks_like_jp_name(first):
-        lines[idx] = f"「{first}」"
-        return "\n".join(lines).strip(), first
-
     return jp_block.strip(), ""
+
 
 def translate_jp_name_to_en(name_jp: str, jp2en: List[Tuple[str, str]]) -> str:
     nm = name_jp.strip()
@@ -668,6 +676,7 @@ def translate_jp_name_to_en(name_jp: str, jp2en: List[Tuple[str, str]]) -> str:
     if is_all_kana(nm):
         return kana_to_romaji(nm)
     return nm
+
 
 def normalize_translation_name_line(en_block: str, jp2en: List[Tuple[str, str]], jp_name_hint: str = "") -> str:
     if not en_block:
@@ -692,87 +701,127 @@ def normalize_translation_name_line(en_block: str, jp2en: List[Tuple[str, str]],
 
     return en_block.strip()
 
+
 # ==============================================================================
 # Calls to providers
 # ==============================================================================
 
+def openai_model_uses_default_temperature(model_name: str) -> bool:
+    """Newer GPT-5.x models reject non-default temperature values."""
+    m = (model_name or "").strip().lower()
+    return m.startswith(("gpt-5.5", "gpt-5.6"))
+
+
+def openai_temperature_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "temperature" in msg and ("default" in msg or "unsupported" in msg or "not supported" in msg)
+
+
 def call_openai(image_paths: List[str], jp2en: List[Tuple[str, str]]) -> str:
     messages = make_messages_for_openai(image_paths, jp2en)
-    resp = _openai_client.chat.completions.create(
-        model=os.environ.get("MODEL_NAME", "gpt-4o"),
-        messages=messages,
-        temperature=0.2,
-    )
+    model_name = os.environ.get("MODEL_NAME", "gpt-4o")
+    kwargs = {
+        "model": model_name,
+        "messages": messages,
+    }
+    if not openai_model_uses_default_temperature(model_name):
+        kwargs["temperature"] = 0
+
+    try:
+        resp = _openai_client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        if "temperature" in kwargs and openai_temperature_error(exc):
+            kwargs.pop("temperature", None)
+            resp = _openai_client.chat.completions.create(**kwargs)
+        else:
+            raise
     return resp.choices[0].message.content or ""
 
+
+def gemini_safety_settings(types):
+    """Disable Gemini's adjustable content filters for faithful translation."""
+    return [
+        types.SafetySetting(
+            category=category,
+            threshold=types.HarmBlockThreshold.OFF,
+        )
+        for category in (
+            types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+            types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        )
+    ]
+
+
 def call_gemini(image_paths: List[str], jp2en: List[Tuple[str, str]]) -> str:
-    import google.generativeai as genai
-
-    # Try to relax safety filters so adult game CGs don't get blocked as easily.
-    # If the types module isn't available, we just fall back to the default settings.
-    safety_settings = None
-    try:
-        from google.generativeai.types.safety_types import HarmBlockThreshold, HarmCategory
-
-        # NOTE:
-        # - BLOCK_NONE is the least restrictive, but on some accounts it is a
-        #   "restricted" level and may require allowlisting / special billing.
-        # - If you get an error mentioning a "restricted HarmBlockThreshold",
-        #   change BLOCK_NONE to BLOCK_ONLY_HIGH here.
-        safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT:         HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH:        HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT:  HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT:  HarmBlockThreshold.BLOCK_NONE,
-        }
-    except Exception:
-        safety_settings = None
+    from google.genai import types
 
     glossary_block = build_jp2en_prompt(jp2en)
     sys_prompt = load_system_prompt() + ("\n\n" + glossary_block if glossary_block else "")
 
-    # Create model with system instruction so we can pass only a tiny user prompt
-    model_name = os.environ.get("GEMINI_MODEL_NAME", "gemini-1.5-flash")
+    model_name = (os.environ.get("GEMINI_MODEL_NAME", "gemini-2.5-flash") or "").strip()
+    if model_name.startswith("models/"):
+        model_name = model_name[len("models/"):]
 
-    # --- FIX: Add the required 'models/' prefix if it's missing ---
-    if not model_name.startswith("models/"):
-        model_name = f"models/{model_name}"
-    # --- END FIX ---
+    image_parts = gemini_image_parts(image_paths)
 
-    model = genai.GenerativeModel(model_name, system_instruction=sys_prompt)
-
-    parts = gemini_image_parts(image_paths)
-    if not parts:
-        parts = [{"text": "No image provided."}]
-
-    content = [{"text": "Process the attached image(s) and answer exactly as instructed."}] + parts
-
-    if safety_settings is not None:
-        resp = model.generate_content(
-            content,
-            generation_config={"temperature": 0.2},
-            safety_settings=safety_settings,
-        )
+    if image_parts:
+        user_parts = [types.Part.from_text(text="Process the attached image(s) and answer exactly as instructed.")]
+        user_parts.extend(image_parts)
     else:
-        resp = model.generate_content(
-            content,
-            generation_config={"temperature": 0.2},
-        )
+        user_parts = [types.Part.from_text(text="No image provided.")]
 
-    # Gemini returns no candidates if the prompt was blocked. In that case
-    # resp.text raises the "response.parts quick accessor" error you saw.
+    contents = [
+        types.Content(
+            role="user",
+            parts=user_parts
+        )
+    ]
+
+    resp = _gemini_client.models.generate_content(
+        model=model_name,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=sys_prompt,
+            temperature=0,
+            safety_settings=gemini_safety_settings(types),
+        ),
+    )
+
     try:
-        return (resp.text or "")
+        text = getattr(resp, "text", None)
+        if text:
+            return text
     except Exception:
-        block_reason = None
-        try:
-            fb = getattr(resp, "prompt_feedback", None)
-            block_reason = getattr(fb, "block_reason", None) if fb else None
-        except Exception:
-            pass
-        if block_reason:
-            return f"(Gemini blocked the image; block_reason={block_reason})"
-        return "(Gemini returned no text candidates – likely blocked by safety settings.)"
+        pass
+
+    try:
+        candidates = getattr(resp, "candidates", None) or []
+        out_parts = []
+        for cand in candidates:
+            content = getattr(cand, "content", None)
+            if not content:
+                continue
+            parts = getattr(content, "parts", None) or []
+            for part in parts:
+                t = getattr(part, "text", None)
+                if t:
+                    out_parts.append(t)
+        if out_parts:
+            return "".join(out_parts)
+    except Exception:
+        pass
+
+    try:
+        prompt_feedback = getattr(resp, "prompt_feedback", None)
+        if prompt_feedback:
+            return f"(Gemini returned no text; prompt_feedback={prompt_feedback})"
+    except Exception:
+        pass
+
+    return "(Gemini returned no text candidates.)"
+
 
 # ==============================================================================
 # Main translation
@@ -790,60 +839,48 @@ def translate_images(paths: List[str],
         provider_name = "Gemini" if PROVIDER == "gemini" else "OpenAI"
         return f"(Python error) {provider_name} call failed: {e}"
 
-    # Sanitize model text
     out = strip_code_fences(raw)
 
-        # --- Sidecar: write latest JP transcript for Learning flow (normalized like overlay) ---
     try:
         enforced = enforce_transcript_translation(out)
         _jp_block, _en_block = split_tt(enforced)
-
-        # Normalize the JP block so speaker headers are wrapped in full-width brackets,
-        # exactly like the Translator overlay shows.
         _jp_block_norm, _ = normalize_jp_speaker_line(_jp_block)
 
         if _jp_block_norm.strip():
             atomic_write_text(LAST_JP, _jp_block_norm.strip())
-            # Optional: remember the image paths that produced this JP
             if paths:
                 atomic_write_text(LAST_SRC, "\r\n".join(os.path.abspath(p) for p in paths))
     except Exception:
-        # Don’t break translation if sidecar write fails
         pass
-    # --- end sidecar write ---
 
-    # Raw output (no headings / normalization)
     if POSTPROC_MODE == "none":
         return out.replace("\r\n", "\n").strip()
 
-    # Translation-only (extract Translation: if present, otherwise pass-through)
     if POSTPROC_MODE in ("translation", "en-only", "en"):
-        enforced = enforce_transcript_translation(out)   # makes a best-effort TT split if needed
+        enforced = enforce_transcript_translation(out)
         _jp_block, en_block = split_tt(enforced)
         if en2en:
             en_block = apply_en_glossary(en_block, en2en)
-        # NEW: add inline markers for overlay styling
         en_block = _mark_translation_name_line(en_block)
         en_block = _mark_guessed_pronouns(en_block)
         return en_block.replace("\r\n", "\n").strip()
 
-    # Default: full TT pipeline with name normalization
     out = enforce_transcript_translation(out)
     jp_block, en_block = split_tt(out)
 
-    jp_block, jp_name = normalize_jp_speaker_line(jp_block)  # bracket-header in JP
-    jp_block = _mark_transcript_name_line(jp_block)          # ← NEW: wrap & strip brackets if color ON
+    jp_block, jp_name = normalize_jp_speaker_line(jp_block)
+    jp_block = _mark_transcript_name_line(jp_block)
     en_block = normalize_translation_name_line(en_block, jp2en, jp_name_hint=jp_name)
 
     if en2en:
         en_block = apply_en_glossary(en_block, en2en)
 
-    # NEW: add inline markers for overlay styling
     en_block = _mark_translation_name_line(en_block)
     en_block = _mark_guessed_pronouns(en_block)
 
     final = f"Transcript:\n{jp_block.strip()}\n\nTranslation:\n{en_block.strip()}"
     return final.replace("\r\n", "\n").strip()
+
 
 # ==============================================================================
 # CLI
@@ -854,12 +891,13 @@ def main() -> None:
         print("Usage: python screenshot_translator.py <image1> [<image2> ...]", file=sys.stderr)
         sys.exit(2)
 
-    images = sys.argv[1:]  # in chronological order
+    images = sys.argv[1:]
     jp2en = load_glossary(JP2EN_GLOSSARY_PATH)
     en2en = load_glossary(EN2EN_GLOSSARY_PATH)
 
     result = translate_images(images, jp2en, en2en)
     atomic_write_text(OCR_TXT, result)
+
 
 if __name__ == "__main__":
     main()

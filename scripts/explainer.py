@@ -111,6 +111,22 @@ Japanese:
 {jp}
 """
 
+
+def gemini_safety_settings(types):
+    """Disable Gemini's adjustable content filters for faithful explanation."""
+    return [
+        types.SafetySetting(
+            category=category,
+            threshold=types.HarmBlockThreshold.OFF,
+        )
+        for category in (
+            types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+            types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        )
+    ]
+
 prompt_tpl = BASE_PROMPT
 if EXPLAIN_PROMPT_FILE and os.path.isfile(EXPLAIN_PROMPT_FILE):
     try:
@@ -130,7 +146,13 @@ try:
     text = ""
 
     if PROVIDER == "gemini":
-        import google.generativeai as genai
+        try:
+            from google import genai
+            from google.genai import types
+        except Exception as e:
+            raise RuntimeError(
+                "Missing google-genai package. Install with: python -m pip install -U google-genai"
+            ) from e
 
         # Accept normal + local names
         api_key = (
@@ -152,37 +174,19 @@ try:
         if not api_key:
             raise RuntimeError("Missing GEMINI_API_KEY/GOOGLE_API_KEY (or *_LOCAL / _FILE)")
 
-        # Try to relax safety filters so eroge / adult dialogue aren't blocked.
-        safety_settings = None
-        try:
-            from google.generativeai.types.safety_types import HarmBlockThreshold, HarmCategory
+        model_name = GEM_MODEL
+        if model_name.startswith("models/"):
+            model_name = model_name[len("models/"):]
 
-            # NOTE:
-            # If your account complains about BLOCK_NONE being "restricted",
-            # change BLOCK_NONE below to BLOCK_ONLY_HIGH.
-            safety_settings = {
-                HarmCategory.HARM_CATEGORY_HARASSMENT:         HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH:        HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT:  HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT:  HarmBlockThreshold.BLOCK_NONE,
-            }
-        except Exception:
-            safety_settings = None
-
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(GEM_MODEL)
-
-        if safety_settings is not None:
-            resp = model.generate_content(
-                prompt,
-                generation_config={"temperature": 0.2},
-                safety_settings=safety_settings,
-            )
-        else:
-            resp = model.generate_content(
-                prompt,
-                generation_config={"temperature": 0.2},
-            )
+        client = genai.Client(api_key=api_key)
+        resp = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                safety_settings=gemini_safety_settings(types),
+            ),
+        )
 
         # Handle the "blocked → no candidates" case cleanly.
         try:
@@ -198,6 +202,32 @@ try:
                 text = f"(Gemini blocked the explanation; block_reason={block_reason})"
             else:
                 text = "(Gemini returned no text candidates – likely blocked by safety settings.)"
+
+        if not text:
+            try:
+                candidates = getattr(resp, "candidates", None) or []
+                out_parts = []
+                for cand in candidates:
+                    content = getattr(cand, "content", None)
+                    if not content:
+                        continue
+                    parts = getattr(content, "parts", None) or []
+                    for part in parts:
+                        t = getattr(part, "text", None)
+                        if t:
+                            out_parts.append(t)
+                text = "".join(out_parts).strip()
+            except Exception:
+                pass
+        if not text:
+            try:
+                prompt_feedback = getattr(resp, "prompt_feedback", None)
+                if prompt_feedback:
+                    text = f"(Gemini returned no text; prompt_feedback={prompt_feedback})"
+            except Exception:
+                pass
+        if not text:
+            text = "(Gemini returned no text candidates.)"
 
     elif PROVIDER == "openai":
         from openai import OpenAI

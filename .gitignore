@@ -1,0 +1,36 @@
+# Credentials and private configuration
+.env
+Settings/.env
+Settings/*.json
+
+# Runtime and user state
+Settings/control.ini
+Settings/overlay_*.ini
+Settings/Screenshots/
+Settings/Explanations/
+Settings/profiles/
+Settings/profiles_explainer/
+Settings/prompts/*
+!Settings/prompts/default_en.txt
+!Settings/prompts/default_with_kanji_reading_en.txt
+Settings/prompts_explain/*
+!Settings/prompts_explain/default_en.txt
+Settings/glossaries/*
+!Settings/glossaries/example/
+!Settings/glossaries/example/*.txt
+*.log
+debug.log
+
+# Local builds and backups
+*.bak
+*.bak-*
+*.build.exe
+*_back*.exe
+Back/
+__pycache__/
+*.py[cod]
+
+# Captures and local test media
+*_cap.png
+Screenshot *.png
+
