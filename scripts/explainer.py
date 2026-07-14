@@ -22,9 +22,9 @@ def atomic_write_text(path: str, text: str):
     with open(tmp, "w", encoding="utf-8", newline="\r\n") as f:
         f.write(text)
     # Retry a few times in case another process has the file open without FILE_SHARE_DELETE
-    for _ in range(10):              # total â‰ˆ 500 ms
+    for _ in range(10):              # total ≈ 500 ms
         try:
-            os.replace(tmp, path)    # atomic on Win/NTFS if target isnâ€™t locked
+            os.replace(tmp, path)    # atomic on Win/NTFS if target isn’t locked
             break
         except PermissionError:
             time.sleep(0.05)
@@ -90,26 +90,42 @@ Input is a short Japanese line (from a JRPG). Produce a concise, readable explan
 No markdown, no code fences.
 
 Vocabulary:
-- word (kana/kanji) â€“ reading â€“ succinct meaning; brief grammar/nuance if relevant
+- word (kana/kanji) – reading – succinct meaning; brief grammar/nuance if relevant
 
 Grammar points:
 - Particles, conjugations, set phrases; show tiny breakdowns when helpful.
 
 Nuance & culture:
-- Politeness level, speech style, cultural/clichÃ© references if present.
+- Politeness level, speech style, cultural/cliché references if present.
 
 Literal gloss (optional):
 - A simple word-by-word gloss.
 
 Natural English paraphrase:
-- 1â€“2 smooth translations that fit likely context.
+- 1–2 smooth translations that fit likely context.
 
 Key takeaways:
-- 2â€“4 bullets to remember.
+- 2–4 bullets to remember.
 
 Japanese:
 {jp}
 """
+
+
+def gemini_safety_settings(types):
+    """Disable Gemini's adjustable content filters for faithful explanation."""
+    return [
+        types.SafetySetting(
+            category=category,
+            threshold=types.HarmBlockThreshold.OFF,
+        )
+        for category in (
+            types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+            types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        )
+    ]
 
 prompt_tpl = BASE_PROMPT
 if EXPLAIN_PROMPT_FILE and os.path.isfile(EXPLAIN_PROMPT_FILE):
@@ -168,10 +184,11 @@ try:
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.2,
+                safety_settings=gemini_safety_settings(types),
             ),
         )
 
-        # Handle the "blocked â†’ no candidates" case cleanly.
+        # Handle the "blocked → no candidates" case cleanly.
         try:
             text = (getattr(resp, "text", "") or "").strip()
         except Exception:
@@ -184,7 +201,7 @@ try:
             if block_reason:
                 text = f"(Gemini blocked the explanation; block_reason={block_reason})"
             else:
-                text = "(Gemini returned no text candidates â€“ likely blocked by safety settings.)"
+                text = "(Gemini returned no text candidates – likely blocked by safety settings.)"
 
         if not text:
             try:
@@ -291,4 +308,3 @@ if save_flag:
         print(f"(Archived) {out_path}")
     except Exception as e:
         print(f"(Archive skipped) Could not write to {out_path}: {e}", file=sys.stderr)
-
