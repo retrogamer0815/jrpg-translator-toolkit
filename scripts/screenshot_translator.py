@@ -3,7 +3,7 @@
 
 """
 JRPG image translator with dual glossaries, Transcript/Translation output,
-and speaker-name header normalization (kanaâ†’romaji fallback).
+and speaker-name header normalization (kana→romaji fallback).
 
 Usage:
   python screenshot_translator.py <image1> [<image2> ...]
@@ -260,7 +260,7 @@ except Exception:
 
 def load_glossary(path) -> List[Tuple[str, str]]:
     """Load 'source -> target' pairs.
-       - Accept separators: '->', 'â†’', tab, ':', '='
+       - Accept separators: '->', '→', tab, ':', '='
        - Accept encodings: utf-8, utf-8-sig, utf-16, utf-16-le, utf-16-be, cp1252, cp932
        - Ignore blanks and lines starting with '#'
     """
@@ -280,7 +280,7 @@ def load_glossary(path) -> List[Tuple[str, str]]:
     if text is None:
         return entries
 
-    seps = ["->", "â†’", "\t", ":", "="]
+    seps = ["->", "→", "\t", ":", "="]
     for raw in text.splitlines():
         line = raw.replace("\ufeff", "").strip()
         if not line or line.startswith("#"):
@@ -297,9 +297,9 @@ def load_glossary(path) -> List[Tuple[str, str]]:
 
 
 def apply_en_glossary(text: str, en2en: List[Tuple[str, str]]) -> str:
-    """Apply ENâ†’EN replacements.
+    """Apply EN→EN replacements.
        - Phrases: literal, case-insensitive
-       - Single tokens: whole word + optional plural/possessive suffix kept (s, 's, â€™s)
+       - Single tokens: whole word + optional plural/possessive suffix kept (s, 's, ’s)
     """
     out = text
     for src, dst in en2en:
@@ -308,7 +308,7 @@ def apply_en_glossary(text: str, en2en: List[Tuple[str, str]]) -> str:
             out = pattern.sub(dst, out)
         else:
             pattern = re.compile(
-                rf"\b{re.escape(src)}(?P<suf>s|\'s|â€™s)?\b",
+                rf"\b{re.escape(src)}(?P<suf>s|\'s|’s)?\b",
                 flags=re.IGNORECASE
             )
             out = pattern.sub(lambda m: dst + (m.group("suf") or ""), out)
@@ -331,7 +331,7 @@ def _mark_guessed_pronouns(text: str) -> str:
 
     def repl(m: "re.Match[str]") -> str:
         span = m.group(1)
-        return f"âŸ¦iâŸ§{span}âŸ¦/iâŸ§" if italics_on else span
+        return f"⟦i⟧{span}⟦/i⟧" if italics_on else span
 
     return pattern.sub(repl, text)
 
@@ -345,10 +345,10 @@ def _mark_translation_name_line(en_block: str) -> str:
     if idx is None:
         return en_block
     first = lines[idx].strip()
-    if len(first) >= 2 and first[0] == "ã€Œ" and first[-1] == "ã€":
+    if len(first) >= 2 and first[0] == "「" and first[-1] == "」":
         inner = first[1:-1].strip()
         left = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
-        lines[idx] = f"{left}âŸ¦nameâŸ§{inner}âŸ¦/nameâŸ§"
+        lines[idx] = f"{left}⟦name⟧{inner}⟦/name⟧"
         return "\n".join(lines)
     return en_block
 
@@ -362,52 +362,52 @@ def _mark_transcript_name_line(jp_block: str) -> str:
     if idx is None:
         return jp_block
     first = lines[idx].strip()
-    if len(first) >= 2 and first[0] == "ã€Œ" and first[-1] == "ã€":
+    if len(first) >= 2 and first[0] == "「" and first[-1] == "」":
         inner = first[1:-1].strip()
         left = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
-        lines[idx] = f"{left}âŸ¦nameâŸ§{inner}âŸ¦/nameâŸ§"
+        lines[idx] = f"{left}⟦name⟧{inner}⟦/name⟧"
         return "\n".join(lines)
     return jp_block
 
 
 # ==============================================================================
-# Kana â†’ romaji (fallback name romanization)
+# Kana → romaji (fallback name romanization)
 # ==============================================================================
 
 KATAKANA_ROMAJI = {
-    "ã‚¢": "a", "ã‚¤": "i", "ã‚¦": "u", "ã‚¨": "e", "ã‚ª": "o",
-    "ã‚«": "ka", "ã‚­": "ki", "ã‚¯": "ku", "ã‚±": "ke", "ã‚³": "ko",
-    "ã‚µ": "sa", "ã‚·": "shi", "ã‚¹": "su", "ã‚»": "se", "ã‚½": "so",
-    "ã‚¿": "ta", "ãƒ": "chi", "ãƒ„": "tsu", "ãƒ†": "te", "ãƒˆ": "to",
-    "ãƒŠ": "na", "ãƒ‹": "ni", "ãƒŒ": "nu", "ãƒ": "ne", "ãƒŽ": "no",
-    "ãƒ": "ha", "ãƒ’": "hi", "ãƒ•": "fu", "ãƒ˜": "he", "ãƒ›": "ho",
-    "ãƒž": "ma", "ãƒŸ": "mi", "ãƒ ": "mu", "ãƒ¡": "me", "ãƒ¢": "mo",
-    "ãƒ¤": "ya", "ãƒ¦": "yu", "ãƒ¨": "yo",
-    "ãƒ©": "ra", "ãƒª": "ri", "ãƒ«": "ru", "ãƒ¬": "re", "ãƒ­": "ro",
-    "ãƒ¯": "wa", "ãƒ²": "o", "ãƒ³": "n",
-    "ã‚¬": "ga", "ã‚®": "gi", "ã‚°": "gu", "ã‚²": "ge", "ã‚´": "go",
-    "ã‚¶": "za", "ã‚¸": "ji", "ã‚º": "zu", "ã‚¼": "ze", "ã‚¾": "zo",
-    "ãƒ€": "da", "ãƒ‚": "ji", "ãƒ…": "zu", "ãƒ‡": "de", "ãƒ‰": "do",
-    "ãƒ": "ba", "ãƒ“": "bi", "ãƒ–": "bu", "ãƒ™": "be", "ãƒœ": "bo",
-    "ãƒ‘": "pa", "ãƒ”": "pi", "ãƒ—": "pu", "ãƒš": "pe", "ãƒ": "po",
-    "ãƒ´": "vu",
-    "ã‚¡": "a", "ã‚£": "i", "ã‚¥": "u", "ã‚§": "e", "ã‚©": "o",
-    "ãƒ£": "ya", "ãƒ¥": "yu", "ãƒ§": "yo",
-    "ãƒ¼": "-",
+    "ア": "a", "イ": "i", "ウ": "u", "エ": "e", "オ": "o",
+    "カ": "ka", "キ": "ki", "ク": "ku", "ケ": "ke", "コ": "ko",
+    "サ": "sa", "シ": "shi", "ス": "su", "セ": "se", "ソ": "so",
+    "タ": "ta", "チ": "chi", "ツ": "tsu", "テ": "te", "ト": "to",
+    "ナ": "na", "ニ": "ni", "ヌ": "nu", "ネ": "ne", "ノ": "no",
+    "ハ": "ha", "ヒ": "hi", "フ": "fu", "ヘ": "he", "ホ": "ho",
+    "マ": "ma", "ミ": "mi", "ム": "mu", "メ": "me", "モ": "mo",
+    "ヤ": "ya", "ユ": "yu", "ヨ": "yo",
+    "ラ": "ra", "リ": "ri", "ル": "ru", "レ": "re", "ロ": "ro",
+    "ワ": "wa", "ヲ": "o", "ン": "n",
+    "ガ": "ga", "ギ": "gi", "グ": "gu", "ゲ": "ge", "ゴ": "go",
+    "ザ": "za", "ジ": "ji", "ズ": "zu", "ゼ": "ze", "ゾ": "zo",
+    "ダ": "da", "ヂ": "ji", "ヅ": "zu", "デ": "de", "ド": "do",
+    "バ": "ba", "ビ": "bi", "ブ": "bu", "ベ": "be", "ボ": "bo",
+    "パ": "pa", "ピ": "pi", "プ": "pu", "ペ": "pe", "ポ": "po",
+    "ヴ": "vu",
+    "ァ": "a", "ィ": "i", "ゥ": "u", "ェ": "e", "ォ": "o",
+    "ャ": "ya", "ュ": "yu", "ョ": "yo",
+    "ー": "-",
 }
 
 DIGRAPHS = {
-    "ã‚­ãƒ£": "kya", "ã‚­ãƒ¥": "kyu", "ã‚­ãƒ§": "kyo",
-    "ã‚·ãƒ£": "sha", "ã‚·ãƒ¥": "shu", "ã‚·ãƒ§": "sho",
-    "ã‚¸ãƒ£": "ja", "ã‚¸ãƒ¥": "ju", "ã‚¸ãƒ§": "jo",
-    "ãƒãƒ£": "cha", "ãƒãƒ¥": "chu", "ãƒãƒ§": "cho",
-    "ãƒ‹ãƒ£": "nya", "ãƒ‹ãƒ¥": "nyu", "ãƒ‹ãƒ§": "nyo",
-    "ãƒ’ãƒ£": "hya", "ãƒ’ãƒ¥": "hyu", "ãƒ’ãƒ§": "hyo",
-    "ãƒŸãƒ£": "mya", "ãƒŸãƒ¥": "myu", "ãƒŸãƒ§": "myo",
-    "ãƒªãƒ£": "rya", "ãƒªãƒ¥": "ryu", "ãƒªãƒ§": "ryo",
-    "ã‚®ãƒ£": "gya", "ã‚®ãƒ¥": "gyu", "ã‚®ãƒ§": "gyo",
-    "ãƒ“ãƒ£": "bya", "ãƒ“ãƒ¥": "byu", "ãƒ“ãƒ§": "byo",
-    "ãƒ”ãƒ£": "pya", "ãƒ”ãƒ¥": "pyu", "ãƒ”ãƒ§": "pyo",
+    "キャ": "kya", "キュ": "kyu", "キョ": "kyo",
+    "シャ": "sha", "シュ": "shu", "ショ": "sho",
+    "ジャ": "ja", "ジュ": "ju", "ジョ": "jo",
+    "チャ": "cha", "チュ": "chu", "チョ": "cho",
+    "ニャ": "nya", "ニュ": "nyu", "ニョ": "nyo",
+    "ヒャ": "hya", "ヒュ": "hyu", "ヒョ": "hyo",
+    "ミャ": "mya", "ミュ": "myu", "ミョ": "myo",
+    "リャ": "rya", "リュ": "ryu", "リョ": "ryo",
+    "ギャ": "gya", "ギュ": "gyu", "ギョ": "gyo",
+    "ビャ": "bya", "ビュ": "byu", "ビョ": "byo",
+    "ピャ": "pya", "ピュ": "pyu", "ピョ": "pyo",
 }
 
 
@@ -417,19 +417,19 @@ def hira_to_kata(s: str) -> str:
         code = ord(ch)
         if 0x3041 <= code <= 0x3096:
             out.append(chr(code + 0x60))
-        elif ch == "ã‚”":
-            out.append("ãƒ´")
+        elif ch == "ゔ":
+            out.append("ヴ")
         else:
             out.append(ch)
     return "".join(out)
 
 
 def is_all_kana(s: str) -> bool:
-    return re.fullmatch(r"[ã-ã‚–ã‚¡-ãƒ¶ãƒ¼ãƒ»]+", s) is not None
+    return re.fullmatch(r"[ぁ-ゖァ-ヶー・]+", s) is not None
 
 
 def katakana_to_romaji(name: str) -> str:
-    parts = name.split("ãƒ»")
+    parts = name.split("・")
     rom_parts = []
     for segment in parts:
         seg = segment
@@ -441,14 +441,14 @@ def katakana_to_romaji(name: str) -> str:
                 i += 2
                 continue
             ch = seg[i]
-            if ch == "ãƒƒ" and i + 1 < len(seg):
+            if ch == "ッ" and i + 1 < len(seg):
                 nxt = seg[i + 1:i + 3] if i + 3 <= len(seg) and seg[i + 1:i + 3] in DIGRAPHS else seg[i + 1]
                 base = DIGRAPHS.get(nxt) or KATAKANA_ROMAJI.get(nxt, "")
                 if base:
                     rom += base[0]
                 i += 1
                 continue
-            if ch == "ãƒ¼":
+            if ch == "ー":
                 if rom:
                     for v in "aeiou"[::-1]:
                         if rom.endswith(v):
@@ -477,12 +477,12 @@ Do NOT use Markdown or code fences. Never output ``` or language tags.
 Output EXACTLY two sections with these literal headings:
 
 Transcript:
-<Japanese transcription here, preserving all punctuation, line breaks, and full-width brackets ã€Œã€ as-is. Only text inside the dialogue/message box(es). Do not add or remove characters. If the speaker name is shown as a distinct header line without brackets, wrap it with Japanese corner brackets: ã€Œnameã€.>
+<Japanese transcription here, preserving all punctuation, line breaks, and full-width brackets 「」 as-is. Only text inside the dialogue/message box(es). Do not add or remove characters. If the speaker name is shown as a distinct header line without brackets, wrap it with Japanese corner brackets: 「name」.>
 
 (blank line)
 
 Translation:
-<Fluent English translation of the Transcript block. If a speaker/tag line exists, output it on its own line inside corner brackets, e.g., ã€ŒGus from Castaã€. Apply the rule Xã®Y â†’ â€œY from Xâ€/â€œY of Xâ€ only when it is a speaker identifier. Ignore everything outside the box. If no box text exists, output exactly: No Japanese text found.>
+<Fluent English translation of the Transcript block. If a speaker/tag line exists, output it on its own line inside corner brackets, e.g., 「Gus from Casta」. Apply the rule XのY → “Y from X”/“Y of X” only when it is a speaker identifier. Ignore everything outside the box. If no box text exists, output exactly: No Japanese text found.>
 """
 
 
@@ -537,9 +537,9 @@ def load_system_prompt() -> str:
 def build_jp2en_prompt(jp2en: List[Tuple[str, str]]) -> str:
     if not jp2en:
         return ""
-    lines = ["When translating, apply these exact JPâ†’EN mappings wherever they appear:"]
+    lines = ["When translating, apply these exact JP→EN mappings wherever they appear:"]
     for jp, en in jp2en:
-        lines.append(f"- {jp} â†’ {en}")
+        lines.append(f"- {jp} → {en}")
     return "\n".join(lines)
 
 
@@ -567,7 +567,7 @@ def make_messages_for_openai(image_paths: List[str], jp2en: List[Tuple[str, str]
                 "image_url": {"url": file_to_data_url(abs_p)}
             })
         except Exception as e:
-            content.append({"type": "text", "text": f"(Failed to read image: {abs_p} â€“ {e})"})
+            content.append({"type": "text", "text": f"(Failed to read image: {abs_p} – {e})"})
     if not content:
         content.append({"type": "text", "text": "No image provided."})
 
@@ -597,13 +597,13 @@ def gemini_image_parts(paths: List[str]):
 # Output post-processing (sanitize / enforce / name header normalization)
 # ==============================================================================
 
-OPEN_BRACKETS = "ã€Œã€Žã€ˆã€Šï¼»ï¼ˆ[<"
-CLOSE_BRACKETS = "ã€ã€ã€‰ã€‹ï¼½ï¼‰]>"
+OPEN_BRACKETS = "「『〈《［（[<"
+CLOSE_BRACKETS = "」』〉》］）]>"
 OPEN_CLASS = "[" + re.escape(OPEN_BRACKETS) + "]"
 CLOSE_CLASS = "[" + re.escape(CLOSE_BRACKETS) + "]"
 
 NAME_LINE_RE = re.compile(rf"^\s*{OPEN_CLASS}\s*(.+?)\s*{CLOSE_CLASS}\s*$")
-INLINE_HEADER_RE = re.compile(rf"^\s*{OPEN_CLASS}\s*(.+?)\s*{CLOSE_CLASS}\s*[:ï¼š]?\s*(.+)$")
+INLINE_HEADER_RE = re.compile(rf"^\s*{OPEN_CLASS}\s*(.+?)\s*{CLOSE_CLASS}\s*[:：]?\s*(.+)$")
 
 
 def strip_code_fences(s: str) -> str:
@@ -662,7 +662,7 @@ def normalize_jp_speaker_line(jp_block: str) -> Tuple[str, str]:
     m = NAME_LINE_RE.match(first)
     if m:
         name = m.group(1).strip()
-        lines[idx] = f"ã€Œ{name}ã€"
+        lines[idx] = f"「{name}」"
         return "\n".join(lines).strip(), name
 
     return jp_block.strip(), ""
@@ -691,12 +691,12 @@ def normalize_translation_name_line(en_block: str, jp2en: List[Tuple[str, str]],
     if m:
         name = m.group(1).strip()
         name_en = translate_jp_name_to_en(name, jp2en)
-        lines[idx] = f"ã€Œ{name_en}ã€"
+        lines[idx] = f"「{name_en}」"
         return "\n".join(lines).strip()
 
     if jp_name_hint:
         name_en = translate_jp_name_to_en(jp_name_hint, jp2en)
-        lines.insert(idx, f"ã€Œ{name_en}ã€")
+        lines.insert(idx, f"「{name_en}」")
         return "\n".join(lines).strip()
 
     return en_block.strip()
@@ -738,6 +738,22 @@ def call_openai(image_paths: List[str], jp2en: List[Tuple[str, str]]) -> str:
     return resp.choices[0].message.content or ""
 
 
+def gemini_safety_settings(types):
+    """Disable Gemini's adjustable content filters for faithful translation."""
+    return [
+        types.SafetySetting(
+            category=category,
+            threshold=types.HarmBlockThreshold.OFF,
+        )
+        for category in (
+            types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+            types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        )
+    ]
+
+
 def call_gemini(image_paths: List[str], jp2en: List[Tuple[str, str]]) -> str:
     from google.genai import types
 
@@ -769,6 +785,7 @@ def call_gemini(image_paths: List[str], jp2en: List[Tuple[str, str]]) -> str:
         config=types.GenerateContentConfig(
             system_instruction=sys_prompt,
             temperature=0,
+            safety_settings=gemini_safety_settings(types),
         ),
     )
 
@@ -884,4 +901,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
