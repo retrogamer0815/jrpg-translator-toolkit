@@ -160,7 +160,7 @@ are ignored by Git.
 | File | Purpose |
 | --- | --- |
 | `JRPG_Translator.ahk` | Main control panel and workflow orchestration |
-| `bin/jrpg_overlay_C.ahk` | Translator and Explainer overlay windows |
+| `bin/overlay.ahk` | Translator and Explainer overlay windows |
 | `bin/overlay.exe` | Compiled Translator and Explainer overlay used by release builds |
 | `scripts/screenshot_translator.py` | Screenshot vision translation and output formatting |
 | `scripts/live_audio_translator.py` | Direct streaming audio translation |
@@ -172,7 +172,7 @@ Runtime messages and generated overlay text are exchanged through
 ## Running from Source
 
 Install AutoHotkey v2 and run `JRPG_Translator.ahk`. The source version launches
-`bin/jrpg_overlay_C.ahk`; compiled releases launch `bin/overlay.exe`.
+`bin/overlay.ahk`; compiled releases launch `bin/overlay.exe`.
 The Python scripts require Python 3.12 and their listed dependencies, or the
 portable Python environment included in a release package.
 
