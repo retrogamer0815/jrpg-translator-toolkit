@@ -67,7 +67,6 @@ GOOGLE_API_KEY = _get_key(
 TEMP_DIR = os.environ.get("TEMP") or tempfile.gettempdir()
 OVERLAY_DIR = os.path.join(TEMP_DIR, "JRPG_Overlay")
 AUDIO_TXT = os.path.join(OVERLAY_DIR, "audio.txt")
-PAUSE_FLAG = os.path.join(OVERLAY_DIR, "audio.pause")
 LOG_TXT = os.path.join(OVERLAY_DIR, "audio_log.txt")
 ERR_TXT = os.path.join(OVERLAY_DIR, "audio_error.txt")
 os.makedirs(OVERLAY_DIR, exist_ok=True)
@@ -205,9 +204,6 @@ async def audio_sender(ws, speaker, make_event):
     blocks = capture_blocks(speaker)
     while True:
         chunk = await asyncio.to_thread(next, blocks)
-        if os.path.exists(PAUSE_FLAG):
-            await asyncio.sleep(BLOCK_DUR)
-            continue
         await ws.send(json.dumps(make_event(chunk)))
 
 
@@ -409,4 +405,3 @@ if __name__ == "__main__":
             pass
         os._exit(0)
     main()
-

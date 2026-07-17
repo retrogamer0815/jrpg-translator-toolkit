@@ -138,13 +138,19 @@ Settings/
 Overlay size, position, appearance, and scrolling behavior are stored
 independently for the Translator and Explainer.
 
-The source repository and release include three default prompt profiles:
+The source repository and release include three prompt families for every
+supported output language:
 
-| Prompt file | Purpose |
+| Prompt pattern | Purpose |
 | --- | --- |
-| `Settings/prompts/default_en.txt` | English screenshot translation with a plain transcript |
-| `Settings/prompts/default_with_kanji_reading_en.txt` | English screenshot translation with hiragana readings added to kanji words |
-| `Settings/prompts_explain/default_en.txt` | English Japanese-learning explanation |
+| `Settings/prompts/default_<language>.txt` | Screenshot translation with a plain Japanese transcript |
+| `Settings/prompts/default_with_kanji_reading_<language>.txt` | Screenshot translation with hiragana readings added to kanji words |
+| `Settings/prompts_explain/default_<language>.txt` | Japanese-learning explanation in the selected language |
+
+Available language labels are `en`, `de`, `fr`, `es`, `it`, `pt`, `nl`, `pl`,
+`ru`, `uk`, `ko`, `zh-CN`, `zh-TW`, and `ja`. The screenshot prompts retain the
+literal `Transcript:` and `Translation:` headings because the output parser uses
+them; the translated content follows the language named by the profile.
 
 Additional prompt profiles created through the control panel remain local and
 are ignored by Git.
@@ -155,6 +161,7 @@ are ignored by Git.
 | --- | --- |
 | `JRPG_Translator.ahk` | Main control panel and workflow orchestration |
 | `bin/jrpg_overlay_C.ahk` | Translator and Explainer overlay windows |
+| `bin/overlay.exe` | Compiled Translator and Explainer overlay used by release builds |
 | `scripts/screenshot_translator.py` | Screenshot vision translation and output formatting |
 | `scripts/live_audio_translator.py` | Direct streaming audio translation |
 | `scripts/explainer.py` | Japanese-learning explanations |
@@ -165,7 +172,7 @@ Runtime messages and generated overlay text are exchanged through
 ## Running from Source
 
 Install AutoHotkey v2 and run `JRPG_Translator.ahk`. The source version launches
-`bin/jrpg_overlay_C.ahk`; compiled releases launch the corresponding executable.
+`bin/jrpg_overlay_C.ahk`; compiled releases launch `bin/overlay.exe`.
 The Python scripts require Python 3.12 and their listed dependencies, or the
 portable Python environment included in a release package.
 
@@ -199,4 +206,3 @@ credentials, personal profiles, screenshots, logs, or other local settings.
 ## License
 
 The project source is released under the MIT License. See [LICENSE](LICENSE).
-

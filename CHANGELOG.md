@@ -2,6 +2,46 @@
 
 All notable changes to JRPG Translator are documented here.
 
+## 0.7.5 - In development
+
+This is the current development source for the next JRPG Translator release.
+
+### Control panel and audio
+
+- Replaced the separate Start Audio, Toggle Listening, and status area with one
+  compact `Audio Translation On/Off` button that reflects the active state.
+- Added non-activating popup confirmations when audio translation starts or
+  stops, including when triggered from a controller-mapped hotkey.
+- Added a background-start mode for front ends such as Big Box so launching the
+  translator alongside a game does not expose the control panel or foreground
+  the Windows taskbar.
+- Improved startup focus handling so emulators retain control while configured
+  overlays open automatically.
+- Simplified Translator and Explainer appearance settings to one window color
+  while retaining a Windows 10 border fallback.
+- Reworded Terminology Overrides around language-neutral `JP -> TL` and
+  `TL -> TL` glossary profiles, where TL means the selected target language.
+
+### Overlay behavior
+
+- Standardized the compiled overlay name as `bin/overlay.exe` while source runs
+  continue to use the AutoHotkey overlay script.
+- Prevented the Translator overlay from taking focus or restoring a blinking
+  text caret when opened through the control panel.
+- Corrected independent Translator and Explainer startup visibility and
+  always-on-top behavior when both share the same overlay implementation.
+- Preserved existing Translator colors and speaker-name formatting when the
+  Explainer is opened or recreated.
+- Improved request-status glyph placement so it does not obscure translated
+  text near the upper-right corner.
+- Cleaned up explanation-ready notifications and improved overlay theme refresh
+  isolation.
+
+### Documentation
+
+- Updated source-build paths and component names for the standardized overlay.
+- Clarified multilingual terminology overrides and their profile format.
+
 ## 0.7.0 - 2026-07-13
 
 This is a major controller-usability, live-audio, overlay, and interface update
@@ -114,4 +154,3 @@ over v0.6.1.
 
 - Preserved capture-region coordinates when saving control-panel settings.
 - Improved capture completion detection when selecting the same region again.
-

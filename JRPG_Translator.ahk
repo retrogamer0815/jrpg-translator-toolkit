@@ -1,9 +1,71 @@
-#Requires AutoHotkey v2.0
-#SingleInstance Force
+﻿#Requires AutoHotkey v2.0
+#SingleInstance Off
 #Warn
 #NoTrayIcon
 ; =; === Taskbar grouping: shared AppUserModelID ===
 DllCall("shell32\SetCurrentProcessExplicitAppUserModelID", "wstr", "JRPGTranslator", "int")
+
+; Big Box and other front ends can pass --background to initialize everything
+; without showing or activating the control panel.
+global CP_BACKGROUND_START := false
+for __cpArg in A_Args {
+    if (StrLower(__cpArg) = "--background") {
+        CP_BACKGROUND_START := true
+        break
+    }
+}
+
+; Conditional single-instance handling: a background duplicate exits silently,
+; while a normal launch brings the existing control panel forward.
+global __CP_MUTEX := DllCall("kernel32\CreateMutexW", "ptr", 0, "int", 0
+    , "wstr", "Local\JRPGTranslatorControlPanel", "ptr")
+global __CP_ALREADY_RUNNING := (A_LastError = 183) ; ERROR_ALREADY_EXISTS
+global CPPreviousForegroundHwnd := 0
+
+CloseControlPanelMutex(*) {
+    global __CP_MUTEX
+    if (__CP_MUTEX) {
+        DllCall("kernel32\CloseHandle", "ptr", __CP_MUTEX)
+        __CP_MUTEX := 0
+    }
+}
+
+ShowWindowNoActivate(hwnd) {
+    if !hwnd
+        return false
+    static SW_SHOWNOACTIVATE := 4
+    static SWP_NOSIZE := 0x0001, SWP_NOMOVE := 0x0002
+    static SWP_NOZORDER := 0x0004, SWP_NOACTIVATE := 0x0010
+    static SWP_SHOWWINDOW := 0x0040
+    DllCall("user32\ShowWindow", "ptr", hwnd, "int", SW_SHOWNOACTIVATE)
+    DllCall("user32\SetWindowPos", "ptr", hwnd, "ptr", 0
+        , "int", 0, "int", 0, "int", 0, "int", 0
+        , "uint", SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+    return true
+}
+
+OnExit(CloseControlPanelMutex)
+
+if (__CP_ALREADY_RUNNING) {
+    if (!CP_BACKGROUND_START) {
+        __cpOldDhw := A_DetectHiddenWindows
+        __cpOldTitleMode := A_TitleMatchMode
+        try {
+            DetectHiddenWindows true
+            SetTitleMatchMode 3
+            __cpExistingHwnd := WinExist("JRPG Translator")
+            if (__cpExistingHwnd) {
+                DllCall("user32\ShowWindow", "ptr", __cpExistingHwnd, "int", 5) ; SW_SHOW
+                try WinActivate("ahk_id " __cpExistingHwnd)
+            }
+        } finally {
+            SetTitleMatchMode __cpOldTitleMode
+            DetectHiddenWindows __cpOldDhw
+        }
+    }
+    ExitApp
+}
+
 SafeCall(fn) {
     Try
         fn()
@@ -175,10 +237,21 @@ CPComboArrowClick(cpComboHwnd, *) {
     CPShowCombo(cpComboHwnd, !CPComboDropped(cpComboHwnd))
 }
 
+CPGetControlHwnds() {
+    global ui
+    cpControlsOldDetectHidden := A_DetectHiddenWindows
+    try {
+        DetectHiddenWindows true
+        return WinGetControlsHwnd("ahk_id " ui.Hwnd)
+    } finally {
+        DetectHiddenWindows cpControlsOldDetectHidden
+    }
+}
+
 CPCreateComboArrowOverlays() {
     global ui, CPComboArrowOverlays
     CPComboArrowOverlays := []
-    for cpComboHwnd in WinGetControlsHwnd("ahk_id " ui.Hwnd) {
+    for cpComboHwnd in CPGetControlHwnds() {
         cpComboClass := ""
         try cpComboClass := WinGetClass("ahk_id " cpComboHwnd)
         if (cpComboClass != "ComboBox")
@@ -440,7 +513,7 @@ CPApplyControlPanelTheme(forceRedraw := true) {
     CPApplyDarkTitleBar(ui.Hwnd, cpApplyDark)
 
     try {
-        for cpApplyHwnd in WinGetControlsHwnd("ahk_id " ui.Hwnd)
+        for cpApplyHwnd in CPGetControlHwnds()
             CPApplyThemeToControl(cpApplyHwnd, cpApplyDark)
     }
 
@@ -524,7 +597,6 @@ appDir      := portableRoot
 iniPath     := appDir "\control.ini"
 envPath     := appDir "\.env"
 overlayDir  := A_Temp "\JRPG_Overlay"      ; runtime-only stuff stays in temp
-pauseFlag   := overlayDir "\audio.pause"
 profilesDir := appDir "\profiles"
 ; --- Explanation profiles subfolder ---
 profilesDir_EW := profilesDir "\explainer"
@@ -558,7 +630,6 @@ Rebind_LaunchExplainerRequest() {
 ; Keeps the current registration for explain-last so we can unbind/rebind on changes
 global __HK_EXPLAIN_LAST := ""
 global __HK_STARTSTOP_AUDIO := ""
-global __HK_TOGGLE_LISTEN := ""
 global __HK_HIDE_SHOW_CP := ""
 Rebind_ExplainLastTranslation() {
     global __HK_EXPLAIN_LAST, iniPath
@@ -606,28 +677,6 @@ Rebind_StartStopAudio() {
     }
 }
 
-; Bind/unbind the Toggle Listening global hotkey
-Rebind_ToggleListening() {
-    global __HK_TOGGLE_LISTEN, iniPath
-    newHK := Trim(IniRead(iniPath, "hotkeys", "toggle_listening", ""))
-
-    ; Unbind previous, if any (guard for first run)
-    if (IsSet(__HK_TOGGLE_LISTEN) && __HK_TOGGLE_LISTEN != "") {
-        try Hotkey(__HK_TOGGLE_LISTEN, "Off")
-        __HK_TOGGLE_LISTEN := ""
-    }
-
-    ; Bind fresh if configured
-    if (newHK != "") {
-        try {
-            Hotkey(newHK, (*) => SafeCall(ToggleListening))
-            __HK_TOGGLE_LISTEN := newHK
-        } catch as ex {
-            DbgCP("Failed to bind toggle_listening hotkey '" newHK "': " ex.Message)
-        }
-    }
-}
-
 ; Bind/unbind the Show/Hide Control Panel global hotkey
 Rebind_HideShowControlPanel() {
     global __HK_HIDE_SHOW_CP, iniPath
@@ -659,7 +708,9 @@ ToggleControlPanel(*) {
         if DllCall("IsWindowVisible", "ptr", ui.Hwnd, "int") {
             SavePanelBounds()
             ui.Hide()
+            SetTimer(RestoreControlPanelReturnWindow, -1)
         } else {
+            CaptureControlPanelReturnWindow()
             ui.Show()
             try WinActivate("ahk_id " ui.Hwnd)
             try (IsSet(ddlProv) && ddlProv) ? ddlProv.Focus() : 0
@@ -675,8 +726,28 @@ HideControlPanel(*) {
         if IsSet(ui) && ui && ui.Hwnd {
             SavePanelBounds()
             ui.Hide()
+            SetTimer(RestoreControlPanelReturnWindow, -1)
         }
     }
+}
+
+CaptureControlPanelReturnWindow() {
+    global ui, CPPreviousForegroundHwnd
+    cpForegroundHwnd := DllCall("user32\GetForegroundWindow", "ptr")
+    if (cpForegroundHwnd && (!IsSet(ui) || !ui || cpForegroundHwnd != ui.Hwnd))
+        CPPreviousForegroundHwnd := cpForegroundHwnd
+}
+
+RestoreControlPanelReturnWindow(*) {
+    global ui, CPPreviousForegroundHwnd
+    cpReturnHwnd := CPPreviousForegroundHwnd
+    CPPreviousForegroundHwnd := 0
+    if (!cpReturnHwnd
+     || (IsSet(ui) && ui && cpReturnHwnd = ui.Hwnd)
+     || !DllCall("user32\IsWindow", "ptr", cpReturnHwnd, "int"))
+        return
+    if !DllCall("user32\SetForegroundWindow", "ptr", cpReturnHwnd, "int")
+        try WinActivate("ahk_id " cpReturnHwnd)
 }
 
 CPFocusedControl() {
@@ -1121,9 +1192,9 @@ CPSetFocusHwnd(hwnd) {
 }
 
 CPActionRowHwnds() {
-    global btnOv, btnOvClose, btnAudio, btnToggle, btnExplainerLaunch, btnExplainerClose
+    global btnOv, btnOvClose, btnAudio, btnExplainerLaunch, btnExplainerClose
     row := []
-    for ctrl in [btnOv, btnOvClose, btnAudio, btnToggle, btnExplainerLaunch, btnExplainerClose] {
+    for ctrl in [btnOv, btnOvClose, btnAudio, btnExplainerLaunch, btnExplainerClose] {
         try {
             if (ctrl && ctrl.Hwnd && CPHwndIsFocusable(ctrl.Hwnd))
                 row.Push(ctrl.Hwnd)
@@ -1396,10 +1467,9 @@ global hotkeyActions := [
 	"hide_show_control_panel",
 	"take_screenshot",
 	"screenshot_translation", 
-    "launch_explainer_request",
+	"launch_explainer_request",
 	"recapture_region",
-	"start_stop_audio",
-	"toggle_listening"
+	"start_stop_audio"
 ]
 
 global hotkeyLabels := Map(
@@ -1412,8 +1482,7 @@ global hotkeyLabels := Map(
     "screenshot_translation",     "Translate Screenshots",
 	"launch_explainer_request",   "Launch Explainer + Req.",
 	"recapture_region",           "Recapture Region",
-	"start_stop_audio",           "Start/Stop Audio",
-	"toggle_listening",           "Toggle Listening"
+	"start_stop_audio",           "Audio Translation On/Off"
 )
 
 global hotkeyDefaults := Map(
@@ -1426,8 +1495,7 @@ global hotkeyDefaults := Map(
     "screenshot_translation",     "^+d",    ; Ctrl+Shift+D
     "launch_explainer_request",   "^+a",    ; Ctrl+Shift+A
     "recapture_region",           "^+r",    ; Ctrl+Shift+R
-    "start_stop_audio",           "^+l",    ; Ctrl+Shift+L
-	"toggle_listening",           "^+q",    ; Ctrl+Shift+Q
+	"start_stop_audio",           "^+l"     ; Ctrl+Shift+L
 )
 
 ; UI control maps for later wiring (Change/Disable/Default)
@@ -1458,7 +1526,7 @@ if !DirExist(glossariesDir)
 ; -------- defaults --------
 defPython       := ".\python\python.exe"
 defAudioPy      := ".\scripts\live_audio_translator.py"
-defOverlay      := A_IsCompiled ? ".\bin\jrpg_overlay_C.exe" : ".\bin\jrpg_overlay_C.ahk"
+defOverlay      := A_IsCompiled ? ".\bin\overlay.exe" : ".\bin\jrpg_overlay_C.ahk"
 defImgPy        := ".\scripts\screenshot_translator.py"
 defExplainPy    := ".\scripts\explainer.py"
 defCaptureDir   := ".\Settings\Screenshots"
@@ -1466,8 +1534,8 @@ defOverlayTrans := 255
 
 ; overlay color defaults
 defBoxBg  := "102040"
-defBdrOut := "F8F8F8"
-defBdrIn  := "84A9FF"
+defBdrOut := defBoxBg
+defBdrIn  := defBoxBg
 defTxtCol := "FFFFFF"
 defNameCol := "FFD166"  ; default speaker name color (soft amber)
 
@@ -1485,8 +1553,8 @@ defFontSize := 21
 defT := Map( ; Translator overlay -> section [cfg]
     "overlayTrans", 253
   , "boxBg",       0x000044
-  , "bdrOut",      0x1A1AE6
-  , "bdrIn",       0x0000A0
+  , "bdrOut",      0x000044
+  , "bdrIn",       0x000044
   , "txtColor",    0xFFFFFF
   , "bdrOutW",     0
   , "bdrInW",      0
@@ -1497,8 +1565,8 @@ defT := Map( ; Translator overlay -> section [cfg]
 defE := Map( ; Explainer overlay -> section [cfg_explainer]
     "overlayTrans", 253
   , "boxBg",       0x000000
-  , "bdrOut",      0xFFFFFF
-  , "bdrIn",       0xFFFFFF
+  , "bdrOut",      0x000000
+  , "bdrIn",       0x000000
   , "txtColor",    0xFFFFFF
   , "bdrOutW",     0
   , "bdrInW",      0
@@ -1582,11 +1650,44 @@ global CPFocusVisualNavHwnd := 0
 ; Trim everything we read from the INI to avoid invisible whitespace / BOM residue issues.
 Load(k, d, s := "cfg") => Trim(IniRead(iniPath, s, k, d))
 
+SyncUnifiedWindowAppearance() {
+    global boxBgHex, bdrOutHex, bdrInHex, bdrOutW, bdrInW
+    global boxBgHex_EW, bdrOutHex_EW, bdrInHex_EW, bdrOutW_EW, bdrInW_EW
+
+    bdrOutHex := boxBgHex
+    bdrInHex := boxBgHex
+    bdrOutW := 0
+    bdrInW := 0
+
+    bdrOutHex_EW := boxBgHex_EW
+    bdrInHex_EW := boxBgHex_EW
+    bdrOutW_EW := 0
+    bdrInW_EW := 0
+}
+
 pythonExe       := Load("pythonExe",        defPython)
 audioScript     := Load("audioScript",      defAudioPy)
 if RegExMatch(StrLower(audioScript), "(^|\\|/|^\.\x5c)scripts[\\/]+audio_translator\.py$")
     audioScript := defAudioPy
 overlayAhk      := Load("overlayAhk",       defOverlay)
+if (A_IsCompiled) {
+    ; Migrate release configurations from the former executable names while
+    ; leaving genuinely custom overlay paths untouched.
+    __overlayPathNormalized := StrLower(StrReplace(Trim(overlayAhk), "/", "\"))
+    __legacyOverlayPaths := [
+        ".\bin\jrpg_overlay_c.exe"
+      , StrLower(A_ScriptDir "\bin\jrpg_overlay_C.exe")
+      , ".\bin\jrpg_overlay.exe"
+      , StrLower(A_ScriptDir "\bin\jrpg_overlay.exe")
+    ]
+    for __legacyOverlayPath in __legacyOverlayPaths {
+        if (__overlayPathNormalized = __legacyOverlayPath) {
+            overlayAhk := defOverlay
+            IniWrite(overlayAhk, iniPath, "cfg", "overlayAhk")
+            break
+        }
+    }
+}
 imgScript       := Load("imgScript",        defImgPy)
 overlayTrans    := Load("overlayTrans",     defOverlayTrans)
 explainScript   := Load("explainScript",   defExplainPy)
@@ -1604,14 +1705,14 @@ CPSetPreferredAppDarkMode(controlDarkMode)
 
 ; overlay colors
 boxBgHex   := StrUpper(Load("boxBg",    defBoxBg))
-bdrOutHex  := StrUpper(Load("bdrOut",   defBdrOut))
-bdrInHex   := StrUpper(Load("bdrIn",    defBdrIn))
+bdrOutHex  := boxBgHex
+bdrInHex   := boxBgHex
 txtHex     := StrUpper(Load("txtColor", defTxtCol))
 nameHex    := StrUpper(Load("nameColor", defNameCol))
 
 ; overlay border widths
-bdrOutW := Integer(Load("bdrOutW", defBdrOutW))
-bdrInW  := Integer(Load("bdrInW",  defBdrInW))
+bdrOutW := 0
+bdrInW  := 0
 
 ; overlay font
 fontName := Load("fontName", defFontName)
@@ -1621,15 +1722,16 @@ fontSize := Integer(Load("fontSize", defFontSize))
 overlayTrans_EW := Load("overlayTrans",     defOverlayTrans, "cfg_explainer")
 
 boxBgHex_EW  := StrUpper(Load("boxBg",      defBoxBg,       "cfg_explainer"))
-bdrOutHex_EW := StrUpper(Load("bdrOut",     defBdrOut,      "cfg_explainer"))
-bdrInHex_EW  := StrUpper(Load("bdrIn",      defBdrIn,       "cfg_explainer"))
+bdrOutHex_EW := boxBgHex_EW
+bdrInHex_EW  := boxBgHex_EW
 txtHex_EW    := StrUpper(Load("txtColor",   defTxtCol,      "cfg_explainer"))
 
-bdrOutW_EW := Integer(Load("bdrOutW",       defBdrOutW,     "cfg_explainer"))
-bdrInW_EW  := Integer(Load("bdrInW",        defBdrInW,      "cfg_explainer"))
+bdrOutW_EW := 0
+bdrInW_EW  := 0
 
 fontName_EW := Load("fontName",             defFontName,    "cfg_explainer")
 fontSize_EW := Integer(Load("fontSize",     defFontSize,    "cfg_explainer"))
+SyncUnifiedWindowAppearance()
 
 ; --- EXPLAINER provider + model selections (own section)
 explainProvider    := Load("explainProvider",    defExplainProvider,    "cfg_explainer")
@@ -1782,6 +1884,7 @@ SaveAll(){
     global promptProfile, imgPostproc
  	global promptProfile, imgPostproc, chkDel, chkTop, chkDarkMode, controlDarkMode
 
+    SyncUnifiedWindowAppearance()
     IniWrite(pythonExe,       iniPath, "cfg", "pythonExe")
 	IniWrite(captureDir,      iniPath, "paths", "captureDir")
 
@@ -1822,14 +1925,14 @@ SaveAll(){
 
     ; colors
     IniWrite(boxBgHex,        iniPath, "cfg", "boxBg")
-    IniWrite(bdrOutHex,       iniPath, "cfg", "bdrOut")
-    IniWrite(bdrInHex,        iniPath, "cfg", "bdrIn")
+    IniWrite(boxBgHex,        iniPath, "cfg", "bdrOut")
+    IniWrite(boxBgHex,        iniPath, "cfg", "bdrIn")
     IniWrite(txtHex,          iniPath, "cfg", "txtColor")
 	IniWrite(nameHex,         iniPath, "cfg", "nameColor")
 
     ; border widths
-    IniWrite(bdrOutW,         iniPath, "cfg", "bdrOutW")
-    IniWrite(bdrInW,          iniPath, "cfg", "bdrInW")
+    IniWrite(0,               iniPath, "cfg", "bdrOutW")
+    IniWrite(0,               iniPath, "cfg", "bdrInW")
 
     ; font
     IniWrite(fontName,        iniPath, "cfg", "fontName")
@@ -1844,13 +1947,13 @@ SaveAll(){
 
     ; colors
     IniWrite(boxBgHex_EW,     iniPath, "cfg_explainer", "boxBg")
-    IniWrite(bdrOutHex_EW,    iniPath, "cfg_explainer", "bdrOut")
-    IniWrite(bdrInHex_EW,     iniPath, "cfg_explainer", "bdrIn")
+    IniWrite(boxBgHex_EW,     iniPath, "cfg_explainer", "bdrOut")
+    IniWrite(boxBgHex_EW,     iniPath, "cfg_explainer", "bdrIn")
     IniWrite(txtHex_EW,       iniPath, "cfg_explainer", "txtColor")
 
     ; border widths
-    IniWrite(bdrOutW_EW,      iniPath, "cfg_explainer", "bdrOutW")
-    IniWrite(bdrInW_EW,       iniPath, "cfg_explainer", "bdrInW")
+    IniWrite(0,                iniPath, "cfg_explainer", "bdrOutW")
+    IniWrite(0,                iniPath, "cfg_explainer", "bdrInW")
 
     ; font
     IniWrite(fontName_EW,     iniPath, "cfg_explainer", "fontName")
@@ -1938,19 +2041,28 @@ ResolvePath(p) {
 }
 
 ; =========================
-; STATUS helpers
+; Audio state helper
 ; =========================
-UpdateStatus(){
-    global lblRun, lblListen, gPidAudio, btnAudio
-    if !(IsSet(lblRun) && IsObject(lblRun)) || !(IsSet(lblListen) && IsObject(lblListen))
-        return
-    running := (gPidAudio && ProcessExist(gPidAudio)) || (AudioPidsByScript().Length > 0)
-    lblRun.Value    := "Audio: " (running ? "RUNNING" : "stopped")
-    lblListen.Value := "Listening: " GetListenState()
-    ; reflect state on the unified button
-    if (IsSet(btnAudio) && IsObject(btnAudio)) {
-        btnAudio.Text := (running ? "Stop Audio" : "Start Audio")
+AudioIsRunning() {
+    global gPidAudio
+    if (gPidAudio && ProcessExist(gPidAudio))
+        return true
+
+    pids := AudioPidsByScript()
+    if (pids.Length) {
+        gPidAudio := pids[1]
+        return true
     }
+
+    gPidAudio := 0
+    return false
+}
+
+UpdateStatus(){
+    global btnAudio
+    running := AudioIsRunning()
+    if (IsSet(btnAudio) && IsObject(btnAudio))
+        btnAudio.Text := running ? "Audio Translation On" : "Audio Translation Off"
 }
 
 _UpdateStatus(){
@@ -2270,19 +2382,17 @@ ExplainNow(*) {
     }
 }
 
-; Force the 4 color swatches to repaint immediately (no warnings, no flicker)
+; Force the color swatches to repaint immediately (no warnings, no flicker)
 RefreshColorSwatches() {
-    global ui, rectBg, rectOut, rectIn, rectTxt, rectName
-    global boxBgHex, bdrOutHex, bdrInHex, txtHex, nameHex
+    global ui, rectBg, rectTxt, rectName
+    global boxBgHex, txtHex, nameHex
 
     rectBg.Opt("Background" . boxBgHex)
-    rectOut.Opt("Background" . bdrOutHex)
-    rectIn.Opt("Background" . bdrInHex)
     rectTxt.Opt("Background" . txtHex)
     if IsSet(rectName)
         rectName.Opt("Background" . nameHex)
 
-    for swatch in [rectBg, rectOut, rectIn, rectTxt, rectName] {
+    for swatch in [rectBg, rectTxt, rectName] {
         if IsSet(swatch) {
             try {
                 swatch.Redraw()
@@ -2297,13 +2407,11 @@ RefreshColorSwatches() {
 
 ; -- Explainer version (same idea, different controls/vars)
 RefreshColorSwatches_EW() {
-    global ui, rectBg_EW, rectOut_EW, rectIn_EW, rectTxt_EW
-    global boxBgHex_EW, bdrOutHex_EW, bdrInHex_EW, txtHex_EW
+    global ui, rectBg_EW, rectTxt_EW
+    global boxBgHex_EW, txtHex_EW
     rectBg_EW.Opt("Background" . boxBgHex_EW)
-    rectOut_EW.Opt("Background" . bdrOutHex_EW)
-    rectIn_EW.Opt("Background" . bdrInHex_EW)
     rectTxt_EW.Opt("Background" . txtHex_EW)
-    for swatch in [rectBg_EW, rectOut_EW, rectIn_EW, rectTxt_EW] {
+    for swatch in [rectBg_EW, rectTxt_EW] {
         try swatch.Redraw()
     }
     DllCall("user32\RedrawWindow", "ptr", ui.Hwnd, "ptr", 0, "ptr", 0, "uint", 0x0181)
@@ -2372,8 +2480,9 @@ CP_LaunchExplainerRequest(*) {
         LaunchExplainerOverlay()
         WinWait("Explainer",, 3)
         if WinExist("Explainer") {
+            hwnd := WinExist("Explainer")
+            try ShowWindowNoActivate(hwnd)
             try WinSetAlwaysOnTop(1, "Explainer")
-            try WinActivate("Explainer")
             ExplainNow()
         }
         DetectHiddenWindows oldDHW
@@ -2382,14 +2491,12 @@ CP_LaunchExplainerRequest(*) {
     }
 
     hwnd := WinExist("Explainer")
-    mm := WinGetMinMax("ahk_id " hwnd)
-    isHidden := (mm = -1)
+    isHidden := !DllCall("user32\IsWindowVisible", "ptr", hwnd, "int")
 
     if isHidden {
         ; Hidden -> show + topmost + request
-        try WinShow("ahk_id " hwnd)
+        try ShowWindowNoActivate(hwnd)
         try WinSetAlwaysOnTop(1, "ahk_id " hwnd)
-        try WinActivate("ahk_id " hwnd)
         ExplainNow()
         DetectHiddenWindows oldDHW
         SetTitleMatchMode oldMode
@@ -2419,7 +2526,6 @@ CP_LaunchExplainerRequest(*) {
     } else {
         ; Visible + Not topmost -> show + request
         try WinSetAlwaysOnTop(1, "ahk_id " hwnd)
-        try WinActivate("ahk_id " hwnd)
         ExplainNow()
     }
 
@@ -2718,7 +2824,6 @@ Hotkeys_OnApply() {
     Rebind_LaunchExplainerRequest()
 	Rebind_ExplainLastTranslation()
 	Rebind_StartStopAudio()
-	Rebind_ToggleListening()
 	Rebind_HideShowControlPanel()
 
     hkDirty := false
@@ -2922,7 +3027,8 @@ StartAudio(*) {
     if (started) {
         DbgCP("StartAudio: process confirmed (pid=" gPidAudio ")")
         UpdateStatus()
-        return
+        Toast("Audio Translation On")
+        return true
     }
 
         ; --- original error-capture fallback (only skip if we just stopped) ---
@@ -3030,55 +3136,45 @@ StopAudio(*) {
     gJustStoppedUntil := A_TickCount + 5000
     if (gPidAudio && ProcessExist(gPidAudio)) {
         try ProcessClose(gPidAudio)
-        gPidAudio := 0
-        Sleep(120)
     }
     for pid in AudioPidsByScript() {
         try ProcessClose(pid)
     }
-    DbgCP("StopAudio() requested")
+
+    stopped := false
+    Loop 20 {
+        primaryAlive := gPidAudio && ProcessExist(gPidAudio)
+        remaining := AudioPidsByScript()
+        if (!primaryAlive && !remaining.Length) {
+            stopped := true
+            break
+        }
+        for pid in remaining {
+            try ProcessClose(pid)
+        }
+        Sleep(50)
+    }
+
+    if (stopped)
+        gPidAudio := 0
+    DbgCP("StopAudio() requested; confirmed=" stopped)
     _UpdateStatus()
+    Toast(stopped ? "Audio Translation Off" : "Audio Translation still running")
+    return stopped
 }
 
 ; NEW: unified toggle used by the single button
 ToggleAudioFromButton(*) {
-    global gPidAudio
-    if (gPidAudio && ProcessExist(gPidAudio)) {
+    if AudioIsRunning() {
         StopAudio()
     } else {
-        gPidAudio := 0  ; clear stale PID just in case
         StartAudio()
     }
 }
 
-; NEW: Toggle Start/Stop using the same button logic
+; Toggle audio translation from the configured hotkey.
 StartStopAudio(*) {
-    global gPidAudio
-    if (gPidAudio && ProcessExist(gPidAudio)) {
-        StopAudio()
-    } else {
-        gPidAudio := 0  ; clear any stale value before starting
-        StartAudio()
-    }
-}
-
-ToggleListening(*) {
-    global pauseFlag
-    EnsureOverlayDir()
-    if FileExist(pauseFlag){
-        FileDelete(pauseFlag)
-        Toast("ðŸŽ™ Listening: ON")
-        DbgCP("Listening: ON")
-    } else {
-        FileAppend("", pauseFlag, "UTF-8")
-        Toast("Listening: OFF")
-        DbgCP("Listening: OFF")
-    }
-    _UpdateStatus()
-}
-GetListenState(){
-    global pauseFlag
-    return FileExist(pauseFlag) ? "OFF" : "ON"
+    ToggleAudioFromButton()
 }
 
 ; Run a command hidden and capture its stdout via a temp file (works with python.exe)
@@ -3584,12 +3680,8 @@ ui.Add("Text", "xm y+6", "Overlay Transparency")
 slTrans := ui.Add("Slider", "x+m w200 Range0-255 ToolTip")
 lblTransPct := ui.Add("Text", "x+m", "100%")
 
-ui.Add("Text", "xm y+18 w200", "Background color:")
+ui.Add("Text", "xm y+18 w200", "Window color:")
 rectBg := CPRegisterColorSwatch(ui.Add("Text", "x+m w84 h34 Border"))
-ui.Add("Text", "xm y+18 w200", "Outer border:")
-rectOut := CPRegisterColorSwatch(ui.Add("Text", "x+m w84 h34 Border"))
-ui.Add("Text", "xm y+18 w200", "Inner border:")
-rectIn := CPRegisterColorSwatch(ui.Add("Text", "x+m w84 h34 Border"))
 ui.Add("Text", "xm y+18 w200", "Text color:")
 rectTxt := CPRegisterColorSwatch(ui.Add("Text", "x+m w84 h34 Border"))
 ui.Add("Text", "xm y+18 w200", "Speaker name:")
@@ -3629,31 +3721,16 @@ btnPDel.OnEvent("Click", (*) => (
 ))
 btnPNew.OnEvent("Click", (*) => CreateProfile())
 
-ui.Add("Text", "xm y+16", "Outer border width:")
-edOutW := ui.Add("Edit",   "x+m w60 Number", bdrOutW)
-udOutW := ui.Add("UpDown", "Range0-50",      bdrOutW)
-ui.Add("Text", "x+18 yp", "Inner border width:")
-edInW := ui.Add("Edit",   "x+m w60 Number",  bdrInW)
-udInW := ui.Add("UpDown", "Range0-50",       bdrInW)
-
-
-for sw in [rectBg,rectOut,rectIn,rectTxt,rectName]
+for sw in [rectBg,rectTxt,rectName]
     sw.Cursor := "Hand"
 
 rectBg.OnEvent("Click", (*) => PickAndApply("bg"))
-rectOut.OnEvent("Click", (*) => PickAndApply("b_out"))
-rectIn.OnEvent("Click", (*) => PickAndApply("b_in"))
 rectTxt.OnEvent("Click", (*) => PickAndApply("txt"))
 rectName.OnEvent("Click", (*) => PickAndApply("name"))
 
 ddlFont.OnEvent("Change", FontChanged)
 edFSize.OnEvent("LoseFocus", FontSizeCommit)
 udFSize.OnEvent("Change", (*) => FontSizeCommit(edFSize))
-
-edOutW.OnEvent("LoseFocus", (*) => BorderWidthCommit("out", edOutW))
-udOutW.OnEvent("Change",   (*) => BorderWidthCommit("out", edOutW))
-edInW.OnEvent("LoseFocus", (*) => BorderWidthCommit("in", edInW))
-udInW.OnEvent("Change",    (*) => BorderWidthCommit("in", edInW))
 
 ; Prompt profile events + initial list
 btnPrEdit.OnEvent("Click", OpenPromptEditor)
@@ -3756,12 +3833,8 @@ ui.Add("Text", "xm y+6", "Overlay Transparency")
 slTrans_EW := ui.Add("Slider", "x+m w200 Range0-255 ToolTip")
 lblTransPct_EW := ui.Add("Text", "x+m", "100%")
 
-ui.Add("Text", "xm y+18 w200", "Background color:")
+ui.Add("Text", "xm y+18 w200", "Window color:")
 rectBg_EW := CPRegisterColorSwatch(ui.Add("Text", "x+m w84 h34 Border"))
-ui.Add("Text", "xm y+18 w200", "Outer border:")
-rectOut_EW := CPRegisterColorSwatch(ui.Add("Text", "x+m w84 h34 Border"))
-ui.Add("Text", "xm y+18 w200", "Inner border:")
-rectIn_EW := CPRegisterColorSwatch(ui.Add("Text", "x+m w84 h34 Border"))
 ui.Add("Text", "xm y+18 w200", "Text color:")
 rectTxt_EW := CPRegisterColorSwatch(ui.Add("Text", "x+m w84 h34 Border"))
 
@@ -3773,12 +3846,6 @@ ui.Add("Text", "x+12 yp", "Size")
 edFSize_EW := ui.Add("Edit", "x+m w60 Number")
 udFSize_EW := ui.Add("UpDown", "Range8-96")
 
-ui.Add("Text", "xm y+18", "Outer border width:")
-edOutW_EW := ui.Add("Edit", "x+m w60 Number")
-udOutW_EW := ui.Add("UpDown", "Range0-50")
-ui.Add("Text", "x+18 yp", "Inner border width:")
-edInW_EW := ui.Add("Edit", "x+m w60 Number")
-udInW_EW := ui.Add("UpDown", "Range0-50")
 ; --- Explanation Profiles row ---
 ui.Add("Text", "xm y+18", "Profile:")
 ddlProf_EW := ui.Add("ComboBox", "x+m w220")
@@ -3844,28 +3911,17 @@ btnProfDel_EW.OnEvent("Click", (*) => (
 ))
 
 ; --- wire EW events ---
-for sw in [rectBg_EW,rectOut_EW,rectIn_EW,rectTxt_EW]
+for sw in [rectBg_EW,rectTxt_EW]
     sw.Cursor := "Hand"
 
 slTrans_EW.OnEvent("Change", (c, e) => (HandleTransparencyChange_EW(c), SaveAll(), SendOverlayTheme()))
 
 rectBg_EW.OnEvent("Click", (*) => PickAndApply_EW("bg"))
-rectOut_EW.OnEvent("Click", (*) => PickAndApply_EW("b_out"))
-rectIn_EW.OnEvent("Click", (*) => PickAndApply_EW("b_in"))
 rectTxt_EW.OnEvent("Click", (*) => PickAndApply_EW("txt"))
 
 ddlFont_EW.OnEvent("Change", FontChanged_EW)
 edFSize_EW.OnEvent("LoseFocus", FontSizeCommit_EW)
 udFSize_EW.OnEvent("Change",   (*) => FontSizeCommit_EW(edFSize_EW))
-
-; UpDown change -> read from UpDown (Edit may lag one tick)
-udOutW_EW.OnEvent("Change",    (*) => BorderWidthCommit_EW("out", udOutW_EW))
-udInW_EW.OnEvent("Change",     (*) => BorderWidthCommit_EW("in",  udInW_EW))
-
-; Edit commits on focus loss to avoid racing the buddy UpDown
-edOutW_EW.OnEvent("LoseFocus", (*) => BorderWidthCommit_EW("out", edOutW_EW))
-edInW_EW.OnEvent("LoseFocus",  (*) => BorderWidthCommit_EW("in",  edInW_EW))
-
 
 ; --- Tab 6: TERMINOLOGY OVERRIDES
 tab.UseTab(6)
@@ -3873,25 +3929,25 @@ ui.Add("Text", "xm y+4 w0 h0")  ; spacer
 
 ; --- Help text (what these two glossaries do & how to use them)
 txtGlossaryHelp1 := ui.Add("Text", "xm y+8 cGray w760"
-  , "What these do:")
-txtGlossaryHelp2 := ui.Add("Text", "xm y+4 cGray w760"
-  , "JP->EN glossary: Maps specific Japanese terms to fixed English terms during translation (stabilizes names/terms). E.g., Estelle's Japanese name => Estelle, to avoid translations like Esuteru.")
+  , 'Japanese terms often have multiple translations (e.g., 宰相 can mean "Chancellor" or "Prime Minister"), and names may vary in spelling. Set fixed rules here to ensure a consistent translation for your chosen Target Language (TL) throughout your playthrough.')
+txtGlossaryHelp2 := ui.Add("Text", "xm y+20 cGray w760"
+  , "JP -> TL glossary: Maps specific Japanese terms to fixed terms in the target language during translation, stabilizing names and terminology. Example: エステル -> Estelle (to avoid inconsistent interpretations like Esuteru).")
 txtGlossaryHelp3 := ui.Add("Text", "xm y+2 cGray w760"
-  , "EN->EN glossary: Rewrites the English output after translation (aliases/style), useful if you struggle with Japanese input. E.g., Esuteru => Estelle, capitalization fixes, etc.")
-txtGlossaryHelp4 := ui.Add("Text", "xm y+6 cGray w760"
-  , 'How to use: Choose a profile from the menu. Click "Edit" to add lines in the form "source => target" (one per line). "Add" makes a new profile (e.g. on a per game basis); "Delete" removes the selected profile. Changes apply to the next translation.')
+  , "TL -> TL glossary: Rewrites translated output afterward for aliases, preferred wording, spelling, or capitalization, useful if you struggle with Japanese text input. Example: Esuteru -> Estelle.")
+txtGlossaryHelp4 := ui.Add("Text", "xm y+20 cGray w760"
+  , 'How to use: Choose a profile from the menu. Click "Edit" to add one "source -> target" mapping per line. "Add" makes a new profile, for example for one game; "Delete" removes it. Changes apply to the next screenshot translation.')
 
-; --- Row 1: JP->EN glossary
+; --- Row 1: Japanese -> target-language glossary
 for cpMutedGlossaryCtrl in [txtGlossaryHelp1, txtGlossaryHelp2, txtGlossaryHelp3, txtGlossaryHelp4]
     CPRegisterMutedControl(cpMutedGlossaryCtrl)
-ui.Add("Text", "xm y+10", "JP->EN glossary:")
+ui.Add("Text", "xm y+20", "JP -> TL glossary:")
 ddlJPG := ui.Add("DropDownList", "x+m w260 0x210", [])   ; filled by RefreshGlossaryProfilesList
 btnJPG_Edit := ui.Add("Button", "x+6 w70", "Edit")
 btnJPG_New  := ui.Add("Button", "x+6 w70", "Add")
 btnJPG_Del  := ui.Add("Button", "x+6 w70", "Delete")
 
-; --- Row 2: EN->EN glossary
-ui.Add("Text", "xm y+12", "EN->EN glossary:")
+; --- Row 2: target-language -> target-language glossary
+ui.Add("Text", "xm y+12", "TL -> TL glossary:")
 ddlENG := ui.Add("DropDownList", "x+m w260 0x210", [])
 btnENG_Edit := ui.Add("Button", "x+6 w70", "Edit")
 btnENG_New  := ui.Add("Button", "x+6 w70", "Add")
@@ -3998,15 +4054,9 @@ FixAllEditableCombos()
 sepAction := ui.Add("Text", "xm y+6 w1000 h2 0x10")
 btnOv      := ui.Add("Button", "xm y+18 w130",  "Open Translator")
 btnOvClose := ui.Add("Button", "x+6 w140",  "Close Translator")
-btnAudio  := ui.Add("Button", "x+6 w120", "Start Audio")
-btnToggle  := ui.Add("Button", "x+6 w130",  "Toggle Listening")
+btnAudio  := ui.Add("Button", "x+6 w180", "Audio Translation Off")
 btnExplainerLaunch := ui.Add("Button", "x+6 w140", "Open Explainer")
 btnExplainerClose  := ui.Add("Button", "x+6 w140", "Close Explainer")
-
-tStatus   := ui.Add("Text", "xm y+12 cGray", "Status:")
-CPRegisterMutedControl(tStatus)
-lblRun    := ui.Add("Edit", "x+6 w220 ReadOnly")
-lblListen := ui.Add("Edit", "x+12 w300 ReadOnly")
 
 bSave     := ui.Add("Button", "xm y+14 w120", "Save")
 try bSave.Enabled := false
@@ -4057,7 +4107,6 @@ if IsSet(eExplain)
     eExplain.OnEvent("Change", (*) => MarkDirty())
 
 btnAudio.OnEvent("Click", ToggleAudioFromButton)
-btnToggle.OnEvent("Click", ToggleListening)
 btnOv.OnEvent("Click",    LaunchOverlay)
 btnOvClose.OnEvent("Click", CloseTranslatorOverlay)
 btnExplainerLaunch.OnEvent("Click", LaunchExplainerOverlay)
@@ -4314,6 +4363,12 @@ LoadFontsIntoCombo()
 LoadFontsIntoCombo_EW()   ; â† add this
 _UpdateStatus()
 SetTimer(_UpdateStatus, 1000)
+
+; During background initialization, keep the temporary native window out of the
+; taskbar and prevent Windows from activating it while controls are measured.
+if (CP_BACKGROUND_START)
+    ui.Opt("+ToolWindow +E0x08000000") ; WS_EX_NOACTIVATE
+
 ; Show the window, restore saved bounds if valid; otherwise use hardcoded defaults and seed control.ini
 if (IsValidBounds(guiX_saved, guiY_saved, guiW_saved, guiH_saved)) {
     ; If the INI was written before this fix, it likely holds OUTER sizes.
@@ -4330,10 +4385,16 @@ if (IsValidBounds(guiX_saved, guiY_saved, guiW_saved, guiH_saved)) {
         DbgCP("Converted saved bounds from OUTER to CLIENT using ncW=" ncW " ncH=" ncH)
     }
     DbgCP("Restore saved panel bounds (client): x=" guiX_saved " y=" guiY_saved " w=" guiW_saved " h=" guiH_saved)
-    ui.Show("w" guiW_saved " h" guiH_saved " x" guiX_saved " y" guiY_saved)
+    cpShowOptions := "w" guiW_saved " h" guiH_saved " x" guiX_saved " y" guiY_saved
+    ui.Show((CP_BACKGROUND_START ? "NA Hide " : "") cpShowOptions)
+    if (CP_BACKGROUND_START)
+        ui.Hide()
 } else {
     DbgCP("Use default panel bounds: x=" defGuiX " y=" defGuiY " w=" defGuiW " h=" defGuiH)
-    ui.Show("w" defGuiW " h" defGuiH " x" defGuiX " y" defGuiY)
+    cpShowOptions := "w" defGuiW " h" defGuiH " x" defGuiX " y" defGuiY
+    ui.Show((CP_BACKGROUND_START ? "NA Hide " : "") cpShowOptions)
+    if (CP_BACKGROUND_START)
+        ui.Hide()
     ; Seed control.ini [gui_bounds] immediately so subsequent launches restore these
     SavePanelBounds()
 }
@@ -4349,7 +4410,6 @@ CPApplyControlPanelTheme()
 Rebind_LaunchExplainerRequest()
 Rebind_ExplainLastTranslation()
 Rebind_StartStopAudio()
-Rebind_ToggleListening()
 Rebind_HideShowControlPanel()
 RegisterControlPanelArrowNavigation()
 SetTimer(UpdateCPFocusRing, 60)
@@ -4363,6 +4423,15 @@ if (Integer(IniRead(iniPath, "cfg", "openTranslatorOnLaunch", 0))) {
 }
 if (Integer(IniRead(iniPath, "cfg", "openExplainerOnLaunch", 0))) {
     SetTimer(LaunchExplainerOverlay, -200)
+}
+
+; Some custom controls repaint themselves during initialization. Enforce the
+; hidden state once more, then restore normal window styles for the first
+; intentional hotkey/double-launch reveal.
+if (CP_BACKGROUND_START) {
+    ui.Hide()
+    ui.Opt("-ToolWindow -E0x08000000")
+    DbgCP("Background start complete: control panel remains hidden.")
 }
 
 ; Force immediate paint so text is visible without hover
@@ -4426,9 +4495,8 @@ Repaint(){
     global pythonExe,audioScript,overlayAhk,imgScript,trModel,audioProvider,geminiAudioModel,audioTargetLang
     global imgProvider,imgModel,geminiImgModel,overlayTrans
     global slTrans, lblTransPct
-    global rectBg,rectOut,rectIn,rectTxt, boxBgHex,bdrOutHex,bdrInHex,txtHex
+    global rectBg,rectTxt, boxBgHex,txtHex
     global ddlFont, edFSize, fontName, fontSize
-    global edOutW, edInW, bdrOutW, bdrInW
     global ddlPrompt, promptProfile
     global ddlPost, imgPostproc, postCodes
 	global ddlEProv, ddlEOpenAI, ddlEGem
@@ -4463,15 +4531,10 @@ Repaint(){
     lblTransPct.Value := Round(overlayTrans / 255 * 100) . "%"
 
     rectBg.Opt("Background" . boxBgHex)
-    rectOut.Opt("Background" . bdrOutHex)
-    rectIn.Opt("Background" . bdrInHex)
     rectTxt.Opt("Background" . txtHex)
 
     ddlFont.Text := fontName
     edFSize.Value := fontSize
-
-    edOutW.Value := bdrOutW
-    edInW.Value  := bdrInW
 
     ; (Do not set ddlPrompt.Text here â€“ list may be empty on first run)
     postSelIdx := ArrIndexOf(postCodes, imgPostproc)
@@ -4502,20 +4565,12 @@ Repaint(){
 
         ; Color preview rectangles
         try rectBg_EW.Opt("Background" . boxBgHex_EW)
-        try rectOut_EW.Opt("Background" . bdrOutHex_EW)
-        try rectIn_EW.Opt("Background" . bdrInHex_EW)
         try rectTxt_EW.Opt("Background" . txtHex_EW)
 
         ; Font and size
         try ddlFont_EW.Text := fontName_EW
         try edFSize_EW.Value := fontSize_EW
         try udFSize_EW.Value := fontSize_EW
-
-        ; Border widths
-        try edOutW_EW.Value := bdrOutW_EW
-        try udOutW_EW.Value := bdrOutW_EW
-        try edInW_EW.Value  := bdrInW_EW
-        try udInW_EW.Value  := bdrInW_EW
 
                 ; Profile row: use last Explainer profile from control.ini
         try ddlProf_EW.Text := IniRead(iniPath, "profiles", "explainer_last", "")
@@ -4650,7 +4705,6 @@ UpdateVars(){
     global ddlEProv, ddlEOpenAI, ddlEGem
     global ePython,eAudio,eOverlay,eImg,ddlTR,ddlAProv,ddlA_GM,ddlAudioTarget,ddlProv,ddlIMG,ddlIMG_GM,slTrans
 	global ddlFont, edFSize, fontName, fontSize
-    global edOutW, edInW, bdrOutW, bdrInW
     global ddlPrompt, promptProfile
     global ddlPost, imgPostproc
 	global debugMode, cbDebug
@@ -4669,8 +4723,7 @@ UpdateVars(){
     geminiImgModel   := ddlIMG_GM.Text
     fontName         := ddlFont.Text
     fontSize         := Integer(edFSize.Value)
-    bdrOutW          := Integer(edOutW.Value)
-    bdrInW           := Integer(edInW.Value)
+    SyncUnifiedWindowAppearance()
     promptProfile    := ddlPrompt.Text
     imgPostproc      := postCodes[ddlPost.Value]
 	explainProvider    := ddlEProv.Text
@@ -4717,7 +4770,7 @@ ResizeUI(gui, minMax, w, h){
     global tab, sepAction
     global tPython,ePython,bPy,tAud,eAudio,bAud,tOv,eOverlay,bOvSel,tImg,eImg,bImgSel,tExplain,eExplain,bExplainSel
     global ddlAProv,ddlA_GM,ddlTR,ddlAudioTarget,ddlProv,ddlIMG,ddlIMG_GM
-    global btnStart,btnStop,btnToggle,btnOv,btnOvClose,btnExplainNow,tStatus,lblRun,lblListen,bSave,bClose,chkTop,chkDarkMode
+    global btnStart,btnStop,btnAudio,btnOv,btnOvClose,btnExplainerLaunch,btnExplainerClose,btnExplainNow,bSave,bClose,chkTop,chkDarkMode
     global btnA_GM_Add, btnA_GM_Del, btnTR_Add, btnTR_Del
     global btnIMG_Add, btnIMG_Del, btnIMG_GM_Add, btnIMG_GM_Del
     ; NEW prompt widgets
@@ -4731,7 +4784,7 @@ ResizeUI(gui, minMax, w, h){
 
     gap1 := 10
     gap2 := 12
-    bottomBlockH := btnH*3 + gap1 + gap2 + pad
+    bottomBlockH := btnH*2 + gap1 + gap2 + pad
 
     tabH := Max(260, h - pad*2 - bottomBlockH)
     tab.Move(pad, pad, w - pad*2, tabH)
@@ -4789,21 +4842,12 @@ ResizeUI(gui, minMax, w, h){
 
     ; action row always sits just below the separator
     yAction := sepY + 8
-    ; Order (left -> right): Open, Close, Start/Stop, Toggle, Open Explainer, Close Explainer
+    ; Order (left -> right): Open, Close, Audio Translation, Open Explainer, Close Explainer
     btnOv.Move(pad, yAction, 130, btnH)                                ; Open Translator
     btnOvClose.Move(pad + 130 + gap, yAction, 140, btnH)               ; Close Translator
-    btnAudio.Move(pad + 130 + 140 + gap*2, yAction, 120, btnH)         ; Start/Stop Audio
-    btnToggle.Move(pad + 130 + 140 + 120 + gap*3, yAction, 140, btnH)  ; Toggle Listening
-    btnExplainerLaunch.Move(pad + 130 + 140 + 120 + 140 + gap*4, yAction, 140, btnH)  ; Open Explainer
-    btnExplainerClose.Move(pad + 130 + 140 + 120 + 140 + 140 + gap*5, yAction, 140, btnH) ; Close Explainer
-
-    yStatus := yAction + btnH + gap1
-    statusLabelW := 96
-    tStatus.Move(pad, yStatus, statusLabelW, 22)
-    statAvail := (w - pad*2) - statusLabelW
-    half := Max(180, (statAvail - 12)//2)
-    lblRun.Move(pad + statusLabelW, yStatus, half, btnH)
-    lblListen.Move(pad + statusLabelW + half + 12, yStatus, half, btnH)
+    btnAudio.Move(pad + 130 + 140 + gap*2, yAction, 180, btnH)          ; Audio Translation On/Off
+    btnExplainerLaunch.Move(pad + 130 + 140 + 180 + gap*3, yAction, 140, btnH)  ; Open Explainer
+    btnExplainerClose.Move(pad + 130 + 140 + 180 + 140 + gap*4, yAction, 140, btnH) ; Close Explainer
 
     ; ensure ySave is defined from current client height (bottom action row)
     ui.GetClientPos(,, &cliW, &cliH)
@@ -4852,12 +4896,10 @@ PickColorDialog(initHex := "FFFFFF") {
 }
 
 PickAndApply(which) {
-    global boxBgHex,bdrOutHex,bdrInHex,txtHex,nameHex
-    global rectBg,rectOut,rectIn,rectTxt,rectName
+    global boxBgHex,txtHex,nameHex
+    global rectBg,rectTxt,rectName
 
     colorCur := (which="bg")    ? boxBgHex
-             : (which="b_out") ? bdrOutHex
-             : (which="b_in")  ? bdrInHex
              : (which="name")  ? nameHex
              :                   txtHex
 
@@ -4868,12 +4910,6 @@ PickAndApply(which) {
     if (which="bg") {
         boxBgHex := got
         rectBg.Opt("Background" . got)
-    } else if (which="b_out") {
-        bdrOutHex := got
-        rectOut.Opt("Background" . got)
-    } else if (which="b_in") {
-        bdrInHex := got
-        rectIn.Opt("Background" . got)
     } else if (which="name") {
         nameHex := got
         if IsSet(rectName)
@@ -4883,6 +4919,7 @@ PickAndApply(which) {
         rectTxt.Opt("Background" . got)
     }
 
+    SyncUnifiedWindowAppearance()
     SaveAll()
     RefreshColorSwatches()
     DbgCP("Color change '" which "' -> " got)
@@ -4920,37 +4957,6 @@ FontSizeCommit(ctrl, *) {
     SendOverlayTheme()
 }
 
-BorderWidthCommit(which, ctrl, *) {
-    global bdrOutW, bdrInW
-    txt := Trim(ctrl.Value)
-    if (txt = "") {
-        ctrl.Value := (which = "out") ? bdrOutW : bdrInW
-        return
-    }
-    v := Integer(txt)
-    if (v < 0)
-        v := 0
-    else if (v > 50)
-        v := 50
-    if (which = "out") {
-        if (v = bdrOutW) {
-            ctrl.Value := v
-            return
-        }
-        bdrOutW := v
-    } else {
-        if (v = bdrInW) {
-            ctrl.Value := v
-            return
-        }
-        bdrInW := v
-    }
-    ctrl.Value := v
-    SaveAll()
-    DbgCP("BorderWidthCommit " which " -> " v)
-    SendOverlayTheme()
-}
-
 ; =========================
 ; EXPLAINER handlers (separate state)
 ; =========================
@@ -4966,10 +4972,10 @@ HandleTransparencyChange_EW(sliderCtrl) {
 }
 
 PickAndApply_EW(which) {
-    global boxBgHex_EW,bdrOutHex_EW,bdrInHex_EW,txtHex_EW
-    global rectBg_EW,rectOut_EW,rectIn_EW,rectTxt_EW
+    global boxBgHex_EW,txtHex_EW
+    global rectBg_EW,rectTxt_EW
 
-    colorCur := (which="bg") ? boxBgHex_EW : (which="b_out") ? bdrOutHex_EW : (which="b_in") ? bdrInHex_EW : txtHex_EW
+    colorCur := (which="bg") ? boxBgHex_EW : txtHex_EW
     got := PickColorDialog(colorCur)
     if (got = "")
         return
@@ -4977,16 +4983,11 @@ PickAndApply_EW(which) {
     if (which="bg") {
         boxBgHex_EW := got
         rectBg_EW.Opt("Background" . got)
-    } else if (which="b_out") {
-        bdrOutHex_EW := got
-        rectOut_EW.Opt("Background" . got)
-    } else if (which="b_in") {
-        bdrInHex_EW := got
-        rectIn_EW.Opt("Background" . got)
     } else {
         txtHex_EW := got
         rectTxt_EW.Opt("Background" . got)
     }
+    SyncUnifiedWindowAppearance()
     SaveAll()
     RefreshColorSwatches_EW()
     DbgCP("EW Color change '" which "' -> " got)
@@ -5018,30 +5019,6 @@ FontSizeCommit_EW(ctrl, *) {
     SaveAll()
     DbgCP("EW FontSizeCommit -> " fontSize_EW)
     SendOverlayTheme()
-}
-
-BorderWidthCommit_EW(which, ctrl, *) {
-    global bdrOutW_EW, bdrInW_EW
-    global edOutW_EW, udOutW_EW, edInW_EW, udInW_EW
-
-    v := ctrl.Value
-    if (v = "" || v < 0)
-        v := 0
-    v := Integer(v)
-
-    if (which = "out") {
-        bdrOutW_EW := v
-        try udOutW_EW.Value := v
-        try edOutW_EW.Value := v
-    } else {
-        bdrInW_EW := v
-        try udInW_EW.Value := v
-        try edInW_EW.Value := v
-    }
-
-    SaveAll()
-DbgCP("EW BorderWidthCommit " which " -> " v)
-SendOverlayTheme()
 }
 
 ; =========================
@@ -5130,17 +5107,18 @@ EW_SaveProfile(name) {
     global ewX,ewY,ewW,ewH
 
     p := EW_ProfilePath(name)
+    SyncUnifiedWindowAppearance()
     try {
         ; theme
         IniWrite(overlayTrans_EW, p, "cfg_explainer", "overlayTrans")
         IniWrite(boxBgHex_EW,     p, "cfg_explainer", "boxBg")
-        IniWrite(bdrOutHex_EW,    p, "cfg_explainer", "bdrOut")
-        IniWrite(bdrInHex_EW,     p, "cfg_explainer", "bdrIn")
+        IniWrite(boxBgHex_EW,     p, "cfg_explainer", "bdrOut")
+        IniWrite(boxBgHex_EW,     p, "cfg_explainer", "bdrIn")
         IniWrite(txtHex_EW,       p, "cfg_explainer", "txtColor")
         IniWrite(fontName_EW,     p, "cfg_explainer", "fontName")
         IniWrite(fontSize_EW,     p, "cfg_explainer", "fontSize")
-        IniWrite(bdrOutW_EW,      p, "cfg_explainer", "bdrOutW")
-        IniWrite(bdrInW_EW,       p, "cfg_explainer", "bdrInW")
+        IniWrite(0,                p, "cfg_explainer", "bdrOutW")
+        IniWrite(0,                p, "cfg_explainer", "bdrInW")
 
         ; bounds (optional; only if known)
         if (ewX != "")
@@ -5162,9 +5140,8 @@ EW_LoadProfile(name) {
     global fontName_EW,fontSize_EW,bdrOutW_EW,bdrInW_EW,overlayTrans_EW
     global ewX,ewY,ewW,ewH
     global ui, slTrans_EW, lblTransPct_EW
-    global rectBg_EW,rectOut_EW,rectIn_EW,rectTxt_EW
+    global rectBg_EW,rectTxt_EW
     global ddlFont_EW, edFSize_EW, udFSize_EW
-    global edOutW_EW, udOutW_EW, edInW_EW, udInW_EW
     global iniPath, ddlProf_EW
 
     p := EW_ProfilePath(name)
@@ -5178,13 +5155,10 @@ EW_LoadProfile(name) {
 
     overlayTrans_EW := Integer(IniRead(p, "cfg_explainer", "overlayTrans", overlayTrans_EW))
     boxBgHex_EW     := StrUpper(IniRead(p, "cfg_explainer", "boxBg",    boxBgHex_EW))
-    bdrOutHex_EW    := StrUpper(IniRead(p, "cfg_explainer", "bdrOut",   bdrOutHex_EW))
-    bdrInHex_EW     := StrUpper(IniRead(p, "cfg_explainer", "bdrIn",    bdrInHex_EW))
     txtHex_EW       := StrUpper(IniRead(p, "cfg_explainer", "txtColor", txtHex_EW))
     fontName_EW     := IniRead(p, "cfg_explainer", "fontName", fontName_EW)
     fontSize_EW     := Integer(IniRead(p, "cfg_explainer", "fontSize",  fontSize_EW))
-    bdrOutW_EW      := Integer(IniRead(p, "cfg_explainer", "bdrOutW",   bdrOutW_EW))
-    bdrInW_EW       := Integer(IniRead(p, "cfg_explainer", "bdrInW",    bdrInW_EW))
+    SyncUnifiedWindowAppearance()
 
     ; bounds (may not exist in profile; keep current if empty)
     _x := IniRead(p, "explainer_bounds", "x", "")
@@ -5199,14 +5173,9 @@ EW_LoadProfile(name) {
     slTrans_EW.Value := overlayTrans_EW
     try lblTransPct_EW.Value := Round(overlayTrans_EW / 255 * 100) . "%"
     try rectBg_EW.Opt("Background" . boxBgHex_EW)
-    try rectOut_EW.Opt("Background" . bdrOutHex_EW)
-    try rectIn_EW.Opt("Background" . bdrInHex_EW)
     try rectTxt_EW.Opt("Background" . txtHex_EW)
     try ddlFont_EW.Text := fontName_EW
     try edFSize_EW.Value := fontSize_EW, udFSize_EW.Value := fontSize_EW
-    try edOutW_EW.Value := bdrOutW_EW,  udOutW_EW.Value := bdrOutW_EW
-    try edInW_EW.Value  := bdrInW_EW,   udInW_EW.Value  := bdrInW_EW
-
     RefreshColorSwatches_EW()
 
     SaveAll()
@@ -5753,7 +5722,7 @@ OpenGlossaryEditor(kind := "jp") {
     if (prof = "")
         prof := "default"
 
-    title := (kind = "jp") ? "Edit JP->EN Glossary - " prof : "Edit EN->EN Glossary - " prof
+    title := (kind = "jp") ? "Edit JP -> TL Glossary - " prof : "Edit TL -> TL Glossary - " prof
     path  := (kind = "jp") ? GlossaryJP2ENPath(prof) : GlossaryEN2ENPath(prof)
 
     ; ensure the profile folder exists (only when editing/saving), but do NOT auto-create other profiles
@@ -5761,7 +5730,7 @@ OpenGlossaryEditor(kind := "jp") {
         DirCreate(GlossaryProfileDir(prof))
 
     txt := ""
-    try txt := FileExist(path) ? FileRead(path, "UTF-8") : "# One mapping per line: JP -> EN (or EN -> EN)`r`n"
+    try txt := FileExist(path) ? FileRead(path, "UTF-8") : "# One mapping per line: JP -> TL (or TL -> TL)`r`n"
 
    g := Gui("+Resize", title)
     edGloss := g.Add("Edit", "xm ym w700 h420 WantTab WantReturn Wrap", txt)
@@ -5770,7 +5739,7 @@ OpenGlossaryEditor(kind := "jp") {
 
     btnSave.OnEvent("Click", (*) => (
     SaveTextAtomic(path, edGloss.Value),
-    Toast("Saved " ((kind="jp")?"JP->EN":"EN->EN") " glossary for profile '" prof "'")
+    Toast("Saved " ((kind="jp")?"JP -> TL":"TL -> TL") " glossary for profile '" prof "'")
 ))
 
     btnClose.OnEvent("Click", (*) => g.Destroy())
@@ -5810,8 +5779,8 @@ NewGlossaryProfile(*) {
 
     ; create both partner files so both rows immediately have it
     DirCreate(dir)
-    FileAppend("# One mapping per line: JP -> EN`r`n", GlossaryJP2ENPath(name), "UTF-8")
-    FileAppend("# One mapping per line: EN -> EN`r`n", GlossaryEN2ENPath(name), "UTF-8")
+    FileAppend("# One mapping per line: JP -> TL`r`n", GlossaryJP2ENPath(name), "UTF-8")
+    FileAppend("# One mapping per line: TL -> TL`r`n", GlossaryEN2ENPath(name), "UTF-8")
 
     ; select it in BOTH rows and persist
     RefreshGlossaryProfilesList(name, name)
@@ -5984,16 +5953,17 @@ GetOverlayStateForProfile() {
     global overlayTrans, boxBgHex, bdrOutHex, bdrInHex, txtHex
     global fontName, fontSize
     global bdrOutW, bdrInW
+    SyncUnifiedWindowAppearance()
     return Map(
         "overlayTrans", overlayTrans,
         "boxBg",  boxBgHex,
-        "bdrOut", bdrOutHex,
-        "bdrIn",  bdrInHex,
+        "bdrOut", boxBgHex,
+        "bdrIn",  boxBgHex,
         "txt",    txtHex,
         "font",   fontName,
         "size",   fontSize,
-        "outw",   bdrOutW,
-        "inw",    bdrInW
+        "outw",   0,
+        "inw",    0
     )
 }
 
@@ -6001,9 +5971,8 @@ ApplyOverlayState(st) {
     global overlayTrans, boxBgHex, bdrOutHex, bdrInHex, txtHex
     global fontName, fontSize, bdrOutW, bdrInW
     global slTrans, lblTransPct
-    global rectBg, rectOut, rectIn, rectTxt
+    global rectBg, rectTxt
     global ddlFont, edFSize
-    global edOutW, edInW, udOutW, udInW
 
     if st.Has("overlayTrans") {
         overlayTrans := Integer(st["overlayTrans"])
@@ -6017,12 +5986,6 @@ ApplyOverlayState(st) {
     if st.Has("boxBg") {
         boxBgHex := st["boxBg"], rectBg.Opt("Background" . boxBgHex)
     }
-    if st.Has("bdrOut") {
-        bdrOutHex := st["bdrOut"], rectOut.Opt("Background" . bdrOutHex)
-    }
-    if st.Has("bdrIn") {
-        bdrInHex := st["bdrIn"], rectIn.Opt("Background" . bdrInHex)
-    }
     if st.Has("txt") {
         txtHex := st["txt"], rectTxt.Opt("Background" . txtHex)
     }
@@ -6032,18 +5995,7 @@ ApplyOverlayState(st) {
     if st.Has("size") {
         fontSize := Integer(st["size"]), edFSize.Value := fontSize
     }
-    if st.Has("outw") {
-        bdrOutW := Integer(st["outw"])
-        edOutW.Value := bdrOutW
-        try udOutW.Value := bdrOutW
-    }
-
-    if st.Has("inw") {
-        bdrInW := Integer(st["inw"])
-        edInW.Value := bdrInW
-        try udInW.Value := bdrInW
-    }
-
+    SyncUnifiedWindowAppearance()
     RefreshColorSwatches()
     SaveAll()
     SendOverlayTheme()
@@ -6088,7 +6040,7 @@ LoadProfile(name) {
     try IniWrite(name, iniPath, "profiles", "translator_last")
     try ddlProf.Text := name
     st := Map()
-    for k in ["overlayTrans","boxBg","bdrOut","bdrIn","txt","font","size","outw","inw","ovX","ovY","ovW","ovH","ovDPI"] {
+    for k in ["overlayTrans","boxBg","txt","font","size","ovX","ovY","ovW","ovH","ovDPI"] {
         v := IniRead(path, "overlay", k, "")
         if (v != "")
             st[k] := v
@@ -6170,6 +6122,8 @@ SendOverlayTheme(targetTitle := "") {
     global overlayTrans_EW, boxBgHex_EW, bdrOutHex_EW, bdrInHex_EW, txtHex_EW, nameHex_EW
     global fontName_EW, fontSize_EW, bdrOutW_EW, bdrInW_EW
 
+    SyncUnifiedWindowAppearance()
+
     ; Launch-time initialization can target one overlay without reformatting the
     ; other window's existing RichEdit content. Normal settings changes update both.
     targetTitles := (targetTitle = "") ? ["Translator", "Explainer"] : [targetTitle]
@@ -6184,24 +6138,24 @@ SendOverlayTheme(targetTitle := "") {
         if (title = "Explainer") {
             s := "trans=" overlayTrans_EW
                . "|bg="    boxBgHex_EW
-               . "|b_out=" bdrOutHex_EW
-               . "|b_in="  bdrInHex_EW
+               . "|b_out=" boxBgHex_EW
+               . "|b_in="  boxBgHex_EW
                . "|txt="   txtHex_EW
                . "|font="  fontName_EW
                . "|size="  fontSize_EW
-               . "|outw="  bdrOutW_EW
-               . "|inw="   bdrInW_EW
+               . "|outw=0"
+               . "|inw=0"
         } else {
             s := "trans=" overlayTrans
                . "|bg="    boxBgHex
-               . "|b_out=" bdrOutHex
-               . "|b_in="  bdrInHex
+               . "|b_out=" boxBgHex
+               . "|b_in="  boxBgHex
                . "|txt="   txtHex
                . "|name="  nameHex
                . "|font="  fontName
                . "|size="  fontSize
-               . "|outw="  bdrOutW
-               . "|inw="   bdrInW
+               . "|outw=0"
+               . "|inw=0"
         }
 
         DbgCP("SendTheme(" title ") " s)
