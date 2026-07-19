@@ -2,9 +2,11 @@
 
 All notable changes to JRPG Translator are documented here.
 
-## 0.7.5 - In development
+## 0.7.5 - 2026-07-19
 
-This is the current development source for the next JRPG Translator release.
+This release focuses on emulator-friendly startup, a more compact live-audio
+workflow, responsive control-panel sizing, capture reliability, and overlay
+polish.
 
 ### Control panel and audio
 
@@ -12,35 +14,72 @@ This is the current development source for the next JRPG Translator release.
   compact `Audio Translation On/Off` button that reflects the active state.
 - Added non-activating popup confirmations when audio translation starts or
   stops, including when triggered from a controller-mapped hotkey.
+- Added a scrollable 890 x 680 design canvas so the control panel can be resized
+  down to approximately 640 x 480 without losing access to controls.
+- Added native horizontal and vertical scrollbars, mouse-wheel scrolling, and
+  dark-mode scrollbar styling.
+- Made the custom tab row fit narrower windows while keeping every tab
+  reachable and preserving the beginning of shortened labels.
+- Fixed ghost tab controls, alternating page offsets, stale scroll positions,
+  and clipped tab labels in compact layouts.
+- Standardized dropdown widths in Screenshot Translation and Audio Translation
+  and reduced unused footer space.
+- Fixed initially selected-looking Font and Profile dropdown text and related
+  invalid-value startup warnings.
+- Added natural model sorting so model families and version numbers remain
+  grouped in a predictable order.
+- Added built-in OpenAI model entries for `gpt-5.5`, `gpt-5.4-nano`, and
+  `gpt-5.4-pro`.
+- Added built-in Gemini model entries for `gemini-3.1-flash-lite`,
+  `gemini-3.5-flash`, and `gemini-3.1-pro-preview`.
+
+### Startup and emulator integration
+
 - Added a background-start mode for front ends such as Big Box so launching the
   translator alongside a game does not expose the control panel or foreground
   the Windows taskbar.
 - Improved startup focus handling so emulators retain control while configured
   overlays open automatically.
+- Allowed Translator to start visible and always on top while Explainer starts
+  independently in the background when it is not configured as always on top.
 - Simplified Translator and Explainer appearance settings to one window color
   while retaining a Windows 10 border fallback.
-- Reworded Terminology Overrides around language-neutral `JP -> TL` and
-  `TL -> TL` glossary profiles, where TL means the selected target language.
 
 ### Overlay behavior
 
-- Standardized the compiled overlay name as `bin/overlay.exe` while source runs
-  continue to use the AutoHotkey overlay script.
-- Prevented the Translator overlay from taking focus or restoring a blinking
-  text caret when opened through the control panel.
-- Corrected independent Translator and Explainer startup visibility and
-  always-on-top behavior when both share the same overlay implementation.
-- Preserved existing Translator colors and speaker-name formatting when the
-  Explainer is opened or recreated.
-- Improved request-status glyph placement so it does not obscure translated
-  text near the upper-right corner.
-- Cleaned up explanation-ready notifications and improved overlay theme refresh
-  isolation.
+- Prevented overlays from taking focus or restoring a blinking text caret when
+  opened through the control panel or scrolled while inactive.
+- Improved controller and mouse-wheel scrolling of inactive overlays without
+  swallowing wheel input in unrelated Windows applications.
+- Preserved Translator text and speaker-name colors when opening Explainer or
+  applying live font, color, transparency, and window-theme changes.
+- Improved request-status glyph size and placement so it does not obscure text
+  near the upper-right corner.
+- Cleaned up explanation-ready and audio-state notifications.
+- Corrected independent Translator and Explainer startup visibility, z-order,
+  and always-on-top behavior.
 
-### Documentation
+### Capture and translation
 
-- Updated source-build paths and component names for the standardized overlay.
-- Clarified multilingual terminology overrides and their profile format.
+- Capture commands now start Translator automatically when the overlay is not
+  already running and wait for it to become ready before selection begins.
+- Improved capture-window highlighting after moving between the desktop, full
+  screen, and individual application windows.
+- Added the least restrictive Gemini safety settings supported by the API for
+  mature game translation and explanation requests.
+- Retained OpenAI temperature compatibility for models that reject custom
+  temperature values while using temperature 0 where supported.
+
+### Terminology, naming, and documentation
+
+- Reworded Terminology Overrides around language-neutral `JP -> TL` and
+  `TL -> TL` glossary profiles, where TL means the prompt-selected target
+  language.
+- Expanded the terminology introduction and examples for multilingual use.
+- Standardized the source and executable names as `JRPG Translator.ahk`,
+  `JRPG Translator.exe`, `bin/overlay.ahk`, and `bin/overlay.exe`.
+- Updated source-build paths, component names, workflow instructions, and
+  release documentation.
 
 ## 0.7.0 - 2026-07-13
 
