@@ -921,6 +921,7 @@ CancelAnyPick() {
     try OnMessage(0x0201, Region_LButtonDown, 0)
     try OnMessage(0x0202, Region_LButtonUp,   0)
     try OnMessage(0x0201, PickWindowClick,    0)
+    try Hotkey("LButton", PickWindowClick, "Off")
 
     ; Hide/remove any visual pick UI that might be left
     if IsSet(__HoverBorderHwnd) && __HoverBorderHwnd {
@@ -1113,38 +1114,64 @@ FinishRegionPick(sx, sy, ex, ey) {
 StartPickWindow(maxKB := "", *) {
     global Cap_MaxKB
 
-    ; Make sure region handlers are not lingering, then register window handler
-    OnMessage(0x0201, Region_LButtonDown, 0)
-    OnMessage(0x0202, Region_LButtonUp,   0)
-    OnMessage(0x0201, PickWindowClick) ; left button down confirms
+    CancelAnyPick()
 
     BeginPickHide()   ; <<< hide Translator + Explainer while picking
     if (IsNumber(maxKB))
         Cap_MaxKB := Integer(maxKB)
 
+    ; The visual highlight is mouse-transparent, so capture the confirming click
+    ; globally instead of relying on that GUI to receive WM_LBUTTONDOWN.
+    Hotkey("LButton", PickWindowClick, "On")
     SetTimer(PulseHover, 30)
     ToolTip("Hover window and click to select…"), SetTimer(() => ToolTip(""), -1800)
 }
 
-PulseHover() {
+PickWindowUnderMouse() {
     MouseGetPos ,, &hwnd
     if (!hwnd)
-        return
-    WinGetPos &x, &y, &w, &h, "ahk_id " hwnd
-    ; draw a thin layered window border
-    static b := 0
-global __HoverBorderHwnd
-if (!IsObject(b)) {
-    b := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale")
-    b.BackColor := "00FFFF"
-    WinSetTransparent 60, b.Hwnd
+        return 0
+
+    ; Controls inside an application report their own HWND. Highlight and save
+    ; the containing top-level window instead.
+    rootHwnd := DllCall("user32\GetAncestor", "ptr", hwnd, "uint", 2, "ptr") ; GA_ROOT
+    return rootHwnd ? rootHwnd : hwnd
 }
-b.Show("NA x" x " y" y " w" w " h" h)
-__HoverBorderHwnd := b.Hwnd
+
+PulseHover() {
+    global __HoverBorderHwnd
+    static b := 0
+
+    hwnd := PickWindowUnderMouse()
+    if (!hwnd) {
+        if (__HoverBorderHwnd)
+            try WinHide "ahk_id " __HoverBorderHwnd
+        return
+    }
+
+    try WinGetPos &x, &y, &w, &h, "ahk_id " hwnd
+    catch {
+        if (__HoverBorderHwnd)
+            try WinHide "ahk_id " __HoverBorderHwnd
+        return
+    }
+    if (w <= 0 || h <= 0)
+        return
+
+    ; WS_EX_TRANSPARENT keeps this visual from becoming its own hover target;
+    ; WS_EX_NOACTIVATE keeps it from stealing focus while it follows the pointer.
+    if (!IsObject(b)) {
+        b := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale +E0x20 +E0x08000000")
+        b.BackColor := "00FFFF"
+        WinSetTransparent 60, b.Hwnd
+    }
+    b.Show("NA x" x " y" y " w" w " h" h)
+    __HoverBorderHwnd := b.Hwnd
 }
 
 PickWindowClick(*) {
-    ; Unregister the same callback we registered in StartPickWindow()
+    ; Stop both the current global capture and any legacy message callback.
+    try Hotkey("LButton", PickWindowClick, "Off")
     OnMessage(0x0201, PickWindowClick, 0)
     SetTimer(PulseHover, 0)
 
@@ -1154,7 +1181,7 @@ PickWindowClick(*) {
         try WinHide "ahk_id " __HoverBorderHwnd
     }
 
-    MouseGetPos ,, &hwnd
+    hwnd := PickWindowUnderMouse()
     if (!hwnd) {
         ToolTip("No window"), SetTimer(() => ToolTip(""), -700)
         return
@@ -1603,6 +1630,10 @@ ApplyTheme() {
         , "uint", 0x0001 | 0x0004 | 0x0100) ; RDW_INVALIDATE|RDW_ERASE|RDW_UPDATENOW
 		    ; ensure outer/inner/panel and edit update immediately
     RefreshAllBg()
+    ; SetFont resets a RichEdit's existing character colors to the system
+    ; default. Rebuild the stored text formatting immediately so live changes
+    ; retain the configured text/name colors and inline italics.
+    RenderCombined(true)
     QueueHideOutputCaret()
 }
 
@@ -1847,9 +1878,15 @@ HideOverlayStatus(*) {
             , "uint", 0x0001 | 0x0100) ; INVALIDATE|UPDATENOW
 }
 
-RenderCombined() {
+RenderCombined(preserveScroll := false) {
     global OutputCtl, __OcrText, __AudioText
     global TXT_COLOR
+
+    scrollPos := 0
+    if (preserveScroll) {
+        scrollPos := Buffer(8, 0) ; POINT used by EM_GETSCROLLPOS/EM_SETSCROLLPOS
+        try SendMessage(0x04DD, 0, scrollPos.Ptr, OutputCtl.Hwnd) ; EM_GETSCROLLPOS
+    }
 
     combined := ""
     if (Trim(__OcrText) != "")
@@ -1928,9 +1965,13 @@ for _, s in spans {
     SendMessage(EM_SETCHARFORMAT, SCF_SELECTION, cf2.Ptr, OutputCtl.Hwnd)
 }
 
-    ; Clear selection and scroll caret into view
+    ; Clear selection. Normal content updates start at the top; appearance-only
+    ; updates restore the reader's previous scroll position.
     SendMessage(EM_SETSEL, 0, 0, OutputCtl.Hwnd)
-    SendMessage(0x00CE, 0, 0, OutputCtl.Hwnd) ; EM_SCROLLCARET
+    if (preserveScroll && IsObject(scrollPos))
+        SendMessage(0x04DE, 0, scrollPos.Ptr, OutputCtl.Hwnd) ; EM_SETSCROLLPOS
+    else
+        SendMessage(0x00B7, 0, 0, OutputCtl.Hwnd) ; EM_SCROLLCARET
 }
 
 ScrollOutputToTop(*) {
@@ -2131,6 +2172,11 @@ ScrollOutputByWheelDelta(delta) {
     if (!IsSet(OutputCtl) || !OutputCtl)
         return
 
+    ; RichEdit may recreate its caret while processing EM_LINESCROLL. Suppress
+    ; it on both sides of the scroll so mouse and controller wheel input cannot
+    ; leave a blinking insertion point behind.
+    QueueHideOutputCaret()
+
     static SPI_GETWHEELSCROLLLINES := 0x0068
     linesPerNotch := 3
     DllCall("user32\SystemParametersInfo", "uint", SPI_GETWHEELSCROLLLINES
@@ -2145,6 +2191,8 @@ ScrollOutputByWheelDelta(delta) {
     lines := -notches * linesPerNotch
     DllCall("user32\SendMessage", "ptr", OutputCtl.Hwnd
         , "uint", 0x00B6, "ptr", 0, "ptr", lines) ; EM_LINESCROLL
+    QueueHideOutputCaret()
+    QueueFocusOverlaySink()
 }
 
 WheelToEdit(wParam, lParam, msg, hwnd) {
@@ -2192,7 +2240,33 @@ OverlayShouldReceiveGlobalWheel(*) {
     global Overlay
     if !(IsSet(Overlay) && Overlay && Overlay.Hwnd)
         return false
-    return IsTopVisibleJrpgOverlay(Overlay.Hwnd)
+    ; The global hook exists for JoyToKey/controller scrolling while the real
+    ; pointer is parked out of sight. Everywhere else, leave the wheel to the
+    ; window under the mouse; hovering the overlay uses its local wheel handler.
+    return IsTopVisibleJrpgOverlay(Overlay.Hwnd) && IsMouseParkedInScreenCorner()
+}
+
+IsMouseParkedInScreenCorner(edgeTolerance := 12) {
+    CoordMode "Mouse", "Screen"
+    MouseGetPos &mouseX, &mouseY
+
+    try monitorCount := MonitorGetCount()
+    catch
+        return false
+
+    Loop monitorCount {
+        try MonitorGet(A_Index, &left, &top, &right, &bottom)
+        catch
+            continue
+
+        nearHorizontalEdge := (Abs(mouseX - left) <= edgeTolerance
+            || Abs(mouseX - (right - 1)) <= edgeTolerance)
+        nearVerticalEdge := (Abs(mouseY - top) <= edgeTolerance
+            || Abs(mouseY - (bottom - 1)) <= edgeTolerance)
+        if (nearHorizontalEdge && nearVerticalEdge)
+            return true
+    }
+    return false
 }
 
 RegisterOverlayWheelHotkeys() {
