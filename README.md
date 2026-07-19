@@ -20,7 +20,8 @@ through mapping tools such as JoyToKey, Steam Input, or DS4Windows.
 - Translation and explanation prompt profiles editable from the control panel.
 - Shared OpenAI and Gemini model lists across translation and explanation.
 - Selectable output language for live audio translation.
-- JP-to-EN and EN-to-EN glossary profiles for names and terminology.
+- JP-to-target-language and target-language-to-target-language glossary profiles
+  for consistent names, terminology, spelling, and preferred wording.
 - Configurable hotkeys, spatial controller navigation, and optional dark mode.
 - Non-activating overlays that can remain visible without taking focus from the
   game or pausing an emulator.
@@ -69,7 +70,9 @@ In the **Audio Translation** tab:
 1. Select the Windows playback device.
 2. Choose OpenAI or Gemini and a compatible live translation model.
 3. Select the output language.
-4. Choose **Start Audio**, then enable or disable listening as needed.
+4. Choose **Audio Translation Off** to start translation. The button changes to
+   **Audio Translation On** while the live session is active; choose it again to
+   stop.
 
 Audio is streamed directly to the selected live translation model. Translated
 lines appear at the bottom of the Translator overlay while older lines move
@@ -159,7 +162,7 @@ are ignored by Git.
 
 | File | Purpose |
 | --- | --- |
-| `JRPG_Translator.ahk` | Main control panel and workflow orchestration |
+| `JRPG Translator.ahk` | Main control panel and workflow orchestration |
 | `bin/overlay.ahk` | Translator and Explainer overlay windows |
 | `bin/overlay.exe` | Compiled Translator and Explainer overlay used by release builds |
 | `scripts/screenshot_translator.py` | Screenshot vision translation and output formatting |
@@ -171,7 +174,7 @@ Runtime messages and generated overlay text are exchanged through
 
 ## Running from Source
 
-Install AutoHotkey v2 and run `JRPG_Translator.ahk`. The source version launches
+Install AutoHotkey v2 and run `JRPG Translator.ahk`. The source version launches
 `bin/overlay.ahk`; compiled releases launch `bin/overlay.exe`.
 The Python scripts require Python 3.12 and their listed dependencies, or the
 portable Python environment included in a release package.
