@@ -18,7 +18,8 @@ through mapping tools such as JoyToKey, Steam Input, or DS4Windows.
 - Independent Translator and Explainer overlays with configurable colors,
   fonts, borders, transparency, position, and size.
 - Translation and explanation prompt profiles editable from the control panel.
-- Shared OpenAI and Gemini model lists across translation and explanation.
+- Independent model lists for screenshot translation, live audio, and
+  explanations, with API-backed model discovery and manual model-ID entry.
 - Selectable output language for live audio translation.
 - JP-to-target-language and target-language-to-target-language glossary profiles
   for consistent names, terminology, spelling, and preferred wording.
@@ -99,6 +100,9 @@ or another controller mapper. In the control panel:
 - Enter activates buttons, checkboxes, and dropdown selections.
 - Page Up and Page Down switch tabs and work well when mapped to shoulder
   buttons.
+- Transparency, font weight, and overlay colors can be adjusted without a
+  mouse; the controller color editor provides live hue, saturation, and
+  brightness previews.
 - Mouse-wheel or arrow-key mappings can scroll the visible Translator or
   Explainer overlay even when it does not own game focus.
 
@@ -168,6 +172,7 @@ are ignored by Git.
 | `scripts/screenshot_translator.py` | Screenshot vision translation and output formatting |
 | `scripts/live_audio_translator.py` | Direct streaming audio translation |
 | `scripts/explainer.py` | Japanese-learning explanations |
+| `scripts/model_catalog.py` | Provider model discovery, filtering, sorting, and caching |
 
 Runtime messages and generated overlay text are exchanged through
 `%TEMP%\JRPG_Overlay`.
