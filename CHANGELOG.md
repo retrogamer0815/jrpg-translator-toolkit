@@ -2,6 +2,58 @@
 
 All notable changes to JRPG Translator are documented here.
 
+## 0.8.0 - 2026-07-20
+
+This release completes the controller-first configuration workflow, adds
+provider-backed model discovery, and expands terminology profiles across every
+translation path.
+
+### Model management
+
+- Separated model lists for Screenshot Translation and Explanation so each
+  workflow can keep models suited to its own input type and purpose.
+- Added an `Add model` flow that can browse models available to the configured
+  OpenAI or Gemini API key or accept a model ID manually.
+- Added task-aware online filtering for screenshot-capable, explanation, and
+  live-audio models, with natural sorting and a local catalog cache.
+- Added controller-friendly model dialogs with arrow navigation, Enter-based
+  selection, dark-mode styling, refresh controls, and direct movement from the
+  model list to its action buttons.
+- Disabled model controls for the provider that is not currently selected.
+
+### Controller and appearance controls
+
+- Added controller operation for overlay transparency and color settings.
+- Added a custom hue, saturation, and brightness editor with live color preview,
+  informative gradient tracks, and clear light/dark focus indicators.
+- Added independent Bold controls for Translator and Explainer overlay fonts.
+- Improved RichEdit font handling for Japanese-capable pixel fonts, including
+  PixelMplus10 and PixelMplus12, while retaining speaker-name colors.
+- Added dark-mode support to glossary and prompt text editors and stopped their
+  contents from opening fully selected.
+- Hid the advanced Paths tab by default behind a `showPathsTab` setting and made
+  Debug mode default to off while preserving both options for advanced users.
+
+### Terminology overrides
+
+- Changed replacement matching to be case-insensitive while preserving the
+  exact replacement text entered by the user.
+- Applied JP-to-target-language and target-language-to-target-language glossary
+  rules to screenshot translations and explanations.
+- Applied target-language-to-target-language glossary rules to live-audio
+  translation output.
+
+### Interface and reliability
+
+- Refined alignment, spacing, dropdown widths, and button sizing across the
+  Screenshot Translation, Translation Window, Explanation, and Explanation
+  Window tabs.
+- Unified the Translation Window and Explanation Window appearance layouts and
+  kept compact color swatches aligned with the other controls.
+- Fixed Debug mode propagation to the Python processes and overlays.
+- Fixed additional caret, text-color, font-refresh, and control-lifetime issues
+  found while changing overlay appearance or closing controller dialogs.
+
 ## 0.7.5 - 2026-07-19
 
 This release focuses on emulator-friendly startup, a more compact live-audio
