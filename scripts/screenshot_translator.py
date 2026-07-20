@@ -296,22 +296,68 @@ def load_glossary(path) -> List[Tuple[str, str]]:
     return entries
 
 
+def _sentence_case(text: str) -> str:
+    lowered = text.lower()
+    for index, char in enumerate(lowered):
+        if char.isalpha():
+            return lowered[:index] + char.upper() + lowered[index + 1:]
+    return lowered
+
+
+def _adapt_glossary_case(src: str, dst: str, matched: str) -> str:
+    """Adapt a replacement's case unless the glossary source declares it canonical."""
+    source_first_letter = next((char for char in src if char.isalpha()), "")
+    if source_first_letter.isupper():
+        return dst
+
+    matched_letters = [char for char in matched if char.isalpha()]
+    if not matched_letters:
+        return dst
+    if all(char.isupper() for char in matched_letters):
+        return dst.upper()
+    if all(char.islower() for char in matched_letters):
+        return dst.lower()
+
+    if re.search(r"\s", src):
+        words = re.findall(r"[^\W\d_]+", matched, flags=re.UNICODE)
+        if words and all(word[0].isupper() and word[1:].islower() for word in words):
+            return dst.title()
+
+    if matched_letters[0].isupper() and all(
+        char.islower() for char in matched_letters[1:]
+    ):
+        return _sentence_case(dst)
+
+    return dst
+
+
 def apply_en_glossary(text: str, en2en: List[Tuple[str, str]]) -> str:
-    """Apply EN→EN replacements.
-       - Phrases: literal, case-insensitive
-       - Single tokens: whole word + optional plural/possessive suffix kept (s, 's, ’s)
+    """Apply case-insensitive EN→EN replacements.
+
+    Capitalized glossary sources use the destination exactly as written. Lowercase
+    sources adapt the destination to the matched lowercase, sentence-case,
+    title-case, or uppercase text. Single-token plural/possessive suffixes are kept.
     """
     out = text
     for src, dst in en2en:
         if re.search(r"\s", src):
             pattern = re.compile(re.escape(src), flags=re.IGNORECASE)
-            out = pattern.sub(dst, out)
+            out = pattern.sub(
+                lambda match: _adapt_glossary_case(src, dst, match.group(0)),
+                out,
+            )
         else:
             pattern = re.compile(
-                rf"\b{re.escape(src)}(?P<suf>s|\'s|’s)?\b",
+                rf"\b(?P<core>{re.escape(src)})(?P<suf>s|'s|’s)?\b",
                 flags=re.IGNORECASE
             )
-            out = pattern.sub(lambda m: dst + (m.group("suf") or ""), out)
+            out = pattern.sub(
+                lambda match: (
+                    _adapt_glossary_case(src, dst, match.group("core"))
+                    + (match.group("suf") or "")
+                ),
+                out,
+            )
     return out
 
 
