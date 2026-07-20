@@ -1,4 +1,4 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 #SingleInstance Off
 #Warn
 #NoTrayIcon
@@ -91,15 +91,34 @@ DirCreate(explainsDir)
 global CP_ENABLE_EXPLAINER_DESIGN := true
 
 ; ===== Debug helpers =====
-global __DBG_ENABLED_CP := true
-global __DBG_LOG := A_ScriptDir "\Settings\debug.log"
+global __DBG_ENABLED_CP := (Trim(IniRead(A_ScriptDir "\Settings\control.ini", "cfg", "debugMode", 0)) != "0")
+global __DBG_LOG := A_Temp "\JRPG_Control\debug.log"
+
+SetDebugMode(enabled) {
+    global __DBG_ENABLED_CP
+    __DBG_ENABLED_CP := enabled ? true : false
+    EnvSet("JRPG_DEBUG", __DBG_ENABLED_CP ? "1" : "0")
+}
+
+CPOnDebugModeToggle(*) {
+    global cbDebug, debugMode
+    debugMode := cbDebug.Value ? 1 : 0
+    SetDebugMode(debugMode)
+    MarkDirty()
+}
+
+SetDebugMode(__DBG_ENABLED_CP)
+
 DbgCP(msg) {
+    global __DBG_ENABLED_CP, __DBG_LOG
+    if !__DBG_ENABLED_CP
+        return
     Try {
-	    ts := FormatTime(, "yyyy-MM-dd HH:mm:ss")
+        ts := FormatTime(, "yyyy-MM-dd HH:mm:ss")
         dbgDir := A_Temp "\JRPG_Control"
         if !DirExist(dbgDir)
             DirCreate(dbgDir)
-        FileAppend("[" ts "] CONTROL  " msg "`n", dbgDir "\debug.log", "UTF-8")
+        FileAppend("[" ts "] CONTROL  " msg "`n", __DBG_LOG, "UTF-8")
     }
     Catch as exx
     {
@@ -118,6 +137,9 @@ global CPThemeBrushSurface := 0
 global CPThemeBrushFocus := 0
 global CPThemeMutedHwnds := Map()
 global CPThemeColorSwatchHwnds := Map()
+global CPColorFocusFrame := []
+global CPControllerColorGradientSliders := Map()
+global CPControllerColorGradientMessageRegistered := false
 global CPThemeMessagesRegistered := false
 global CPComboArrowOverlays := []
 
@@ -440,17 +462,36 @@ CPIsMutedControl(cpMutedHwnd) {
     return IsSet(CPThemeMutedHwnds) && IsObject(CPThemeMutedHwnds) && CPThemeMutedHwnds.Has(cpMutedHwnd)
 }
 
-CPRegisterColorSwatch(cpSwatchCtrl) {
+CPRegisterColorSwatch(cpSwatchCtrl, cpSwatchTarget := "", cpFocusable := true) {
     global CPThemeColorSwatchHwnds
-    if IsObject(cpSwatchCtrl) && cpSwatchCtrl.Hwnd
-        CPThemeColorSwatchHwnds[cpSwatchCtrl.Hwnd] := true
+    if IsObject(cpSwatchCtrl) && cpSwatchCtrl.Hwnd {
+        ; SS_NOTIFY + WS_TABSTOP lets a color preview participate in controller
+        ; navigation while retaining its normal mouse-click behavior.
+        if cpFocusable
+            try cpSwatchCtrl.Opt("+0x100 +0x10000")
+        CPThemeColorSwatchHwnds[cpSwatchCtrl.Hwnd] := cpSwatchTarget
+    }
     return cpSwatchCtrl
+}
+
+CPUnregisterColorSwatch(cpSwatchCtrlOrHwnd) {
+    global CPThemeColorSwatchHwnds
+    cpSwatchHwnd := IsObject(cpSwatchCtrlOrHwnd) ? cpSwatchCtrlOrHwnd.Hwnd : cpSwatchCtrlOrHwnd
+    if (cpSwatchHwnd && CPThemeColorSwatchHwnds.Has(cpSwatchHwnd))
+        CPThemeColorSwatchHwnds.Delete(cpSwatchHwnd)
 }
 
 CPIsColorSwatchControl(cpSwatchHwnd) {
     global CPThemeColorSwatchHwnds
     return IsSet(CPThemeColorSwatchHwnds) && IsObject(CPThemeColorSwatchHwnds)
         && CPThemeColorSwatchHwnds.Has(cpSwatchHwnd)
+}
+
+CPColorSwatchTarget(cpSwatchHwnd) {
+    global CPThemeColorSwatchHwnds
+    if CPIsColorSwatchControl(cpSwatchHwnd)
+        return CPThemeColorSwatchHwnds[cpSwatchHwnd]
+    return ""
 }
 
 CPIsCustomTabControl(cpThemeHwnd) {
@@ -602,7 +643,7 @@ CPApplyThemeToControl(cpThemeHwnd, darkMode := -1) {
         } else {
             try DllCall("uxtheme\SetWindowTheme", "ptr", cpThemeHwnd, "ptr", 0, "ptr", 0)
         }
-    } else if (cpThemeClass = "Edit" || cpThemeClass = "ComboBox") {
+    } else if (cpThemeClass = "Edit" || cpThemeClass = "ComboBox" || cpThemeClass = "ListBox") {
         try cpThemeCtrl.SetFont("c" cpThemeColors["text"])
         try cpThemeCtrl.Opt("+Background" cpThemeColors["surface"])
         if darkMode {
@@ -652,7 +693,10 @@ CPThemeCtlColor(wParam, lParam, msg, parentHwnd) {
     global ui, controlDarkMode, CPThemeBrushWindow, CPThemeBrushSurface
     if !controlDarkMode || !(IsSet(ui) && ui && ui.Hwnd)
         return
-    if (parentHwnd != ui.Hwnd && !DllCall("user32\IsChild", "ptr", ui.Hwnd, "ptr", lParam, "int"))
+    cpThemeOwner := DllCall("user32\GetWindow", "ptr", parentHwnd, "uint", 4, "ptr") ; GW_OWNER
+    if (parentHwnd != ui.Hwnd
+        && cpThemeOwner != ui.Hwnd
+        && !DllCall("user32\IsChild", "ptr", ui.Hwnd, "ptr", lParam, "int"))
         return
     ; Color previews retain their configured color instead of inheriting the window theme.
     if CPIsColorSwatchControl(lParam)
@@ -1043,11 +1087,77 @@ CPControlFromHwnd(hwnd) {
     return 0
 }
 
+CPEnsureColorFocusFrame() {
+    global ui, CPColorFocusFrame, controlDarkMode
+    if (IsSet(CPColorFocusFrame) && IsObject(CPColorFocusFrame) && CPColorFocusFrame.Length = 4)
+        return
+
+    CPColorFocusFrame := []
+    cpFrameColor := controlDarkMode ? "FFFFFF" : CPPalette(0)["accentFocus"]
+    Loop 4 {
+        ; Register frame segments as non-focusable color surfaces so dark-mode
+        ; WM_CTLCOLORSTATIC handling does not repaint them with the window brush.
+        cpFramePart := CPRegisterColorSwatch(
+            ui.Add("Text", "x0 y0 w1 h1 Hidden Disabled Background" cpFrameColor " +0x04000000")
+          , "", false)
+        CPColorFocusFrame.Push(cpFramePart)
+    }
+}
+
+CPHideColorFocusFrame() {
+    global CPColorFocusFrame
+    if !IsSet(CPColorFocusFrame) || !IsObject(CPColorFocusFrame)
+        return
+    for cpFramePart in CPColorFocusFrame
+        try cpFramePart.Visible := false
+}
+
+CPShowColorFocusFrame(swatchHwnd) {
+    global CPColorFocusFrame, controlDarkMode
+    if !CPIsColorSwatchControl(swatchHwnd)
+        return CPHideColorFocusFrame()
+
+    swatchCtrl := CPControlFromHwnd(swatchHwnd)
+    if !IsObject(swatchCtrl)
+        return CPHideColorFocusFrame()
+    CPEnsureColorFocusFrame()
+
+    swatchCtrl.GetPos(&swatchX, &swatchY, &swatchW, &swatchH)
+    cpFrameColor := controlDarkMode ? "FFFFFF" : CPPalette(0)["accentFocus"]
+    cpPad := 3
+    cpThickness := 2
+    cpOuterX := swatchX - cpPad
+    cpOuterY := swatchY - cpPad
+    cpOuterW := swatchW + cpPad * 2
+    cpOuterH := swatchH + cpPad * 2
+    cpFrameRects := [
+        [cpOuterX, cpOuterY, cpOuterW, cpThickness],
+        [cpOuterX, cpOuterY + cpOuterH - cpThickness, cpOuterW, cpThickness],
+        [cpOuterX, cpOuterY, cpThickness, cpOuterH],
+        [cpOuterX + cpOuterW - cpThickness, cpOuterY, cpThickness, cpOuterH]
+    ]
+    static SWP_KEEP_GEOMETRY := 0x0001 | 0x0002 | 0x0010
+    for cpFrameIndex, cpFramePart in CPColorFocusFrame {
+        cpFrameRect := cpFrameRects[cpFrameIndex]
+        cpFramePart.Opt("+Background" cpFrameColor)
+        cpFramePart.Move(cpFrameRect[1], cpFrameRect[2], cpFrameRect[3], cpFrameRect[4])
+        cpFramePart.Visible := true
+        try DllCall("user32\SetWindowPos", "ptr", cpFramePart.Hwnd, "ptr", 0
+            , "int", 0, "int", 0, "int", 0, "int", 0, "uint", SWP_KEEP_GEOMETRY)
+        try cpFramePart.Redraw()
+    }
+}
+
 CPRestoreFocusVisual() {
     global CPFocusVisualCtrl, CPFocusVisualHwnd
+    CPHideColorFocusFrame()
     if (IsSet(CPFocusVisualCtrl) && CPFocusVisualCtrl) {
-        try CPFocusVisualCtrl.SetFont("Norm")
-        try CPApplyThemeToControl(CPFocusVisualCtrl.Hwnd)
+        if CPIsColorSwatchControl(CPFocusVisualHwnd) {
+            try CPFocusVisualCtrl.Redraw()
+        } else {
+            try CPFocusVisualCtrl.SetFont("Norm")
+            try CPApplyThemeToControl(CPFocusVisualCtrl.Hwnd)
+        }
     }
     CPFocusVisualCtrl := 0
     CPFocusVisualHwnd := 0
@@ -1063,7 +1173,7 @@ CPSetTabFocusIndicator(show := false) {
 }
 
 CPRenderCustomTabBar(force := false) {
-    global tab, tabNames, CPTabButtons, CPTabBarFill, CPTabBarHasNavFocus, CPTabRenderedState, controlDarkMode
+    global tab, tabNames, CPTabVisiblePages, CPTabButtons, CPTabBarFill, CPTabBarHasNavFocus, CPTabRenderedState, controlDarkMode
     if !(IsSet(tab) && tab && tab.Hwnd && IsSet(CPTabButtons) && IsObject(CPTabButtons))
         return
 
@@ -1078,8 +1188,9 @@ CPRenderCustomTabBar(force := false) {
     if (!force && IsSet(CPTabRenderedState) && CPTabRenderedState = cpTabRenderState)
         return
 
-    for cpTabIndex, cpTabCtrl in CPTabButtons {
-        if (cpTabIndex = cpTabActive) {
+    for cpTabButtonIndex, cpTabCtrl in CPTabButtons {
+        cpTabPage := CPTabVisiblePages[cpTabButtonIndex]
+        if (cpTabPage = cpTabActive) {
             if cpTabNavFocused {
                 cpTabCtrl.Opt("+Background" cpTabColors["accentFocus"])
                 cpTabCtrl.SetFont("Bold c" cpTabColors["accentText"])
@@ -1190,7 +1301,7 @@ CPSelectCustomTab(cpTabIndex, *) {
 }
 
 CPMouseTabClick(*) {
-    global ui, CPTabButtons
+    global ui, CPTabVisiblePages, CPTabButtons
     if !(IsSet(ui) && ui && ui.Hwnd && IsSet(CPTabButtons) && IsObject(CPTabButtons))
         return
 
@@ -1200,17 +1311,17 @@ CPMouseTabClick(*) {
     if (cpMouseWindowHwnd != ui.Hwnd || !cpMouseControlHwnd)
         return
 
-    for cpTabIndex, cpTabCtrl in CPTabButtons {
+    for cpTabButtonIndex, cpTabCtrl in CPTabButtons {
         if (cpMouseControlHwnd = cpTabCtrl.Hwnd
             && DllCall("user32\IsWindowVisible", "ptr", cpTabCtrl.Hwnd, "int")) {
-            CPSelectCustomTab(cpTabIndex)
+            CPSelectCustomTab(CPTabVisiblePages[cpTabButtonIndex])
             return
         }
     }
 }
 
 CPCreateCustomTabBar() {
-    global ui, tabNames, CPTabButtons, CPTabNaturalWidths, CPTabBarFill
+    global ui, tabNames, CPTabVisiblePages, CPTabButtons, CPTabNaturalWidths, CPTabBarFill
     global CPTabBarHasNavFocus, CPTabRenderedState
 
     CPTabButtons := []
@@ -1222,12 +1333,13 @@ CPCreateCustomTabBar() {
     ; underneath only to manage page visibility and provide a keyboard focus target.
     try tab.Opt("+0x04000000") ; WS_CLIPSIBLINGS keeps native painting below the custom row.
     CPTabBarFill := ui.Add("Text", "x0 y0 w1 h1 Hidden BackgroundF0F0F0 +0x100 +0x04000000")
-    for cpTabIndex, cpTabLabel in tabNames {
+    for cpTabPage in CPTabVisiblePages {
+        cpTabLabel := tabNames[cpTabPage]
         cpTabCtrl := ui.Add("Text", "x0 y0 h30 Hidden Center Border +0x100 +0x200 +0x04000000 BackgroundF3F3F3 c202020", cpTabLabel)
         cpTabCtrl.GetPos(,, &cpTabNaturalW)
         CPTabNaturalWidths.Push(Max(46, cpTabNaturalW + 18))
         cpTabCtrl.Cursor := "Hand"
-        cpTabCtrl.OnEvent("Click", CPSelectCustomTab.Bind(cpTabIndex))
+        cpTabCtrl.OnEvent("Click", CPSelectCustomTab.Bind(cpTabPage))
         CPTabButtons.Push(cpTabCtrl)
     }
     CPLayoutCustomTabBar()
@@ -1257,8 +1369,11 @@ UpdateCPFocusRing(*) {
         CPSetTabFocusIndicator(false)
         return
     }
-    if (IsSet(CPFocusVisualHwnd) && CPFocusVisualHwnd = hwnd)
+    if (IsSet(CPFocusVisualHwnd) && CPFocusVisualHwnd = hwnd) {
+        if CPIsColorSwatchControl(hwnd)
+            CPShowColorFocusFrame(hwnd)
         return
+    }
 
     CPRestoreFocusVisual()
     if CPHwndIsTab(hwnd) {
@@ -1278,17 +1393,33 @@ UpdateCPFocusRing(*) {
 
     CPFocusVisualCtrl := ctrl
     CPFocusVisualHwnd := hwnd
+    if CPIsColorSwatchControl(hwnd) {
+        ; Keep the configured color visible and draw a high-contrast frame around it.
+        CPShowColorFocusFrame(hwnd)
+        return
+    }
     cpFocusColors := CPPalette()
     try ctrl.Opt("+Background" cpFocusColors["focus"])
     try ctrl.SetFont("Bold c" (controlDarkMode ? cpFocusColors["accentText"] : cpFocusColors["accentFocus"]))
 }
 
 UpdateCPActiveTabHighlight(*) {
-    global tab
+    global tab, CPTabVisiblePages
     static cpLastActiveTab := 0
 
     cpActiveTab := 0
     try cpActiveTab := tab.Value
+    cpActiveTabVisible := false
+    for cpVisiblePage in CPTabVisiblePages {
+        if (cpVisiblePage = cpActiveTab) {
+            cpActiveTabVisible := true
+            break
+        }
+    }
+    if (cpActiveTab && !cpActiveTabVisible && CPTabVisiblePages.Length) {
+        cpActiveTab := CPTabVisiblePages[1]
+        try tab.Value := cpActiveTab
+    }
     if (cpActiveTab && cpLastActiveTab && cpActiveTab != cpLastActiveTab)
         CPCanvasScrollTo(0, 0)
     if cpActiveTab
@@ -1350,7 +1481,7 @@ CPHwndIsFocusable(hwnd) {
 
     className := ""
     try className := WinGetClass("ahk_id " hwnd)
-    if (className = "" || className = "Static")
+    if (className = "" || (className = "Static" && !CPIsColorSwatchControl(hwnd)))
         return false
 
     style := DllCall("user32\GetWindowLongPtr", "ptr", hwnd, "int", -16, "ptr")
@@ -1454,6 +1585,13 @@ CPFocusFirstControlInCurrentTab() {
         CPSetFocusHwnd(bestHwnd)
         return true
     }
+    return false
+}
+
+CPHwndIsTrackbar(hwnd) {
+    if !hwnd
+        return false
+    try return WinGetClass("ahk_id " hwnd) = "msctls_trackbar32"
     return false
 }
 
@@ -1568,6 +1706,12 @@ CPNavMove(dir, *) {
         return
 
     curHwnd := CPFocusedHwnd()
+    if (curHwnd && CPHwndIsTrackbar(curHwnd) && (dir = "Left" || dir = "Right")) {
+        ; The $-prefixed navigation hotkeys do not retrigger on this synthetic
+        ; key, so the native slider receives it and fires its Change event.
+        SendEvent("{" dir "}")
+        return
+    }
     if (curHwnd && CPActionRowIndex(curHwnd)) {
         if (dir = "Left" || dir = "Right") {
             CPNavActionRowHorizontal(curHwnd, dir)
@@ -1679,6 +1823,10 @@ CPNavRight(*) {
 
 CPNavActivate(keyName := "Enter", *) {
     hwnd := CPFocusedHwnd()
+    if (keyName = "Enter" && CPIsColorSwatchControl(hwnd)) {
+        CPAdjustColorSwatchWithController(hwnd)
+        return
+    }
     if (hwnd && CPHwndIsCombo(hwnd) && !CPComboDropped(hwnd)) {
         CPShowCombo(hwnd, true)
         return
@@ -1699,22 +1847,28 @@ CPNavSpace(*) {
 }
 
 CPNavSwitchTab(dir) {
-    global tab, CPFocusVisualNavHwnd
+    global tab, CPTabVisiblePages, CPFocusVisualNavHwnd
     if !(IsSet(tab) && tab && tab.Hwnd)
         return
 
-    static TCM_GETITEMCOUNT := 0x1304
-    static TCM_GETCURSEL := 0x130B
-    count := SendMessage(TCM_GETITEMCOUNT, 0, 0, tab.Hwnd)
+    count := CPTabVisiblePages.Length
     if (count <= 0)
         return
 
-    tabIdx := SendMessage(TCM_GETCURSEL, 0, 0, tab.Hwnd) ; zero-based
-    if (tabIdx < 0)
-        tabIdx := 0
+    currentPage := 1
+    try currentPage := tab.Value
+    visibleIndex := 0
+    for cpTabIndex, cpTabPage in CPTabVisiblePages {
+        if (cpTabPage = currentPage) {
+            visibleIndex := cpTabIndex
+            break
+        }
+    }
+    if !visibleIndex
+        visibleIndex := 1
 
-    next := Mod(tabIdx + dir + count, count) + 1 ; Gui control value is one-based
-    try tab.Value := next
+    nextVisibleIndex := Mod(visibleIndex - 1 + dir + count, count) + 1
+    try tab.Value := CPTabVisiblePages[nextVisibleIndex]
     try tab.Focus()
     CPFocusVisualNavHwnd := tab.Hwnd
     CPSetTabFocusIndicator(true)
@@ -1859,6 +2013,7 @@ defT := Map( ; Translator overlay -> section [cfg]
   , "bdrInW",      0
   , "fontName",    defFontName
   , "fontSize",    defFontSize
+  , "fontBold",    0
 )
 
 defE := Map( ; Explainer overlay -> section [cfg_explainer]
@@ -1871,6 +2026,7 @@ defE := Map( ; Explainer overlay -> section [cfg_explainer]
   , "bdrInW",      0
   , "fontName",    defFontName
   , "fontSize",    defFontSize
+  , "fontBold",    0
 )
 
 ; Helper: write only if the key is missing (never overwrites user-changed values)
@@ -1907,8 +2063,9 @@ defGeminiImgModel   := "gemini-2.5-flash"
 defExplainProvider    := "openai"
 defExplainOpenAIModel := "gpt-4o-mini"
 defExplainGeminiModel := "gemini-2.5-flash"
-; --- Debug toggle default ---
-defDebugMode := 1   ; keep current behavior; set to 0 if you want logging OFF by default
+; --- Advanced UI + debug defaults ---
+defShowPathsTab := 0
+defDebugMode := 0
 ; --- Glossary profile defaults ---
 defJP2ENGlossaryProfile := "default"
 defEN2ENGlossaryProfile := "default"
@@ -1996,7 +2153,9 @@ capMode    := IniRead(iniPath, "capture", "mode", "region")           ; "region"
 capWinInfo := IniRead(iniPath, "capture", "winTitle", "")             ; window title (fallback)
 capRect    := IniRead(iniPath, "capture", "rect", "")                 ; "x,y,w,h" once selected
 
+showPathsTab := Integer(Load("showPathsTab", defShowPathsTab, "cfg")) ? 1 : 0
 debugMode := Integer(Load("debugMode", defDebugMode, "cfg"))
+SetDebugMode(debugMode)
 controlDarkMode := Integer(Load("darkMode", 0, "cfg_control")) ? 1 : 0
 CPSetPreferredAppDarkMode(controlDarkMode)
 
@@ -2014,6 +2173,7 @@ bdrInW  := 0
 ; overlay font
 fontName := Load("fontName", defFontName)
 fontSize := Integer(Load("fontSize", defFontSize))
+fontBold := Integer(Load("fontBold", 0)) ? 1 : 0
 
 ; === EXPLAINER overlay (separate state, section: cfg_explainer) ===
 overlayTrans_EW := Load("overlayTrans",     defOverlayTrans, "cfg_explainer")
@@ -2028,6 +2188,7 @@ bdrInW_EW  := 0
 
 fontName_EW := Load("fontName",             defFontName,    "cfg_explainer")
 fontSize_EW := Integer(Load("fontSize",     defFontSize,    "cfg_explainer"))
+fontBold_EW := Integer(Load("fontBold",     0,              "cfg_explainer")) ? 1 : 0
 SyncUnifiedWindowAppearance()
 
 ; --- EXPLAINER provider + model selections (own section)
@@ -2173,11 +2334,12 @@ AudioTargetName(label) {
 }
 
 ; default lists
-def_openai_img   := ["gpt-5.5","gpt-5.4-nano","gpt-5.4-pro","gpt-4o","gpt-4o-mini"]
-def_gemini_img   := ["gemini-3.1-flash-lite","gemini-3.5-flash","gemini-3.1-pro-preview","gemini-2.5-flash","gemini-2.5-flash-lite","gemini-2.5-pro"]
-def_openai_tr    := ["gpt-5.5","gpt-5.4-nano","gpt-5.4-pro","gpt-4o-mini","gpt-4o"]
-def_openai_audio := ["gpt-realtime-translate"]
-def_gemini_audio := ["gemini-3.5-live-translate-preview"]
+def_openai_img     := ["gpt-5.5","gpt-5.4-nano","gpt-5.4-pro","gpt-4o","gpt-4o-mini"]
+def_gemini_img     := ["gemini-3.1-flash-lite","gemini-3.5-flash","gemini-3.1-pro-preview","gemini-2.5-flash","gemini-2.5-flash-lite","gemini-2.5-pro"]
+def_openai_explain := def_openai_img.Clone()
+def_gemini_explain := def_gemini_img.Clone()
+def_openai_audio   := ["gpt-realtime-translate"]
+def_gemini_audio   := ["gemini-3.5-live-translate-preview"]
 
 ; --- Explanation tab defaults (provider + text models)
 defExplainProvider    := "openai"
@@ -2185,13 +2347,21 @@ defExplainOpenAIModel := "gpt-4o-mini"            ; uses text/chat models
 defExplainGeminiModel := "gemini-2.5-flash"       ; Gemini text
 
 ; load lists from INI (or defaults)
-model_openai_img   := ModelListRead("openai_img",   def_openai_img)
-model_gemini_img   := ModelListRead("gemini_img",   def_gemini_img)
-model_openai_tr    := ModelListRead("openai_tr",    def_openai_tr)
-model_openai_audio := ModelListRead("openai_audio", def_openai_audio)
-model_gemini_audio := ModelListRead("gemini_audio", def_gemini_audio)
-model_openai_img := ModelListMergeUnique(model_openai_img, model_openai_tr)
-model_openai_tr := model_openai_img
+model_openai_img     := ModelListRead("openai_img",     def_openai_img)
+model_gemini_img     := ModelListRead("gemini_img",     def_gemini_img)
+legacyOpenAIExplain  := ModelListRead("openai_tr",      def_openai_explain)
+model_openai_explain := ModelListRead("openai_explain", legacyOpenAIExplain)
+model_gemini_explain := ModelListRead("gemini_explain", model_gemini_img)
+model_openai_audio   := ModelListRead("openai_audio",   def_openai_audio)
+model_gemini_audio   := ModelListRead("gemini_audio",   def_gemini_audio)
+ModelListEnsure(model_openai_explain, explainOpenAIModel)
+ModelListEnsure(model_gemini_explain, explainGeminiModel)
+ModelListSort(model_openai_explain)
+ModelListSort(model_gemini_explain)
+; Persist the one-time split immediately so later screenshot-list edits cannot
+; become new explanation defaults on a subsequent launch.
+ModelListWrite("openai_explain", model_openai_explain)
+ModelListWrite("gemini_explain", model_gemini_explain)
 ModelListEnsure(model_openai_audio, "gpt-realtime-translate")
 ModelListEnsure(model_gemini_audio, "gemini-3.5-live-translate-preview")
 ModelListSort(model_openai_audio)
@@ -2201,12 +2371,14 @@ SaveAll(){
     global pythonExe,audioScript,overlayAhk,imgScript,overlayTrans,captureDir
     global trModel,audioProvider,geminiAudioModel,audioTargetLang
     global imgProvider,imgModel,geminiImgModel
-    global iniPath
+    global iniPath, debugMode, showPathsTab
     global capMaxKB,capMode,capRect
     global boxBgHex,bdrOutHex,bdrInHex,txtHex
-    global fontName,fontSize
+    global fontName,fontSize,fontBold
+    global fontBold_EW
     global bdrOutW,bdrInW
-    global model_openai_img, model_gemini_img, model_openai_tr, model_openai_audio, model_gemini_audio
+    global model_openai_img, model_gemini_img, model_openai_explain, model_gemini_explain
+    global model_openai_audio, model_gemini_audio
     global promptProfile, imgPostproc
  	global promptProfile, imgPostproc, chkDel, chkTop, chkDarkMode, controlDarkMode
 
@@ -2245,6 +2417,7 @@ SaveAll(){
     IniWrite(imgPostproc,     iniPath, "cfg", "imgPostproc")
     ; Back-compat: overlay reads "post"
     IniWrite(imgPostproc,     iniPath, "cfg", "post")
+	IniWrite(showPathsTab, iniPath, "cfg", "showPathsTab")
 	IniWrite(debugMode, iniPath, "cfg", "debugMode")
 	; Also persist the delete-after-use toggle to [paths]
     IniWrite(chkDel.Value ? 1 : 0, iniPath, "paths", "deleteAfterUse")
@@ -2263,6 +2436,7 @@ SaveAll(){
     ; font
     IniWrite(fontName,        iniPath, "cfg", "fontName")
     IniWrite(fontSize,        iniPath, "cfg", "fontSize")
+    IniWrite(fontBold,        iniPath, "cfg", "fontBold")
 	
 	    ; === EXPLAINER (separate section) ===
     IniWrite(overlayTrans_EW, iniPath, "cfg_explainer", "overlayTrans")
@@ -2284,6 +2458,7 @@ SaveAll(){
     ; font
     IniWrite(fontName_EW,     iniPath, "cfg_explainer", "fontName")
     IniWrite(fontSize_EW,     iniPath, "cfg_explainer", "fontSize")
+    IniWrite(fontBold_EW,     iniPath, "cfg_explainer", "fontBold")
 	
 	    ; Explainer bounds
     if (ewX != "")
@@ -2298,7 +2473,8 @@ SaveAll(){
     ; persist lists
     ModelListWrite("openai_img",   model_openai_img)
     ModelListWrite("gemini_img",   model_gemini_img)
-    ModelListWrite("openai_tr",    model_openai_tr)
+    ModelListWrite("openai_explain", model_openai_explain)
+    ModelListWrite("gemini_explain", model_gemini_explain)
     ModelListWrite("openai_audio", model_openai_audio)
     ModelListWrite("gemini_audio", model_gemini_audio)
     DbgCP("SaveAll() persisted current config.")
@@ -3227,7 +3403,8 @@ SetComboToExistingItem(combo, arr, desired := "") {
 }
 
 RefreshModelCombos(key, activeCombo := 0, activePreferredText := "") {
-    global model_openai_img, model_gemini_img, model_openai_tr, model_openai_audio, model_gemini_audio
+    global model_openai_img, model_gemini_img, model_openai_explain, model_gemini_explain
+    global model_openai_audio, model_gemini_audio
     global ddlIMG, ddlIMG_GM, ddlEOpenAI, ddlEGem, ddlTR, ddlA_GM
 
     arr := 0
@@ -3237,18 +3414,18 @@ RefreshModelCombos(key, activeCombo := 0, activePreferredText := "") {
             arr := model_openai_img
             if IsSet(ddlIMG)
                 combos.Push(ddlIMG)
-            if IsSet(ddlEOpenAI)
-                combos.Push(ddlEOpenAI)
         case "gemini_img":
             arr := model_gemini_img
             if IsSet(ddlIMG_GM)
                 combos.Push(ddlIMG_GM)
-            if IsSet(ddlEGem)
-                combos.Push(ddlEGem)
-        case "openai_tr":
-            arr := model_openai_tr
+        case "openai_explain":
+            arr := model_openai_explain
             if IsSet(ddlEOpenAI)
                 combos.Push(ddlEOpenAI)
+        case "gemini_explain":
+            arr := model_gemini_explain
+            if IsSet(ddlEGem)
+                combos.Push(ddlEGem)
         case "openai_audio":
             arr := model_openai_audio
             if IsSet(ddlTR)
@@ -3273,19 +3450,178 @@ RefreshModelCombos(key, activeCombo := 0, activePreferredText := "") {
     }
 }
 
-AddModel(arr, key, combo) {
-    new := Trim(InputBox("Add model:", "Add").Value)
-    if (new = "")
-        return
+AddModelValue(arr, key, combo, newModel) {
+    newModel := Trim(newModel)
+    if (newModel = "")
+        return false
     for v in arr
-        if (StrLower(v) = StrLower(new)) {
-            MsgBox("Already in the list: " new, "Add model")
-            return
+        if (StrLower(v) = StrLower(newModel)) {
+            MsgBox("Already in the list: " newModel, "Add model")
+            return false
         }
-    arr.Push(new)            ; modifies the original array
+    arr.Push(newModel)            ; modifies the original array
     ModelListWrite(key, arr)
-    RefreshModelCombos(key, combo, new)
-    DbgCP("Model added under [" key "]: " new)
+    RefreshModelCombos(key, combo, newModel)
+    DbgCP("Model added under [" key "]: " newModel)
+    return true
+}
+
+AddModel(arr, key, combo) {
+    newModel := Trim(InputBox("Add model:", "Add").Value)
+    return AddModelValue(arr, key, combo, newModel)
+}
+
+CPApplyOwnedDialogTheme(dlg) {
+    global controlDarkMode
+    if !(IsObject(dlg) && dlg.Hwnd)
+        return
+
+    dialogColors := CPPalette(controlDarkMode)
+    dlg.BackColor := dialogColors["window"]
+    CPApplyDarkTitleBar(dlg.Hwnd, controlDarkMode)
+    try CPSetPreferredAppDarkMode(controlDarkMode, dlg.Hwnd)
+    try {
+        for controlHwnd in WinGetControlsHwnd("ahk_id " dlg.Hwnd)
+            CPApplyThemeToControl(controlHwnd, controlDarkMode)
+    }
+    try DllCall("user32\RedrawWindow", "ptr", dlg.Hwnd, "ptr", 0, "ptr", 0, "uint", 0x185)
+}
+
+CPShowTextEditorDialog(dlg, editorCtrl) {
+    dlg.Show()
+    CPApplyOwnedDialogTheme(dlg)
+
+    ; Keep the editor ready for typing without selecting all existing text.
+    try editorCtrl.Focus()
+    try SendMessage(0x00B1, 0, 0, editorCtrl.Hwnd) ; EM_SETSEL
+    try SendMessage(0x00B7, 0, 0, editorCtrl.Hwnd) ; EM_SCROLLCARET
+}
+
+AddModelDialogSelect(which, rbOnline, rbManual, focusChoice := true, *) {
+    chooseOnline := (which = "online")
+    rbOnline.Value := chooseOnline ? 1 : 0
+    rbManual.Value := chooseOnline ? 0 : 1
+    if focusChoice
+        (chooseOnline ? rbOnline : rbManual).Focus()
+}
+
+AddModelDialogNavigate(direction, rbOnline, rbManual, btnContinue, btnCancel, *) {
+    focusHwnd := DllCall("user32\GetFocus", "ptr")
+    if (focusHwnd = rbOnline.Hwnd) {
+        if (direction = "Down" || direction = "Right")
+            rbManual.Focus()
+        return
+    }
+    if (focusHwnd = rbManual.Hwnd) {
+        if (direction = "Up" || direction = "Left")
+            rbOnline.Focus()
+        else if (direction = "Down")
+            btnContinue.Focus()
+        return
+    }
+    if (focusHwnd = btnContinue.Hwnd) {
+        if (direction = "Up")
+            rbManual.Focus()
+        else if (direction = "Right")
+            btnCancel.Focus()
+        return
+    }
+    if (focusHwnd = btnCancel.Hwnd) {
+        if (direction = "Up")
+            rbManual.Focus()
+        else if (direction = "Left")
+            btnContinue.Focus()
+        return
+    }
+    (rbOnline.Value ? rbOnline : rbManual).Focus()
+}
+
+AddModelDialogActivate(rbOnline, rbManual, btnContinue, btnCancel, *) {
+    focusHwnd := DllCall("user32\GetFocus", "ptr")
+    if (focusHwnd = rbOnline.Hwnd) {
+        AddModelDialogSelect("online", rbOnline, rbManual)
+        return
+    }
+    if (focusHwnd = rbManual.Hwnd) {
+        AddModelDialogSelect("manual", rbOnline, rbManual)
+        return
+    }
+    if (focusHwnd = btnCancel.Hwnd)
+        SendMessage(0x00F5, 0, 0, btnCancel.Hwnd) ; BM_CLICK
+    else
+        SendMessage(0x00F5, 0, 0, btnContinue.Hwnd)
+}
+
+CPApplyDialogRadioTheme(radioCtrl) {
+    global controlDarkMode
+    colors := CPPalette(controlDarkMode)
+    try radioCtrl.SetFont("c" colors["text"])
+    if controlDarkMode {
+        ; Unthemed radio text honors WM_CTLCOLORBTN, unlike the dark Explorer radio.
+        try DllCall("uxtheme\SetWindowTheme", "ptr", radioCtrl.Hwnd, "wstr", "", "wstr", "")
+    }
+    try DllCall("user32\InvalidateRect", "ptr", radioCtrl.Hwnd, "ptr", 0, "int", 1)
+}
+
+AddModelSourceDialog(provider, purpose) {
+    global ui
+    providerLabel := StrLower(provider) = "gemini" ? "Gemini" : "OpenAI"
+    purposeName := StrLower(purpose)
+    if (purposeName = "screenshot")
+        purposeLabel := "Screenshot Translation"
+    else if (purposeName = "explanation")
+        purposeLabel := "Explanation"
+    else if (purposeName = "audio")
+        purposeLabel := "Audio Translation"
+    else
+        purposeLabel := "JRPG Translator"
+
+    result := "cancel"
+    closed := false
+    dlg := Gui("+Owner" ui.Hwnd " +AlwaysOnTop", "Add model")
+    dlg.MarginX := 18, dlg.MarginY := 16
+    dlg.SetFont("s10", "Segoe UI")
+    dlg.Add("Text", "xm w390", "Add a " providerLabel " model for " purposeLabel ".")
+    dlg.Add("Text", "xm y+5 w390", "Choose where the model ID should come from.")
+    rbOnline := dlg.Add("Radio", "xm y+14 w390 h28 Checked Group", "Browse models available to this API key online")
+    rbManual := dlg.Add("Radio", "xm y+6 w390 h28", "Enter a model ID manually")
+    btnContinue := dlg.Add("Button", "xm y+16 w120 Default", "Continue")
+    btnCancel := dlg.Add("Button", "x+8 w100", "Cancel")
+
+    finish := (selection) => (result := selection, closed := true, dlg.Destroy())
+    rbOnline.OnEvent("Click", AddModelDialogSelect.Bind("online", rbOnline, rbManual, true))
+    rbManual.OnEvent("Click", AddModelDialogSelect.Bind("manual", rbOnline, rbManual, true))
+    btnContinue.OnEvent("Click", (*) => finish(rbOnline.Value ? "online" : "manual"))
+    btnCancel.OnEvent("Click", (*) => finish("cancel"))
+    dlg.OnEvent("Escape", (*) => finish("cancel"))
+    dlg.OnEvent("Close", (*) => finish("cancel"))
+
+    dialogHotIf := "ahk_id " dlg.Hwnd
+    dialogArrowHotkeys := Map("$Up", "Up", "$Down", "Down", "$Left", "Left", "$Right", "Right")
+    HotIfWinActive(dialogHotIf)
+    for keyName, direction in dialogArrowHotkeys
+        try Hotkey(keyName, AddModelDialogNavigate.Bind(direction, rbOnline, rbManual, btnContinue, btnCancel), "On")
+    try Hotkey("$Enter", AddModelDialogActivate.Bind(rbOnline, rbManual, btnContinue, btnCancel), "On")
+    try Hotkey("$NumpadEnter", AddModelDialogActivate.Bind(rbOnline, rbManual, btnContinue, btnCancel), "On")
+    HotIfWinActive()
+
+    try {
+        dlg.Show("AutoSize Center")
+        CPApplyOwnedDialogTheme(dlg)
+        CPApplyDialogRadioTheme(rbOnline)
+        CPApplyDialogRadioTheme(rbManual)
+        AddModelDialogSelect("online", rbOnline, rbManual)
+        while !closed
+            Sleep(30)
+    } finally {
+        HotIfWinActive(dialogHotIf)
+        for keyName, direction in dialogArrowHotkeys
+            try Hotkey(keyName, "Off")
+        try Hotkey("$Enter", "Off")
+        try Hotkey("$NumpadEnter", "Off")
+        HotIfWinActive()
+    }
+    return result
 }
 
 DeleteModel(arr, key, combo) {
@@ -3558,6 +3894,315 @@ ExecCaptureHidden(px, ap, args:="") {
     return out
 }
 
+; Generic companion to ExecCaptureHidden that preserves stderr and the exit code.
+; The model-catalog UI uses this so provider/network failures can be explained
+; without exposing API keys or opening a console window.
+ExecCaptureHiddenResult(px, ap, args := "", tempPrefix := "jrpg_cmd") {
+    unique := A_TickCount "_" Random(1000, 9999)
+    stdoutPath := A_Temp "\" tempPrefix "_" unique "_out.txt"
+    stderrPath := A_Temp "\" tempPrefix "_" unique "_err.txt"
+    command := Format('"{1}" /d /s /c ""{2}" "{3}" {4} 1> "{5}" 2> "{6}""'
+        , A_ComSpec, px, ap, args, stdoutPath, stderrPath)
+
+    exitCode := -1
+    launchError := ""
+    try exitCode := RunWait(command, A_ScriptDir, "Hide")
+    catch as ex
+        launchError := ex.Message
+
+    stdout := ""
+    stderr := ""
+    try stdout := FileRead(stdoutPath, "UTF-8")
+    try stderr := FileRead(stderrPath, "UTF-8")
+    try FileDelete(stdoutPath)
+    try FileDelete(stderrPath)
+    if (launchError != "")
+        stderr := launchError (stderr != "" ? "`n" stderr : "")
+
+    return Map("exitCode", exitCode, "stdout", stdout, "stderr", stderr)
+}
+
+ModelCatalogQuery(provider, purpose, forceRefresh := false) {
+    global pythonExe
+    result := Map(
+        "ok", false,
+        "provider", StrLower(provider),
+        "purpose", StrLower(purpose),
+        "source", "none",
+        "fetchedAt", "",
+        "models", [],
+        "displayNames", Map(),
+        "warnings", [],
+        "error", ""
+    )
+
+    px := ResolvePath(pythonExe)
+    helper := ResolvePath(".\scripts\model_catalog.py")
+    if (px = "" || !FileExist(px)) {
+        result["error"] := "The configured Python executable was not found: " px
+        return result
+    }
+    if (helper = "" || !FileExist(helper)) {
+        result["error"] := "The online model helper was not found: " helper
+        return result
+    }
+
+    args := '--provider "' StrLower(provider) '" --purpose "' StrLower(purpose) '" --format ahk'
+    if forceRefresh
+        args .= " --refresh"
+    captured := ExecCaptureHiddenResult(px, helper, args, "jrpg_models")
+    output := StrReplace(captured["stdout"], "`r", "")
+    lines := StrSplit(output, "`n")
+    if (!lines.Length || Trim(lines[1]) != "JRPG_MODEL_CATALOG_V1") {
+        errorText := Trim(captured["stderr"])
+        if (errorText = "")
+            errorText := "The model helper returned an unreadable response."
+        result["error"] := errorText
+        return result
+    }
+
+    for lineNumber, line in lines {
+        if (lineNumber = 1 || line = "")
+            continue
+        fields := StrSplit(line, "`t",, 3)
+        fieldName := fields.Length ? fields[1] : ""
+        fieldValue := fields.Length >= 2 ? fields[2] : ""
+        switch fieldName {
+            case "STATUS":
+                result["ok"] := fieldValue = "OK"
+            case "PROVIDER":
+                result["provider"] := fieldValue
+            case "PURPOSE":
+                result["purpose"] := fieldValue
+            case "SOURCE":
+                result["source"] := fieldValue
+            case "FETCHED_AT":
+                result["fetchedAt"] := fieldValue
+            case "MODEL":
+                if (fieldValue != "") {
+                    result["models"].Push(fieldValue)
+                    result["displayNames"][fieldValue] := fields.Length >= 3 ? fields[3] : fieldValue
+                }
+            case "WARNING":
+                if (fieldValue != "")
+                    result["warnings"].Push(fieldValue)
+            case "ERROR":
+                result["error"] := fieldValue
+        }
+    }
+
+    if (!result["ok"] && result["error"] = "")
+        result["error"] := Trim(captured["stderr"]) != "" ? Trim(captured["stderr"]) : "The model list could not be loaded."
+    return result
+}
+
+ModelAlreadyAdded(modelArray, modelId) {
+    modelNeedle := StrLower(Trim(modelId))
+    for modelEntry in modelArray
+        if (StrLower(Trim(modelEntry)) = modelNeedle)
+            return true
+    return false
+}
+
+ModelCatalogQueryWithFeedback(provider, purpose, forceRefresh := false) {
+    providerName := StrLower(provider) = "gemini" ? "Gemini" : "OpenAI"
+    loadingText := forceRefresh ? "Refreshing " : "Loading "
+    ToolTip(loadingText providerName " models...")
+    try return ModelCatalogQuery(provider, purpose, forceRefresh)
+    finally ToolTip()
+}
+
+ModelPickerPopulate(modelListBox, modelStatus, modelAddButton, catalog, existingModels) {
+    SendMessage(0x0184, 0, 0, modelListBox.Hwnd) ; LB_RESETCONTENT
+    availableModels := []
+    for modelId in catalog["models"]
+        if !ModelAlreadyAdded(existingModels, modelId)
+            availableModels.Push(modelId)
+
+    if availableModels.Length {
+        modelListBox.Add(availableModels)
+        modelListBox.Choose(1)
+    }
+    modelListBox.Enabled := availableModels.Length > 0
+    modelAddButton.Enabled := availableModels.Length > 0
+
+    catalogSource := catalog["source"]
+    if (availableModels.Length = 0)
+        statusText := "All compatible models in this catalog are already in the list."
+    else if (catalogSource = "online")
+        statusText := availableModels.Length " available models loaded online."
+    else if (catalogSource = "stale_cache")
+        statusText := availableModels.Length " available models loaded from an older cache because the online refresh failed."
+    else
+        statusText := availableModels.Length " available models loaded from the local cache."
+
+    if catalog["warnings"].Length
+        statusText .= " " catalog["warnings"][1]
+    modelStatus.Text := statusText
+    return availableModels.Length
+}
+
+ModelPickerAccept(modelListBox, finishPicker, *) {
+    chosenModel := Trim(modelListBox.Text)
+    if (chosenModel = "") {
+        SoundBeep(1100, 80)
+        return
+    }
+    finishPicker.Call(chosenModel)
+}
+
+ModelPickerNavigate(direction, modelListBox, modelAddButton, refreshButton, cancelButton, *) {
+    focusHwnd := DllCall("user32\GetFocus", "ptr")
+    if (focusHwnd = modelListBox.Hwnd) {
+        itemCount := SendMessage(0x018B, 0, 0, modelListBox.Hwnd) ; LB_GETCOUNT
+        selectedIndex := SendMessage(0x0188, 0, 0, modelListBox.Hwnd) ; LB_GETCURSEL
+        if (direction = "Down") {
+            if (itemCount > 0 && selectedIndex >= itemCount - 1)
+                modelAddButton.Focus()
+            else if (selectedIndex < itemCount - 1)
+                SendMessage(0x0186, selectedIndex + 1, 0, modelListBox.Hwnd) ; LB_SETCURSEL
+        } else if (direction = "Up" && selectedIndex > 0) {
+            SendMessage(0x0186, selectedIndex - 1, 0, modelListBox.Hwnd)
+        }
+        return
+    }
+
+    if (focusHwnd = modelAddButton.Hwnd) {
+        if (direction = "Up" && modelListBox.Enabled)
+            modelListBox.Focus()
+        else if (direction = "Left")
+            cancelButton.Focus()
+        else if (direction = "Right")
+            refreshButton.Focus()
+        return
+    }
+    if (focusHwnd = refreshButton.Hwnd) {
+        if (direction = "Up" && modelListBox.Enabled)
+            modelListBox.Focus()
+        else if (direction = "Left")
+            modelAddButton.Focus()
+        else if (direction = "Right")
+            cancelButton.Focus()
+        return
+    }
+    if (focusHwnd = cancelButton.Hwnd) {
+        if (direction = "Up" && modelListBox.Enabled)
+            modelListBox.Focus()
+        else if (direction = "Left")
+            refreshButton.Focus()
+        else if (direction = "Right")
+            modelAddButton.Focus()
+        return
+    }
+
+    if modelListBox.Enabled
+        modelListBox.Focus()
+    else
+        refreshButton.Focus()
+}
+
+ModelPickerRefresh(provider, purpose, existingModels, pickerDialog, modelListBox, modelStatus, modelAddButton, refreshButton, *) {
+    previousStatus := modelStatus.Text
+    modelListBox.Enabled := false
+    modelAddButton.Enabled := false
+    refreshButton.Enabled := false
+    modelStatus.Text := "Refreshing the online model catalog..."
+
+    refreshedCatalog := ModelCatalogQueryWithFeedback(provider, purpose, true)
+    refreshButton.Enabled := true
+    if !refreshedCatalog["ok"] {
+        modelStatus.Text := previousStatus
+        modelListBox.Enabled := true
+        modelAddButton.Enabled := Trim(modelListBox.Text) != ""
+        MsgBox("The online model list could not be refreshed.`n`n" refreshedCatalog["error"], "Browse models", 48)
+        return
+    }
+
+    ModelPickerPopulate(modelListBox, modelStatus, modelAddButton, refreshedCatalog, existingModels)
+    CPApplyOwnedDialogTheme(pickerDialog)
+    if modelListBox.Enabled
+        modelListBox.Focus()
+    else
+        refreshButton.Focus()
+}
+
+OnlineModelPicker(provider, purpose, existingModels, catalog) {
+    global ui
+    providerName := StrLower(provider) = "gemini" ? "Gemini" : "OpenAI"
+    purposeName := StrLower(purpose)
+    if (purposeName = "screenshot")
+        purposeLabel := "Screenshot Translation"
+    else if (purposeName = "explanation")
+        purposeLabel := "Explanation"
+    else if (purposeName = "audio")
+        purposeLabel := "Audio Translation"
+    else
+        purposeLabel := "JRPG Translator"
+    pickerResult := ""
+    pickerClosed := false
+    pickerDialog := Gui("+Owner" ui.Hwnd " +AlwaysOnTop", "Browse " providerName " models")
+    pickerDialog.MarginX := 18, pickerDialog.MarginY := 16
+    pickerDialog.SetFont("s10", "Segoe UI")
+    pickerDialog.Add("Text", "xm w560", "Select one model to add to " purposeLabel ".")
+    pickerDialog.Add("Text", "xm y+5 w560", "The list contains compatible models available to the configured API key.")
+    modelListBox := pickerDialog.Add("ListBox", "xm y+12 w560 r16")
+    modelStatus := pickerDialog.Add("Text", "xm y+8 w560 h42")
+    modelAddButton := pickerDialog.Add("Button", "xm y+12 w120 Default", "Add model")
+    refreshButton := pickerDialog.Add("Button", "x+8 w100", "Refresh")
+    cancelButton := pickerDialog.Add("Button", "x+8 w100", "Cancel")
+
+    finishPicker := (selection) => (pickerResult := selection, pickerClosed := true, pickerDialog.Destroy())
+    modelAddButton.OnEvent("Click", ModelPickerAccept.Bind(modelListBox, finishPicker))
+    modelListBox.OnEvent("DoubleClick", ModelPickerAccept.Bind(modelListBox, finishPicker))
+    refreshButton.OnEvent("Click", ModelPickerRefresh.Bind(provider, purpose, existingModels, pickerDialog, modelListBox, modelStatus, modelAddButton, refreshButton))
+    cancelButton.OnEvent("Click", (*) => finishPicker.Call(""))
+    pickerDialog.OnEvent("Escape", (*) => finishPicker.Call(""))
+    pickerDialog.OnEvent("Close", (*) => finishPicker.Call(""))
+
+    ModelPickerPopulate(modelListBox, modelStatus, modelAddButton, catalog, existingModels)
+    pickerHotIf := "ahk_id " pickerDialog.Hwnd
+    pickerArrowHotkeys := Map("$Up", "Up", "$Down", "Down", "$Left", "Left", "$Right", "Right")
+    HotIfWinActive(pickerHotIf)
+    for keyName, direction in pickerArrowHotkeys
+        try Hotkey(keyName, ModelPickerNavigate.Bind(direction, modelListBox, modelAddButton, refreshButton, cancelButton), "On")
+    HotIfWinActive()
+
+    try {
+        pickerDialog.Show("AutoSize Center")
+        CPApplyOwnedDialogTheme(pickerDialog)
+        if modelListBox.Enabled
+            modelListBox.Focus()
+        else
+            refreshButton.Focus()
+        while !pickerClosed
+            Sleep(30)
+    } finally {
+        HotIfWinActive(pickerHotIf)
+        for keyName, direction in pickerArrowHotkeys
+            try Hotkey(keyName, "Off")
+        HotIfWinActive()
+    }
+    return pickerResult
+}
+
+AddModelInteractive(modelArray, modelKey, modelCombo, provider, purpose) {
+    modelSource := AddModelSourceDialog(provider, purpose)
+    if (modelSource = "cancel")
+        return false
+    if (modelSource = "manual")
+        return AddModel(modelArray, modelKey, modelCombo)
+
+    modelCatalog := ModelCatalogQueryWithFeedback(provider, purpose)
+    if !modelCatalog["ok"] {
+        MsgBox("The online model list could not be loaded.`n`n" modelCatalog["error"], "Browse models", 48)
+        return false
+    }
+    selectedModel := OnlineModelPicker(provider, purpose, modelArray, modelCatalog)
+    if (selectedModel = "")
+        return false
+    return AddModelValue(modelArray, modelKey, modelCombo, selectedModel)
+}
+
 LaunchOverlay(*) {
     global overlayAhk, imgProvider, imgModel, geminiImgModel, overlayTrans
     global promptsDir, promptProfile, imgPostproc
@@ -3826,6 +4471,9 @@ ui.BackColor := CPPalette(controlDarkMode)["window"]
 ; The native tab remains as a page host and focus proxy. A custom tab bar is
 ; created after all page controls so its styling and geometry are predictable.
 tabNames := ["Screenshot Translation","Audio Translation","Translation Window","Explanation","Explanation Window","Terminology Overrides","Hotkeys","API Keys","Paths"]
+CPTabVisiblePages := [1, 2, 3, 4, 5, 6, 7, 8]
+if showPathsTab
+    CPTabVisiblePages.Push(9)
 tab := ui.Add("Tab", "xm ym w760 h420 Buttons", tabNames)
 
 ; --- Tab 1: SCREENSHOT TRANSLATION
@@ -3842,16 +4490,16 @@ ddlIMG_GM := ui.Add("DropDownList", "x+m w260 0x210", model_gemini_img)
 imgGMInitIdx := ArrIndexOf(model_gemini_img, geminiImgModel)
 ddlIMG_GM.Choose(imgGMInitIdx ? imgGMInitIdx : 1)
 ddlIMG_GM.OnEvent("Change", (*) => (UpdateVars(), SaveAll(), ApplyShotSettings()))
-btnIMG_GM_Add := ui.Add("Button", "x+6 w60", "Add")
-btnIMG_GM_Del := ui.Add("Button", "x+6 w60", "Delete")
+btnIMG_GM_Add := ui.Add("Button", "x+82 w70", "Add")
+btnIMG_GM_Del := ui.Add("Button", "x+6 w70", "Delete")
 
 ui.Add("Text", "xm y+12 w90", "OpenAI model:")
 ddlIMG := ui.Add("DropDownList", "x+m w260 0x210", model_openai_img)
 imgInitIdx := ArrIndexOf(model_openai_img, imgModel)
 ddlIMG.Choose(imgInitIdx ? imgInitIdx : 1)
 ddlIMG.OnEvent("Change", (*) => (UpdateVars(), SaveAll(), ApplyShotSettings()))
-btnIMG_Add := ui.Add("Button", "x+6 w60", "Add")
-btnIMG_Del := ui.Add("Button", "x+6 w60", "Delete")
+btnIMG_Add := ui.Add("Button", "x+82 w70", "Add")
+btnIMG_Del := ui.Add("Button", "x+6 w70", "Delete")
 
 ; Prompt profile (FIRST)
 ui.Add("Text", "xm y+12 w90", "Prompt:")
@@ -4010,13 +4658,13 @@ ddlAProv.OnEvent("Change", (*) => (ToggleAudioControls(), AutoPersist()))
 ui.Add("Text", "xm y+12", "Gemini live model:")
 ddlA_GM := ui.Add("DropDownList", "x+m w260 0x210", model_gemini_audio)
 SetComboToExistingItem(ddlA_GM, model_gemini_audio, geminiAudioModel)
-btnA_GM_Add := ui.Add("Button", "x+6 w60", "Add")
+btnA_GM_Add := ui.Add("Button", "x+6 w60", "Add...")
 btnA_GM_Del := ui.Add("Button", "x+6 w60", "Delete")
 
 ui.Add("Text", "xm y+12", "OpenAI live model:")
 ddlTR := ui.Add("DropDownList", "x+m w420 0x210", model_openai_audio) ; initial width; ResizeUI will adjust
 SetComboToExistingItem(ddlTR, model_openai_audio, trModel)
-btnTR_Add := ui.Add("Button", "x+6 w60", "Add")
+btnTR_Add := ui.Add("Button", "x+6 w60", "Add...")
 btnTR_Del := ui.Add("Button", "x+6 w60", "Delete")
 
 ; Ensure correct initial enabled/disabled state based on provider
@@ -4036,27 +4684,35 @@ ddlSpeaker.OnEvent("Change", SpeakerChanged)
 ; --- Tab 3: TRANSLATION WINDOW
 tab.UseTab(3)
 ui.Add("Text", "xm y+4 w0 h0")  ; spacer
-ui.Add("Text", "xm y+6", "Overlay Transparency")
-slTrans := ui.Add("Slider", "x+m w200 Range0-255 ToolTip")
+twLabelX := pad + 16
+twLabelW := 140
+twControlW := 280
+twSwatchW := 84
+twSwatchX := twLabelX + twLabelW + pad + twControlW - twSwatchW
+
+ui.Add("Text", "x" twLabelX " y+10 w" twLabelW, "Overlay Transparency:")
+slTrans := ui.Add("Slider", "x+m w" twControlW " Range0-255 ToolTip")
 lblTransPct := ui.Add("Text", "x+m", "100%")
 
-ui.Add("Text", "xm y+18 w200", "Window color:")
-rectBg := CPRegisterColorSwatch(ui.Add("Text", "x+m w84 h34 Border"))
-ui.Add("Text", "xm y+18 w200", "Text color:")
-rectTxt := CPRegisterColorSwatch(ui.Add("Text", "x+m w84 h34 Border"))
-ui.Add("Text", "xm y+18 w200", "Speaker name:")
-rectName := CPRegisterColorSwatch(ui.Add("Text", "x+m w84 h34 Border"))
+ui.Add("Text", "x" twLabelX " y+28 w" twLabelW, "Window color:")
+rectBg := CPRegisterColorSwatch(ui.Add("Text", "x" twSwatchX " yp w" twSwatchW " h34 Border"), "translator:bg")
+ui.Add("Text", "x" twLabelX " y+18 w" twLabelW, "Text color:")
+rectTxt := CPRegisterColorSwatch(ui.Add("Text", "x" twSwatchX " yp w" twSwatchW " h34 Border"), "translator:txt")
+ui.Add("Text", "x" twLabelX " y+18 w" twLabelW, "Speaker name:")
+rectName := CPRegisterColorSwatch(ui.Add("Text", "x" twSwatchX " yp w" twSwatchW " h34 Border"), "translator:name")
 
 RefreshColorSwatches()
 
-ui.Add("Text", "xm y+22", "Font:")
-ddlFont := ui.Add("DropDownList", "x+m w260 0x210", [])
+ui.Add("Text", "x" twLabelX " y+32 w" twLabelW, "Font:")
+ddlFont := ui.Add("DropDownList", "x+m w" twControlW " 0x210", [])
 ui.Add("Text", "x+14 yp", "Size:")
 edFSize := ui.Add("Edit", "x+m w60 Number", fontSize)
 udFSize := ui.Add("UpDown", "Range6-128", fontSize)
+chkFontBold := ui.Add("CheckBox", "x+14 yp+2", "Bold")
+chkFontBold.Value := fontBold
 
-ui.Add("Text", "xm y+22", "Profile:")
-ddlProf  := ui.Add("DropDownList", "x+m w240 0x210", [])
+ui.Add("Text", "x" twLabelX " y+26 w" twLabelW, "Profile:")
+ddlProf  := ui.Add("DropDownList", "x+m w" twControlW " 0x210", [])
 btnPNew  := ui.Add("Button", "x+8 w80",  "Add")
 btnPSave := ui.Add("Button", "x+6 w70",  "Save")
 btnPLoad := ui.Add("Button", "x+6 w70",  "Load")
@@ -4091,6 +4747,7 @@ rectName.OnEvent("Click", (*) => PickAndApply("name"))
 ddlFont.OnEvent("Change", FontChanged)
 edFSize.OnEvent("LoseFocus", FontSizeCommit)
 udFSize.OnEvent("Change", (*) => FontSizeCommit(edFSize))
+chkFontBold.OnEvent("Click", FontBoldChanged)
 
 ; Prompt profile events + initial list
 btnPrEdit.OnEvent("Click", OpenPromptEditor)
@@ -4103,7 +4760,7 @@ RefreshPromptProfilesList(promptProfile)
 tab.UseTab(4)
 ui.Add("Text", "xm y+4 w0 h0")  ; spacer
 ui.Add("Text", "xm y+6 w90", "AI Provider:")
-ddlEProv := ui.Add("DropDownList", "x+m w260 0x210", ["Gemini","OpenAI"])
+ddlEProv := ui.Add("DropDownList", "x+m w300 0x210", ["Gemini","OpenAI"])
 
 eProvIdx := (StrLower(explainProvider) = "gemini") ? 1 : 2
 ddlEProv.Choose(eProvIdx)
@@ -4111,21 +4768,21 @@ ddlEProv.OnEvent("Change", (*) => (UpdateVars(), SaveAll()))
 
 ; --- Gemini row (unchanged)
 ui.Add("Text", "xm y+12 w90", "Gemini model:")
-ddlEGem := ui.Add("DropDownList", "x+m w260 0x210", model_gemini_img)
-eGemIdx := ArrIndexOf(model_gemini_img, explainGeminiModel)
+ddlEGem := ui.Add("DropDownList", "x+m w300 0x210", model_gemini_explain)
+eGemIdx := ArrIndexOf(model_gemini_explain, explainGeminiModel)
 ddlEGem.Choose(eGemIdx ? eGemIdx : 1)
 ddlEGem.OnEvent("Change", (*) => (UpdateVars(), SaveAll()))
-btnEGem_Add := ui.Add("Button", "x+6 w60", "Add")
-btnEGem_Del := ui.Add("Button", "x+6 w60", "Delete")
+btnEGem_Add := ui.Add("Button", "x+82 w70", "Add")
+btnEGem_Del := ui.Add("Button", "x+6 w70", "Delete")
 
 ; --- OpenAI row (moved here; use a fresh y step so it sits below Gemini)
-ui.Add("Text", "xm y+12", "OpenAI model:")
-ddlEOpenAI := ui.Add("DropDownList", "x+m w260 0x210", model_openai_tr)
-eOpenAIIdx := ArrIndexOf(model_openai_tr, explainOpenAIModel)
+ui.Add("Text", "xm y+12 w90", "OpenAI model:")
+ddlEOpenAI := ui.Add("DropDownList", "x+m w300 0x210", model_openai_explain)
+eOpenAIIdx := ArrIndexOf(model_openai_explain, explainOpenAIModel)
 ddlEOpenAI.Choose(eOpenAIIdx ? eOpenAIIdx : 1)
 ddlEOpenAI.OnEvent("Change", (*) => (UpdateVars(), SaveAll()))
-btnEOpenAI_Add := ui.Add("Button", "x+6 w60", "Add")
-btnEOpenAI_Del := ui.Add("Button", "x+6 w60", "Delete")
+btnEOpenAI_Add := ui.Add("Button", "x+82 w70", "Add")
+btnEOpenAI_Del := ui.Add("Button", "x+6 w70", "Delete")
 
 
 ; Initialize enabled/disabled state for Explanation models
@@ -4135,16 +4792,16 @@ SyncExplanationFromIni()
 
 ; EXPLANATION prompt profile (independent from Screenshot/Audio prompts)
 ui.Add("Text", "xm y+10 w90", "Prompt:")
-ddlEPr     := ui.Add("DropDownList", "x+m w260 0x210", [])
+ddlEPr     := ui.Add("DropDownList", "x+m w300 0x210", [])
 btnEPrEdit := ui.Add("Button", "x+6 w70", "Edit")
 btnEPrNew  := ui.Add("Button", "x+6 w70", "Add")
 btnEPrDel  := ui.Add("Button", "x+6 w70", "Delete")
 
 ; anchor to the current Sectionâ€™s left edge, keep same row spacing
-btnExplainNow := ui.Add("Button", "xs y+12 w220", "Explain last jp. Text")
+btnExplainNow := ui.Add("Button", "xs y+20 w220", "Explain last jp. Text")
 
 ; Move: Save explanations checkbox â€” placed under the button row, left-aligned to the Section
-saveExplChk := ui.Add("CheckBox", "xs y+10", "Save explanations to textfiles")
+saveExplChk := ui.Add("CheckBox", "xs y+16", "Save explanations to textfiles")
 ; Short info note about where the files are stored
 txtExplainSaveInfo := ui.Add("Text"
     , "xm y+4 w720 cGray"
@@ -4178,41 +4835,49 @@ RefreshExplainPromptProfilesList(explainPromptProfile)
 
 btnExplainNow .OnEvent("Click", ExplainNow)
 
-btnEOpenAI_Add.OnEvent("Click", (*) => AddModel(model_openai_img, "openai_img", ddlEOpenAI))
-btnEOpenAI_Del.OnEvent("Click", (*) => DeleteModel(model_openai_img, "openai_img", ddlEOpenAI))
+btnEOpenAI_Add.OnEvent("Click", (*) => AddModelInteractive(model_openai_explain, "openai_explain", ddlEOpenAI, "openai", "explanation"))
+btnEOpenAI_Del.OnEvent("Click", (*) => DeleteModel(model_openai_explain, "openai_explain", ddlEOpenAI))
 
-btnEGem_Add.OnEvent("Click", (*) => AddModel(model_gemini_img, "gemini_img", ddlEGem))
-btnEGem_Del.OnEvent("Click", (*) => DeleteModel(model_gemini_img, "gemini_img", ddlEGem))
+btnEGem_Add.OnEvent("Click", (*) => AddModelInteractive(model_gemini_explain, "gemini_explain", ddlEGem, "gemini", "explanation"))
+btnEGem_Del.OnEvent("Click", (*) => DeleteModel(model_gemini_explain, "gemini_explain", ddlEGem))
 
 
 ; --- Tab 5: EXPLANATION WINDOW  (UI only, not wired yet)
 tab.UseTab(5)
 ui.Add("Text", "xm y+4 w0 h0")  ; spacer
 ; Layout parity with "Translation Window" (Tab 3), distinct control names (EW_*)
-ui.Add("Text", "xm y+6", "Overlay Transparency")
-slTrans_EW := ui.Add("Slider", "x+m w200 Range0-255 ToolTip")
+ewLabelX := twLabelX
+ewLabelW := twLabelW
+ewControlW := twControlW
+ewSwatchW := twSwatchW
+ewSwatchX := twSwatchX
+
+ui.Add("Text", "x" ewLabelX " y+10 w" ewLabelW, "Overlay Transparency:")
+slTrans_EW := ui.Add("Slider", "x+m w" ewControlW " Range0-255 ToolTip")
 lblTransPct_EW := ui.Add("Text", "x+m", "100%")
 
-ui.Add("Text", "xm y+18 w200", "Window color:")
-rectBg_EW := CPRegisterColorSwatch(ui.Add("Text", "x+m w84 h34 Border"))
-ui.Add("Text", "xm y+18 w200", "Text color:")
-rectTxt_EW := CPRegisterColorSwatch(ui.Add("Text", "x+m w84 h34 Border"))
+ui.Add("Text", "x" ewLabelX " y+28 w" ewLabelW, "Window color:")
+rectBg_EW := CPRegisterColorSwatch(ui.Add("Text", "x" ewSwatchX " yp w" ewSwatchW " h34 Border"), "explainer:bg")
+ui.Add("Text", "x" ewLabelX " y+18 w" ewLabelW, "Text color:")
+rectTxt_EW := CPRegisterColorSwatch(ui.Add("Text", "x" ewSwatchX " yp w" ewSwatchW " h34 Border"), "explainer:txt")
 
 RefreshColorSwatches_EW()
 
-ui.Add("Text", "xm y+22", "Font:")
-ddlFont_EW := ui.Add("DropDownList", "x+m w260 0x210", [])
-ui.Add("Text", "x+12 yp", "Size")
+ui.Add("Text", "x" ewLabelX " y+32 w" ewLabelW, "Font:")
+ddlFont_EW := ui.Add("DropDownList", "x+m w" ewControlW " 0x210", [])
+ui.Add("Text", "x+14 yp", "Size:")
 edFSize_EW := ui.Add("Edit", "x+m w60 Number")
 udFSize_EW := ui.Add("UpDown", "Range8-96")
+chkFontBold_EW := ui.Add("CheckBox", "x+14 yp+2", "Bold")
+chkFontBold_EW.Value := fontBold_EW
 
 ; --- Explanation Profiles row ---
-ui.Add("Text", "xm y+18", "Profile:")
-ddlProf_EW := ui.Add("DropDownList", "x+m w220 0x210", [])
-btnProfCreate_EW := ui.Add("Button", "x+m", "Add")
-btnProfSave_EW := ui.Add("Button", "x+m", "Save")
-btnProfLoad_EW := ui.Add("Button", "x+m", "Load")
-btnProfDel_EW  := ui.Add("Button", "x+m", "Delete")
+ui.Add("Text", "x" ewLabelX " y+26 w" ewLabelW, "Profile:")
+ddlProf_EW := ui.Add("DropDownList", "x+m w" ewControlW " 0x210", [])
+btnProfCreate_EW := ui.Add("Button", "x+8 w80", "Add")
+btnProfSave_EW := ui.Add("Button", "x+6 w70", "Save")
+btnProfLoad_EW := ui.Add("Button", "x+6 w70", "Load")
+btnProfDel_EW  := ui.Add("Button", "x+6 w70", "Delete")
 
 ; populate dropdown
 Refresh_ddlProf_EW(*) {
@@ -4282,6 +4947,7 @@ rectTxt_EW.OnEvent("Click", (*) => PickAndApply_EW("txt"))
 ddlFont_EW.OnEvent("Change", FontChanged_EW)
 edFSize_EW.OnEvent("LoseFocus", FontSizeCommit_EW)
 udFSize_EW.OnEvent("Change",   (*) => FontSizeCommit_EW(edFSize_EW))
+chkFontBold_EW.OnEvent("Click", FontBoldChanged_EW)
 
 ; --- Tab 6: TERMINOLOGY OVERRIDES
 tab.UseTab(6)
@@ -4361,8 +5027,8 @@ opts := "xm y+18 w140"
 if (debugMode)
     opts .= " Checked"
 cbDebug := ui.Add("CheckBox", opts, "Debug mode")
-TooltipBind(cbDebug, "If enabled, Control Panel and Overlay write verbose logs") ; optional
-cbDebug.OnEvent("Click", (*) => MarkDirty())
+TooltipBind(cbDebug, "Write diagnostic logs for the Control Panel, overlays, and live audio translator")
+cbDebug.OnEvent("Click", CPOnDebugModeToggle)
 
 ; --- Tab 7: HOTKEYS
 tab.UseTab(7)
@@ -4705,16 +5371,16 @@ ui.OnEvent("Escape", (*) => (SetTimer(_UpdateStatus, 0), SetTimer(UpdateCPFocusR
 ui.OnEvent("Size",   ResizeUI)
 
 ; wire buttons
-btnA_GM_Add   .OnEvent("Click", (*) => AddModel(model_gemini_audio, "gemini_audio", ddlA_GM))
+btnA_GM_Add   .OnEvent("Click", (*) => AddModelInteractive(model_gemini_audio, "gemini_audio", ddlA_GM, "gemini", "audio"))
 btnA_GM_Del   .OnEvent("Click", (*) => DeleteModel(model_gemini_audio, "gemini_audio", ddlA_GM))
 
-btnTR_Add     .OnEvent("Click", (*) => AddModel(model_openai_audio, "openai_audio", ddlTR))
+btnTR_Add     .OnEvent("Click", (*) => AddModelInteractive(model_openai_audio, "openai_audio", ddlTR, "openai", "audio"))
 btnTR_Del     .OnEvent("Click", (*) => DeleteModel(model_openai_audio, "openai_audio", ddlTR))
 
-btnIMG_Add    .OnEvent("Click", (*) => AddModel(model_openai_img,   "openai_img",   ddlIMG))
+btnIMG_Add    .OnEvent("Click", (*) => AddModelInteractive(model_openai_img, "openai_img", ddlIMG, "openai", "screenshot"))
 btnIMG_Del    .OnEvent("Click", (*) => DeleteModel(model_openai_img,"openai_img",   ddlIMG))
 
-btnIMG_GM_Add .OnEvent("Click", (*) => AddModel(model_gemini_img,   "gemini_img",   ddlIMG_GM))
+btnIMG_GM_Add .OnEvent("Click", (*) => AddModelInteractive(model_gemini_img, "gemini_img", ddlIMG_GM, "gemini", "screenshot"))
 btnIMG_GM_Del .OnEvent("Click", (*) => DeleteModel(model_gemini_img,"gemini_img",   ddlIMG_GM))
 
 ; initial paint + status, then start timer
@@ -4856,12 +5522,14 @@ Repaint(){
     global imgProvider,imgModel,geminiImgModel,overlayTrans
     global slTrans, lblTransPct
     global rectBg,rectTxt, boxBgHex,txtHex
-    global ddlFont, edFSize, fontName, fontSize
+    global ddlFont, edFSize, chkFontBold, fontName, fontSize, fontBold
+    global chkFontBold_EW, fontBold_EW
     global ddlPrompt, promptProfile
     global ddlPost, imgPostproc, postCodes
 	global ddlEProv, ddlEOpenAI, ddlEGem
     global explainProvider, explainOpenAIModel, explainGeminiModel, iniPath
-    global model_openai_img, model_gemini_img, model_openai_tr, model_openai_audio, model_gemini_audio
+    global model_openai_img, model_gemini_img, model_openai_explain, model_gemini_explain
+    global model_openai_audio, model_gemini_audio
 
     ePython.Value := pythonExe
     eAudio.Value  := audioScript
@@ -4895,6 +5563,7 @@ Repaint(){
 
     try ddlFont.Text := fontName
     edFSize.Value := fontSize
+    chkFontBold.Value := fontBold
 
     ; (Do not set ddlPrompt.Text here â€“ list may be empty on first run)
     postSelIdx := ArrIndexOf(postCodes, imgPostproc)
@@ -4910,9 +5579,9 @@ Repaint(){
         ddlEProv.Choose(idx)
     }
     if IsSet(ddlEGem)
-        SetComboToExistingItem(ddlEGem, model_gemini_img, explainGeminiModel)
+        SetComboToExistingItem(ddlEGem, model_gemini_explain, explainGeminiModel)
     if IsSet(ddlEOpenAI)
-        SetComboToExistingItem(ddlEOpenAI, model_openai_tr, explainOpenAIModel)
+        SetComboToExistingItem(ddlEOpenAI, model_openai_explain, explainOpenAIModel)
     ToggleExplanationControls()
     ; Defensive: pull from INI again to win against any other state that might have run before/after
     SyncExplanationFromIni()
@@ -4931,6 +5600,7 @@ Repaint(){
         try ddlFont_EW.Text := fontName_EW
         try edFSize_EW.Value := fontSize_EW
         try udFSize_EW.Value := fontSize_EW
+        try chkFontBold_EW.Value := fontBold_EW
 
                 ; Profile row: use last Explainer profile from control.ini
         try ddlProf_EW.Text := IniRead(iniPath, "profiles", "explainer_last", "")
@@ -4941,30 +5611,49 @@ Repaint(){
 
 ToggleModelControls(){
     global ddlProv, ddlIMG, ddlIMG_GM
-    prov := ddlProv.Text
-    ddlIMG.Enabled    := (prov = "openai")
-    ddlIMG_GM.Enabled := (prov = "gemini")
+    global btnIMG_Add, btnIMG_Del, btnIMG_GM_Add, btnIMG_GM_Del
+    prov := StrLower(Trim(ddlProv.Text))
+    openAIEnabled := (prov = "openai")
+    geminiEnabled := (prov = "gemini")
+    ddlIMG.Enabled := openAIEnabled
+    btnIMG_Add.Enabled := openAIEnabled
+    btnIMG_Del.Enabled := openAIEnabled
+    ddlIMG_GM.Enabled := geminiEnabled
+    btnIMG_GM_Add.Enabled := geminiEnabled
+    btnIMG_GM_Del.Enabled := geminiEnabled
 }
 ToggleAudioControls(){
     global ddlAProv, ddlTR, ddlA_GM
+    global btnTR_Add, btnTR_Del, btnA_GM_Add, btnA_GM_Del
     ap := StrLower(ddlAProv.Text)
     isOpenAI := (ap = "openai")
-    ddlTR.Enabled  := isOpenAI
+    ddlTR.Enabled := isOpenAI
+    btnTR_Add.Enabled := isOpenAI
+    btnTR_Del.Enabled := isOpenAI
     ddlA_GM.Enabled := !isOpenAI
+    btnA_GM_Add.Enabled := !isOpenAI
+    btnA_GM_Del.Enabled := !isOpenAI
 }
 ; NEW: Explanation tab toggles
 ToggleExplanationControls(){
     global ddlEProv, ddlEOpenAI, ddlEGem
+    global btnEOpenAI_Add, btnEOpenAI_Del, btnEGem_Add, btnEGem_Del
     ep := StrLower(Trim(ddlEProv.Text))
-    ddlEOpenAI.Enabled := (ep = "openai")
-    ddlEGem.Enabled    := (ep = "gemini")
+    openAIEnabled := (ep = "openai")
+    geminiEnabled := (ep = "gemini")
+    ddlEOpenAI.Enabled := openAIEnabled
+    btnEOpenAI_Add.Enabled := openAIEnabled
+    btnEOpenAI_Del.Enabled := openAIEnabled
+    ddlEGem.Enabled := geminiEnabled
+    btnEGem_Add.Enabled := geminiEnabled
+    btnEGem_Del.Enabled := geminiEnabled
 }
 
 ; NEW: force-sync Explanation dropdowns from INI (defensive against any later repaint)
 SyncExplanationFromIni(){
     global iniPath
     global ddlEProv, ddlEOpenAI, ddlEGem
-    global model_openai_tr, model_gemini_img
+    global model_openai_explain, model_gemini_explain
 
     prov := StrLower(Trim(IniRead(iniPath, "cfg_explainer", "explainProvider", "")))
     gm   := Trim(IniRead(iniPath, "cfg_explainer", "explainGeminiModel", ""))
@@ -4973,9 +5662,9 @@ SyncExplanationFromIni(){
     if (prov != "")
         ddlEProv.Choose(prov = "gemini" ? 1 : 2)
     if (gm != "")
-        SetComboToExistingItem(ddlEGem, model_gemini_img, gm)
+        SetComboToExistingItem(ddlEGem, model_gemini_explain, gm)
     if (om != "")
-        SetComboToExistingItem(ddlEOpenAI, model_openai_tr, om)
+        SetComboToExistingItem(ddlEOpenAI, model_openai_explain, om)
     ToggleExplanationControls()
 }
 
@@ -5064,7 +5753,7 @@ UpdateVars(){
 	global explainProvider, explainOpenAIModel, explainGeminiModel
     global ddlEProv, ddlEOpenAI, ddlEGem
     global ePython,eAudio,eOverlay,eImg,ddlTR,ddlAProv,ddlA_GM,ddlAudioTarget,ddlProv,ddlIMG,ddlIMG_GM,slTrans
-	global ddlFont, edFSize, fontName, fontSize
+	global ddlFont, edFSize, chkFontBold, fontName, fontSize, fontBold
     global ddlPrompt, promptProfile
     global ddlPost, imgPostproc
 	global debugMode, cbDebug
@@ -5083,20 +5772,15 @@ UpdateVars(){
     geminiImgModel   := ddlIMG_GM.Text
     fontName         := ddlFont.Text
     fontSize         := Integer(edFSize.Value)
+    fontBold         := chkFontBold.Value ? 1 : 0
     SyncUnifiedWindowAppearance()
     promptProfile    := ddlPrompt.Text
     imgPostproc      := postCodes[ddlPost.Value]
 	explainProvider    := ddlEProv.Text
     explainOpenAIModel := ddlEOpenAI.Text
     explainGeminiModel := ddlEGem.Text
-	    ; Debug toggle
-    debugMode := cbDebug.Value  ; 1/0
-
-    ; Debug toggle
-    debugMode := cbDebug.Value  ; 1/0
-
-    ; update env so any child processes launched after this see the new state
-    EnvSet "JRPG_DEBUG", (debugMode ? "1" : "0")
+    debugMode := cbDebug.Value ? 1 : 0
+    SetDebugMode(debugMode)
 }
 
 MoveRowWithButtons(combo, btnAdd, btnDel, rightEdge, btnH, maxW := 0) {
@@ -5199,17 +5883,18 @@ ResizeUI(gui, minMax, w, h){
     ddlProv.GetPos(&shotProvX)
     ddlProv.Move(, , Max(160, shotComboRight - shotProvX))
 
+    btnW := 70, g := 6
     for shotRow in [[ddlIMG_GM, btnIMG_GM_Add, btnIMG_GM_Del], [ddlIMG, btnIMG_Add, btnIMG_Del]] {
         shotCombo := shotRow[1], shotAdd := shotRow[2], shotDel := shotRow[3]
         shotCombo.GetPos(&shotX, &shotY)
         shotW := Max(160, shotComboRight - shotX)
         shotCombo.Move(, , shotW)
-        shotAdd.Move(shotX + shotW + gap, shotY, 60, btnH)
-        shotDel.Move(shotX + shotW + gap + 60 + gap, shotY, 60, btnH)
+        ; Match the prompt row's Add/Delete columns, leaving its Edit column empty.
+        shotAdd.Move(shotX + shotW + g + btnW + g, shotY, btnW, btnH)
+        shotDel.Move(shotX + shotW + g + (btnW + g)*2, shotY, btnW, btnH)
     }
 
     ; NEW: prompt row (combo + 3 buttons)
-    btnW := 70, g := 6
     ddlPrompt.GetPos(&pcx,&pcy,,)
     pW := Max(160, shotComboRight - pcx)
     ddlPrompt.Move(, , pW)
@@ -5260,8 +5945,404 @@ ResizeUI(gui, minMax, w, h){
 ; =========================
 ; Overlay color picking + messaging
 ; =========================
-PickColorDialog(initHex := "FFFFFF") {
+CPColorHexToHSV(hexColor) {
+    rgb := Integer("0x" Trim(hexColor, "#"))
+    red := ((rgb >> 16) & 0xFF) / 255
+    green := ((rgb >> 8) & 0xFF) / 255
+    blue := (rgb & 0xFF) / 255
+    high := Max(red, green, blue)
+    low := Min(red, green, blue)
+    delta := high - low
+
+    hue := 0
+    if (delta != 0) {
+        if (high = red)
+            hue := 60 * Mod((green - blue) / delta, 6)
+        else if (high = green)
+            hue := 60 * (((blue - red) / delta) + 2)
+        else
+            hue := 60 * (((red - green) / delta) + 4)
+    }
+    if (hue < 0)
+        hue += 360
+
+    saturation := (high = 0) ? 0 : (delta / high)
+    return Map("h", Round(hue), "s", Round(saturation * 100), "v", Round(high * 100))
+}
+
+CPColorHSVToHex(hue, saturation, brightness) {
+    hue := Mod(Max(0, Min(359, hue + 0)), 360)
+    saturation := Max(0, Min(100, saturation + 0)) / 100
+    brightness := Max(0, Min(100, brightness + 0)) / 100
+
+    chroma := brightness * saturation
+    section := hue / 60
+    intermediate := chroma * (1 - Abs(Mod(section, 2) - 1))
+    redPart := 0, greenPart := 0, bluePart := 0
+    if (section < 1)
+        redPart := chroma, greenPart := intermediate
+    else if (section < 2)
+        redPart := intermediate, greenPart := chroma
+    else if (section < 3)
+        greenPart := chroma, bluePart := intermediate
+    else if (section < 4)
+        greenPart := intermediate, bluePart := chroma
+    else if (section < 5)
+        redPart := intermediate, bluePart := chroma
+    else
+        redPart := chroma, bluePart := intermediate
+
+    match := brightness - chroma
+    red := Round((redPart + match) * 255)
+    green := Round((greenPart + match) * 255)
+    blue := Round((bluePart + match) * 255)
+    return Format("{:02X}{:02X}{:02X}", red, green, blue)
+}
+
+CPColorGradientWriteVertex(vertices, offset, x, y, colorHex) {
+    rgb := Integer("0x" Trim(colorHex, "#"))
+    NumPut("Int", x, vertices, offset)
+    NumPut("Int", y, vertices, offset + 4)
+    NumPut("UShort", ((rgb >> 16) & 0xFF) << 8, vertices, offset + 8)
+    NumPut("UShort", ((rgb >> 8) & 0xFF) << 8, vertices, offset + 10)
+    NumPut("UShort", (rgb & 0xFF) << 8, vertices, offset + 12)
+    NumPut("UShort", 0, vertices, offset + 14)
+}
+
+CPColorGradientFillRect(hdc, left, top, right, bottom, startHex, endHex) {
+    if (right <= left || bottom <= top)
+        return
+    vertices := Buffer(32, 0)
+    CPColorGradientWriteVertex(vertices, 0, left, top, startHex)
+    CPColorGradientWriteVertex(vertices, 16, right, bottom, endHex)
+    gradientRect := Buffer(8, 0)
+    NumPut("UInt", 0, gradientRect, 0)
+    NumPut("UInt", 1, gradientRect, 4)
+    DllCall("msimg32\GradientFill", "ptr", hdc, "ptr", vertices.Ptr, "uint", 2
+        , "ptr", gradientRect.Ptr, "uint", 1, "uint", 0) ; GRADIENT_FILL_RECT_H
+}
+
+CPDrawControllerColorGradient(hdc, sourceHwnd, channelRect, sliderData) {
+    global controlDarkMode
+    clientRect := Buffer(16, 0)
+    DllCall("user32\GetClientRect", "ptr", sourceHwnd, "ptr", clientRect.Ptr)
+    clientH := NumGet(clientRect, 12, "int")
+    left := NumGet(channelRect, 0, "int")
+    right := NumGet(channelRect, 8, "int")
+    barH := Max(8, Round(10 * GetWindowDPI(sourceHwnd) / 96))
+    top := Max(1, Floor((clientH - barH) / 2))
+    bottom := Min(clientH - 1, top + barH)
+
+    focused := DllCall("user32\GetFocus", "ptr") = sourceHwnd
+    borderHex := focused ? (controlDarkMode ? "FFFFFF" : CPPalette(0)["accentFocus"])
+        : (controlDarkMode ? "777777" : "8A8A8A")
+    frameRect := Buffer(16, 0)
+    NumPut("Int", left, frameRect, 0)
+    NumPut("Int", top, frameRect, 4)
+    NumPut("Int", right, frameRect, 8)
+    NumPut("Int", bottom, frameRect, 12)
+    frameBrush := DllCall("gdi32\CreateSolidBrush", "uint", CPColorRef(borderHex), "ptr")
+    try DllCall("user32\FrameRect", "ptr", hdc, "ptr", frameRect.Ptr, "ptr", frameBrush)
+    finally DllCall("gdi32\DeleteObject", "ptr", frameBrush)
+    left += 1, top += 1, right -= 1, bottom -= 1
+
+    hue := sliderData["hue"].Value
+    saturation := sliderData["saturation"].Value
+    brightness := sliderData["brightness"].Value
+    switch sliderData["kind"] {
+        case "hue":
+            hueStops := ["FF0000", "FFFF00", "00FF00", "00FFFF", "0000FF", "FF00FF", "FF0000"]
+            gradientW := Max(1, right - left)
+            Loop 6 {
+                segmentLeft := left + Floor(gradientW * (A_Index - 1) / 6)
+                segmentRight := left + Floor(gradientW * A_Index / 6)
+                CPColorGradientFillRect(hdc, segmentLeft, top, segmentRight, bottom
+                    , hueStops[A_Index], hueStops[A_Index + 1])
+            }
+        case "saturation":
+            CPColorGradientFillRect(hdc, left, top, right, bottom, "FFFFFF"
+                , CPColorHSVToHex(hue, 100, 100))
+        case "brightness":
+            CPColorGradientFillRect(hdc, left, top, right, bottom, "000000"
+                , CPColorHSVToHex(hue, saturation, 100))
+    }
+}
+
+CPControllerColorGradientCustomDraw(wParam, lParam, msg, parentHwnd) {
+    global CPControllerColorGradientSliders
+    if !lParam
+        return
+    sourceHwnd := NumGet(lParam, 0, "ptr")
+    if !CPControllerColorGradientSliders.Has(sourceHwnd)
+        return
+    notifyCode := NumGet(lParam, 2 * A_PtrSize, "int")
+    if (notifyCode != -12) ; NM_CUSTOMDRAW
+        return
+
+    stageOffset := (A_PtrSize = 8) ? 24 : 12
+    drawStage := NumGet(lParam, stageOffset, "uint")
+    if (drawStage = 0x00000001) ; CDDS_PREPAINT
+        return 0x00000020 ; CDRF_NOTIFYITEMDRAW
+    if (drawStage != 0x00010001) ; CDDS_ITEMPREPAINT
+        return
+
+    itemOffset := (A_PtrSize = 8) ? 56 : 36
+    if (NumGet(lParam, itemOffset, "uptr") != 3) ; TBCD_CHANNEL
+        return
+    hdcOffset := (A_PtrSize = 8) ? 32 : 16
+    rectOffset := (A_PtrSize = 8) ? 40 : 20
+    CPDrawControllerColorGradient(NumGet(lParam, hdcOffset, "ptr"), sourceHwnd
+        , lParam + rectOffset, CPControllerColorGradientSliders[sourceHwnd])
+    return 0x00000004 ; CDRF_SKIPDEFAULT
+}
+
+CPRegisterControllerColorGradients(hueSlider, saturationSlider, brightnessSlider) {
+    global CPControllerColorGradientSliders, CPControllerColorGradientMessageRegistered
+    sliderSet := Map("hue", hueSlider, "saturation", saturationSlider, "brightness", brightnessSlider)
+    for kind, slider in sliderSet {
+        sliderData := Map("kind", kind, "hue", hueSlider
+            , "saturation", saturationSlider, "brightness", brightnessSlider)
+        CPControllerColorGradientSliders[slider.Hwnd] := sliderData
+    }
+    if !CPControllerColorGradientMessageRegistered {
+        OnMessage(0x004E, CPControllerColorGradientCustomDraw) ; WM_NOTIFY
+        CPControllerColorGradientMessageRegistered := true
+    }
+}
+
+CPUnregisterControllerColorGradients(sliders*) {
+    global CPControllerColorGradientSliders
+    for slider in sliders {
+        sliderHwnd := 0
+        if IsObject(slider) {
+            try sliderHwnd := slider.Hwnd
+        } else {
+            sliderHwnd := slider
+        }
+        if (sliderHwnd && CPControllerColorGradientSliders.Has(sliderHwnd))
+            CPControllerColorGradientSliders.Delete(sliderHwnd)
+    }
+}
+
+CPControllerColorDeferredGradientRedraw(hueHwnd, saturationHwnd, brightnessHwnd) {
+    for sliderHwnd in [hueHwnd, saturationHwnd, brightnessHwnd] {
+        if (!sliderHwnd || !DllCall("user32\IsWindow", "ptr", sliderHwnd, "int"))
+            continue
+        ; Trackbars cache an unfocused custom-drawn channel even after ordinary
+        ; invalidation. WM_THEMECHANGED makes the control request it again.
+        try DllCall("user32\SendMessage", "ptr", sliderHwnd, "uint", 0x031A
+            , "ptr", 0, "ptr", 0) ; WM_THEMECHANGED
+        try DllCall("user32\RedrawWindow", "ptr", sliderHwnd, "ptr", 0, "ptr", 0
+            , "uint", 0x0001 | 0x0004 | 0x0100) ; INVALIDATE | ERASE | UPDATENOW
+    }
+}
+
+CPControllerColorUpdatePreview(preview, hueSlider, saturationSlider, brightnessSlider
+    , hueValue, saturationValue, brightnessValue, *) {
+    colorHex := CPColorHSVToHex(hueSlider.Value, saturationSlider.Value, brightnessSlider.Value)
+    preview.Opt("+Background" colorHex)
+    hueValue.Text := Round(hueSlider.Value)
+    saturationValue.Text := Round(saturationSlider.Value) "%"
+    brightnessValue.Text := Round(brightnessSlider.Value) "%"
+    try preview.Redraw()
+    ; Run after the active trackbar's Change notification returns. Windows can
+    ; otherwise defer repainting the two tracks that do not currently have focus.
+    SetTimer(CPControllerColorDeferredGradientRedraw.Bind(
+        hueSlider.Hwnd, saturationSlider.Hwnd, brightnessSlider.Hwnd), -1)
+    return colorHex
+}
+
+CPControllerColorNavigate(direction, hueSlider, saturationSlider, brightnessSlider
+    , applyButton, cancelButton, *) {
+    focusHwnd := DllCall("user32\GetFocus", "ptr")
+    sliders := [hueSlider, saturationSlider, brightnessSlider]
+    for index, slider in sliders {
+        if (focusHwnd != slider.Hwnd)
+            continue
+        if (direction = "Left" || direction = "Right")
+            SendEvent("{" direction "}")
+        else if (direction = "Up")
+            (index = 1 ? hueSlider : sliders[index - 1]).Focus()
+        else if (direction = "Down")
+            (index = sliders.Length ? applyButton : sliders[index + 1]).Focus()
+        return
+    }
+
+    if (focusHwnd = applyButton.Hwnd) {
+        if (direction = "Up")
+            brightnessSlider.Focus()
+        else if (direction = "Right")
+            cancelButton.Focus()
+        return
+    }
+    if (focusHwnd = cancelButton.Hwnd) {
+        if (direction = "Up")
+            brightnessSlider.Focus()
+        else if (direction = "Left")
+            applyButton.Focus()
+        return
+    }
+    hueSlider.Focus()
+}
+
+CPControllerColorActivate(hueSlider, saturationSlider, brightnessSlider, applyButton, cancelButton, *) {
+    focusHwnd := DllCall("user32\GetFocus", "ptr")
+    if (focusHwnd = applyButton.Hwnd)
+        SendMessage(0x00F5, 0, 0, applyButton.Hwnd) ; BM_CLICK
+    else if (focusHwnd = cancelButton.Hwnd)
+        SendMessage(0x00F5, 0, 0, cancelButton.Hwnd)
+}
+
+CPControllerColorDialog(initHex, dialogTitle := "Adjust color") {
     global ui
+    hsv := CPColorHexToHSV(initHex)
+    result := ""
+    closed := false
+    dlg := Gui("+Owner" ui.Hwnd " +AlwaysOnTop", dialogTitle)
+    dlg.MarginX := 18, dlg.MarginY := 16
+    dlg.SetFont("s10", "Segoe UI")
+
+    preview := CPRegisterColorSwatch(
+        dlg.Add("Text", "xm w390 h54 Border Background" initHex), "", false)
+    previewHwnd := preview.Hwnd
+    dlg.Add("Text", "xm y+16 w82", "Hue:")
+    hueSlider := dlg.Add("Slider", "x+8 yp-4 w250 Range0-359 ToolTip")
+    hueSlider.Value := hsv["h"]
+    hueValue := dlg.Add("Text", "x+8 yp+4 w42 Right", hsv["h"])
+
+    dlg.Add("Text", "xm y+14 w82", "Saturation:")
+    saturationSlider := dlg.Add("Slider", "x+8 yp-4 w250 Range0-100 ToolTip")
+    saturationSlider.Value := hsv["s"]
+    saturationValue := dlg.Add("Text", "x+8 yp+4 w42 Right", hsv["s"] "%")
+
+    dlg.Add("Text", "xm y+14 w82", "Brightness:")
+    brightnessSlider := dlg.Add("Slider", "x+8 yp-4 w250 Range0-100 ToolTip")
+    brightnessSlider.Value := hsv["v"]
+    brightnessValue := dlg.Add("Text", "x+8 yp+4 w42 Right", hsv["v"] "%")
+
+    applyButton := dlg.Add("Button", "xm y+20 w120 Default", "Apply")
+    cancelButton := dlg.Add("Button", "x+8 w100", "Cancel")
+    updatePreview := CPControllerColorUpdatePreview.Bind(preview, hueSlider, saturationSlider
+        , brightnessSlider, hueValue, saturationValue, brightnessValue)
+    hueSlider.OnEvent("Change", updatePreview)
+    saturationSlider.OnEvent("Change", updatePreview)
+    brightnessSlider.OnEvent("Change", updatePreview)
+    CPRegisterControllerColorGradients(hueSlider, saturationSlider, brightnessSlider)
+    gradientSliderHwnds := [hueSlider.Hwnd, saturationSlider.Hwnd, brightnessSlider.Hwnd]
+
+    finish := (colorValue) => (result := colorValue, closed := true, dlg.Destroy())
+    applyButton.OnEvent("Click", (*) => finish.Call(CPColorHSVToHex(
+        hueSlider.Value, saturationSlider.Value, brightnessSlider.Value)))
+    cancelButton.OnEvent("Click", (*) => finish.Call(""))
+    dlg.OnEvent("Escape", (*) => finish.Call(""))
+    dlg.OnEvent("Close", (*) => finish.Call(""))
+
+    dialogHotIf := "ahk_id " dlg.Hwnd
+    dialogArrowHotkeys := Map("$Up", "Up", "$Down", "Down", "$Left", "Left", "$Right", "Right")
+    HotIfWinActive(dialogHotIf)
+    for keyName, direction in dialogArrowHotkeys
+        try Hotkey(keyName, CPControllerColorNavigate.Bind(direction, hueSlider, saturationSlider
+            , brightnessSlider, applyButton, cancelButton), "On")
+    try Hotkey("$Enter", CPControllerColorActivate.Bind(hueSlider, saturationSlider
+        , brightnessSlider, applyButton, cancelButton), "On")
+    try Hotkey("$NumpadEnter", CPControllerColorActivate.Bind(hueSlider, saturationSlider
+        , brightnessSlider, applyButton, cancelButton), "On")
+    HotIfWinActive()
+
+    try {
+        dlg.Show("AutoSize Center")
+        CPApplyOwnedDialogTheme(dlg)
+        updatePreview.Call()
+        hueSlider.Focus()
+        while !closed
+            Sleep(30)
+    } finally {
+        CPUnregisterColorSwatch(previewHwnd)
+        CPUnregisterControllerColorGradients(gradientSliderHwnds*)
+        HotIfWinActive(dialogHotIf)
+        for keyName, direction in dialogArrowHotkeys
+            try Hotkey(keyName, "Off")
+        try Hotkey("$Enter", "Off")
+        try Hotkey("$NumpadEnter", "Off")
+        HotIfWinActive()
+    }
+    return result
+}
+
+CPAdjustColorSwatchWithController(swatchHwnd) {
+    global boxBgHex, txtHex, nameHex, boxBgHex_EW, txtHex_EW
+    target := CPColorSwatchTarget(swatchHwnd)
+    switch target {
+        case "translator:bg":
+            initialColor := boxBgHex, dialogTitle := "Adjust Translator window color"
+        case "translator:txt":
+            initialColor := txtHex, dialogTitle := "Adjust Translator text color"
+        case "translator:name":
+            initialColor := nameHex, dialogTitle := "Adjust speaker-name color"
+        case "explainer:bg":
+            initialColor := boxBgHex_EW, dialogTitle := "Adjust Explainer window color"
+        case "explainer:txt":
+            initialColor := txtHex_EW, dialogTitle := "Adjust Explainer text color"
+        default:
+            return
+    }
+
+    selectedColor := CPControllerColorDialog(initialColor, dialogTitle)
+    if (selectedColor = "")
+        return
+    if InStr(target, "translator:") = 1
+        ApplyColorValue(SubStr(target, StrLen("translator:") + 1), selectedColor)
+    else
+        ApplyColorValue_EW(SubStr(target, StrLen("explainer:") + 1), selectedColor)
+}
+
+PickColorDialogDarkHook(dialogHwnd, msg, wParam, lParam) {
+    global controlDarkMode, CPThemeBrushWindow, CPThemeBrushSurface
+    if !controlDarkMode
+        return 0
+
+    if (msg = 0x0110) { ; WM_INITDIALOG
+        CPApplyDarkTitleBar(dialogHwnd, true)
+        CPSetPreferredAppDarkMode(true, dialogHwnd)
+        try DllCall("uxtheme\SetWindowTheme", "ptr", dialogHwnd, "wstr", "DarkMode_Explorer", "ptr", 0)
+
+        oldDetectHidden := A_DetectHiddenWindows
+        try {
+            DetectHiddenWindows true
+            for controlHwnd in WinGetControlsHwnd("ahk_id " dialogHwnd) {
+                controlClass := ""
+                try controlClass := WinGetClass("ahk_id " controlHwnd)
+                if (controlClass = "Edit") {
+                    try DllCall("uxtheme\SetWindowTheme", "ptr", controlHwnd, "wstr", "DarkMode_CFD", "ptr", 0)
+                } else if (controlClass = "Button" || controlClass = "ScrollBar") {
+                    try DllCall("uxtheme\SetWindowTheme", "ptr", controlHwnd, "wstr", "DarkMode_Explorer", "ptr", 0)
+                }
+            }
+        } finally {
+            DetectHiddenWindows oldDetectHidden
+        }
+        try DllCall("user32\RedrawWindow", "ptr", dialogHwnd, "ptr", 0, "ptr", 0, "uint", 0x185)
+        return 0
+    }
+
+    if (msg = 0x0136) ; WM_CTLCOLORDLG
+        return CPThemeBrushWindow
+
+    if (msg = 0x0133 || msg = 0x0134 || msg = 0x0135 || msg = 0x0138) {
+        colors := CPPalette(true)
+        DllCall("gdi32\SetTextColor", "ptr", wParam, "uint", CPColorRef(colors["text"]))
+        if (msg = 0x0133 || msg = 0x0134) { ; Edit / ListBox
+            DllCall("gdi32\SetBkColor", "ptr", wParam, "uint", CPColorRef(colors["surface"]))
+            return CPThemeBrushSurface
+        }
+        DllCall("gdi32\SetBkMode", "ptr", wParam, "int", 1) ; TRANSPARENT
+        return CPThemeBrushWindow
+    }
+    return 0
+}
+
+PickColorDialog(initHex := "FFFFFF") {
+    global ui, controlDarkMode
     rgb := Integer("0x" initHex)
     bgr := ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF)
     ccSize := (A_PtrSize = 8 ? 72 : 36)
@@ -5273,8 +6354,19 @@ PickColorDialog(initHex := "FFFFFF") {
     NumPut("UInt", bgr, cc, 3*A_PtrSize)
     NumPut("Ptr", custom.Ptr, cc, 4*A_PtrSize)
     flags := 0x00000001 | 0x00000002
+    colorHook := 0
+    if controlDarkMode {
+        CPRefreshThemeBrushes()
+        colorHook := CallbackCreate(PickColorDialogDarkHook)
+        flags |= 0x00000010 ; CC_ENABLEHOOK
+        NumPut("Ptr", colorHook, cc, (A_PtrSize = 8 ? 56 : 28))
+    }
     NumPut("UInt", flags, cc, (A_PtrSize=8 ? 40 : 20))
-    ret := DllCall("Comdlg32\ChooseColorW", "Ptr", cc.Ptr, "Int")
+    try ret := DllCall("Comdlg32\ChooseColorW", "Ptr", cc.Ptr, "Int")
+    finally {
+        if colorHook
+            CallbackFree(colorHook)
+    }
     if (ret = 0)
         return ""
     gotBGR := NumGet(cc, 3*A_PtrSize, "UInt")
@@ -5284,7 +6376,6 @@ PickColorDialog(initHex := "FFFFFF") {
 
 PickAndApply(which) {
     global boxBgHex,txtHex,nameHex
-    global rectBg,rectTxt,rectName
 
     colorCur := (which="bg")    ? boxBgHex
              : (which="name")  ? nameHex
@@ -5293,6 +6384,13 @@ PickAndApply(which) {
     got := PickColorDialog(colorCur)
     If (got = "")
         Return
+
+    ApplyColorValue(which, got)
+}
+
+ApplyColorValue(which, got) {
+    global boxBgHex,txtHex,nameHex
+    global rectBg,rectTxt,rectName
 
     if (which="bg") {
         boxBgHex := got
@@ -5344,6 +6442,14 @@ FontSizeCommit(ctrl, *) {
     SendOverlayTheme()
 }
 
+FontBoldChanged(ctrl, *) {
+    global fontBold
+    fontBold := ctrl.Value ? 1 : 0
+    SaveAll()
+    DbgCP("FontBoldChanged -> " fontBold)
+    SendOverlayTheme()
+}
+
 ; =========================
 ; EXPLAINER handlers (separate state)
 ; =========================
@@ -5360,12 +6466,18 @@ HandleTransparencyChange_EW(sliderCtrl) {
 
 PickAndApply_EW(which) {
     global boxBgHex_EW,txtHex_EW
-    global rectBg_EW,rectTxt_EW
 
     colorCur := (which="bg") ? boxBgHex_EW : txtHex_EW
     got := PickColorDialog(colorCur)
     if (got = "")
         return
+
+    ApplyColorValue_EW(which, got)
+}
+
+ApplyColorValue_EW(which, got) {
+    global boxBgHex_EW,txtHex_EW
+    global rectBg_EW,rectTxt_EW
 
     if (which="bg") {
         boxBgHex_EW := got
@@ -5405,6 +6517,14 @@ FontSizeCommit_EW(ctrl, *) {
     ctrl.Value := val
     SaveAll()
     DbgCP("EW FontSizeCommit -> " fontSize_EW)
+    SendOverlayTheme()
+}
+
+FontBoldChanged_EW(ctrl, *) {
+    global fontBold_EW
+    fontBold_EW := ctrl.Value ? 1 : 0
+    SaveAll()
+    DbgCP("EW FontBoldChanged -> " fontBold_EW)
     SendOverlayTheme()
 }
 
@@ -5490,7 +6610,7 @@ EW_ProfilePath(name) {
 
 EW_SaveProfile(name) {
     global boxBgHex_EW,bdrOutHex_EW,bdrInHex_EW,txtHex_EW
-    global fontName_EW,fontSize_EW,bdrOutW_EW,bdrInW_EW,overlayTrans_EW
+    global fontName_EW,fontSize_EW,fontBold_EW,bdrOutW_EW,bdrInW_EW,overlayTrans_EW
     global ewX,ewY,ewW,ewH
 
     p := EW_ProfilePath(name)
@@ -5504,6 +6624,7 @@ EW_SaveProfile(name) {
         IniWrite(txtHex_EW,       p, "cfg_explainer", "txtColor")
         IniWrite(fontName_EW,     p, "cfg_explainer", "fontName")
         IniWrite(fontSize_EW,     p, "cfg_explainer", "fontSize")
+        IniWrite(fontBold_EW,     p, "cfg_explainer", "fontBold")
         IniWrite(0,                p, "cfg_explainer", "bdrOutW")
         IniWrite(0,                p, "cfg_explainer", "bdrInW")
 
@@ -5524,11 +6645,11 @@ EW_SaveProfile(name) {
 
 EW_LoadProfile(name) {
     global boxBgHex_EW,bdrOutHex_EW,bdrInHex_EW,txtHex_EW
-    global fontName_EW,fontSize_EW,bdrOutW_EW,bdrInW_EW,overlayTrans_EW
+    global fontName_EW,fontSize_EW,fontBold_EW,bdrOutW_EW,bdrInW_EW,overlayTrans_EW
     global ewX,ewY,ewW,ewH
     global ui, slTrans_EW, lblTransPct_EW
     global rectBg_EW,rectTxt_EW
-    global ddlFont_EW, edFSize_EW, udFSize_EW
+    global ddlFont_EW, edFSize_EW, udFSize_EW, chkFontBold_EW
     global iniPath, ddlProf_EW
 
     p := EW_ProfilePath(name)
@@ -5545,6 +6666,7 @@ EW_LoadProfile(name) {
     txtHex_EW       := StrUpper(IniRead(p, "cfg_explainer", "txtColor", txtHex_EW))
     fontName_EW     := IniRead(p, "cfg_explainer", "fontName", fontName_EW)
     fontSize_EW     := Integer(IniRead(p, "cfg_explainer", "fontSize",  fontSize_EW))
+    fontBold_EW     := Integer(IniRead(p, "cfg_explainer", "fontBold",  fontBold_EW)) ? 1 : 0
     SyncUnifiedWindowAppearance()
 
     ; bounds (may not exist in profile; keep current if empty)
@@ -5563,6 +6685,7 @@ EW_LoadProfile(name) {
     try rectTxt_EW.Opt("Background" . txtHex_EW)
     try ddlFont_EW.Text := fontName_EW
     try edFSize_EW.Value := fontSize_EW, udFSize_EW.Value := fontSize_EW
+    try chkFontBold_EW.Value := fontBold_EW
     RefreshColorSwatches_EW()
 
     SaveAll()
@@ -5620,6 +6743,9 @@ EnsurePrivateFontsLoaded(){
             ; Fallback: if name table parsing failed, add the fileâ€™s base name
             if (!added) {
                 base := RegExReplace(A_LoopFileName, "\.(ttf|otf|ttc)$", "",, 1)
+                base := RegExReplace(base, "i)-(Regular|Bold|Italic|Oblique)$")
+                if (base = "PressStart2P")
+                    base := "Press Start 2P"
                 if (base != "")
                     __PRIVATE_FONT_NAMES.Push(base)
             }
@@ -5640,8 +6766,13 @@ TTF_GetFamilyNames(path){
         f.RawRead(buf, size)
         f.Close()
 
-        Num16(off) => NumGet(buf, off, "UShort")
-        Num32(off) => NumGet(buf, off, "UInt")
+        ; OpenType numeric fields are big-endian, unlike native Windows integers.
+        Num16(off) => (NumGet(buf, off, "UChar") << 8)
+                    | NumGet(buf, off + 1, "UChar")
+        Num32(off) => (NumGet(buf, off, "UChar") << 24)
+                    | (NumGet(buf, off + 1, "UChar") << 16)
+                    | (NumGet(buf, off + 2, "UChar") << 8)
+                    | NumGet(buf, off + 3, "UChar")
 
         ; sfnt header
         numTables := Num16(4)
@@ -5816,7 +6947,7 @@ OpenExplainPromptEditor(*) {
         btnSave.Move(20, y, 100, 32),
         btnClose.Move(20+100+8, y, 100, 32)
     ))
-    g.Show()
+    CPShowTextEditorDialog(g, edt)
 }
 ListPromptProfiles() {
     global promptsDir
@@ -5916,7 +7047,7 @@ OpenExplainPromptEditor_Multi(*) {
         btnSave.Move(20, y, 100, 32),
         btnClose.Move(20+100+8, y, 100, 32)
     ))
-    g.Show()
+    CPShowTextEditorDialog(g, edt)
 }
 
 NewExplainPromptProfile(*) {
@@ -6001,7 +7132,7 @@ OpenPromptEditor(*) {
         btnSave.Move(20, y, 100, 32),    ; left-aligned
         btnClose.Move(20+100+8, y, 100, 32)
     ))
-    g.Show()
+    CPShowTextEditorDialog(g, edt)
 }
 NewPromptProfile(*) {
     global ddlPrompt
@@ -6141,7 +7272,7 @@ OpenGlossaryEditor(kind := "jp") {
         btnSave.Move(20, y, 100, 32),
         btnClose.Move(130, y, 100, 32)
     ))
-    g.Show()
+    CPShowTextEditorDialog(g, edGloss)
 }
 
 NewGlossaryProfile(*) {
@@ -6342,7 +7473,7 @@ RefreshProfilesList(select := "") {
 
 GetOverlayStateForProfile() {
     global overlayTrans, boxBgHex, bdrOutHex, bdrInHex, txtHex
-    global fontName, fontSize
+    global fontName, fontSize, fontBold
     global bdrOutW, bdrInW
     SyncUnifiedWindowAppearance()
     return Map(
@@ -6353,6 +7484,7 @@ GetOverlayStateForProfile() {
         "txt",    txtHex,
         "font",   fontName,
         "size",   fontSize,
+        "bold",   fontBold,
         "outw",   0,
         "inw",    0
     )
@@ -6360,10 +7492,10 @@ GetOverlayStateForProfile() {
 
 ApplyOverlayState(st) {
     global overlayTrans, boxBgHex, bdrOutHex, bdrInHex, txtHex
-    global fontName, fontSize, bdrOutW, bdrInW
+    global fontName, fontSize, fontBold, bdrOutW, bdrInW
     global slTrans, lblTransPct
     global rectBg, rectTxt
-    global ddlFont, edFSize
+    global ddlFont, edFSize, chkFontBold
 
     if st.Has("overlayTrans") {
         overlayTrans := Integer(st["overlayTrans"])
@@ -6391,6 +7523,10 @@ ApplyOverlayState(st) {
     }
     if st.Has("size") {
         fontSize := Integer(st["size"]), edFSize.Value := fontSize
+    }
+    if st.Has("bold") {
+        fontBold := Integer(st["bold"]) ? 1 : 0
+        chkFontBold.Value := fontBold
     }
     SyncUnifiedWindowAppearance()
     RefreshColorSwatches()
@@ -6437,7 +7573,7 @@ LoadProfile(name) {
     try IniWrite(name, iniPath, "profiles", "translator_last")
     try ddlProf.Text := name
     st := Map()
-    for k in ["overlayTrans","boxBg","txt","font","size","ovX","ovY","ovW","ovH","ovDPI"] {
+    for k in ["overlayTrans","boxBg","txt","font","size","bold","ovX","ovY","ovW","ovH","ovDPI"] {
         v := IniRead(path, "overlay", k, "")
         if (v != "")
             st[k] := v
@@ -6514,10 +7650,10 @@ CreateProfile() {
 SendOverlayTheme(targetTitle := "") {
     ; ===== Vars for Translator =====
     global overlayTrans, boxBgHex, bdrOutHex, bdrInHex, txtHex, nameHex
-    global fontName, fontSize, bdrOutW, bdrInW
+    global fontName, fontSize, fontBold, bdrOutW, bdrInW
     ; ===== Vars for Explainer =====
     global overlayTrans_EW, boxBgHex_EW, bdrOutHex_EW, bdrInHex_EW, txtHex_EW, nameHex_EW
-    global fontName_EW, fontSize_EW, bdrOutW_EW, bdrInW_EW
+    global fontName_EW, fontSize_EW, fontBold_EW, bdrOutW_EW, bdrInW_EW
 
     SyncUnifiedWindowAppearance()
 
@@ -6540,6 +7676,7 @@ SendOverlayTheme(targetTitle := "") {
                . "|txt="   txtHex_EW
                . "|font="  fontName_EW
                . "|size="  fontSize_EW
+               . "|bold="  fontBold_EW
                . "|outw=0"
                . "|inw=0"
         } else {
@@ -6551,6 +7688,7 @@ SendOverlayTheme(targetTitle := "") {
                . "|name="  nameHex
                . "|font="  fontName
                . "|size="  fontSize
+               . "|bold="  fontBold
                . "|outw=0"
                . "|inw=0"
         }
