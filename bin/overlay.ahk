@@ -1,4 +1,4 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 #SingleInstance Off
 #Warn
 #NoTrayIcon
@@ -63,6 +63,37 @@ ARGB_FromHex(hex, alpha := 255) {
 
 ; ---[ RichEdit helpers ]-------------------------------------------------------
 ; === Color helpers ===
+
+global __OVERLAY_PRIVATE_FONTS := []
+
+LoadOverlayPrivateFonts() {
+    global __OVERLAY_PRIVATE_FONTS
+    seenFontPaths := Map()
+    for fontDir in [A_ScriptDir "\fonts", A_ScriptDir "\..\fonts"] {
+        if !DirExist(fontDir)
+            continue
+        for fontExt in ["ttf", "otf", "ttc"] {
+            Loop Files fontDir "\*." fontExt, "F" {
+                fontPath := A_LoopFileFullPath
+                fontKey := StrLower(fontPath)
+                if seenFontPaths.Has(fontKey)
+                    continue
+                seenFontPaths[fontKey] := true
+                if DllCall("gdi32\AddFontResourceExW", "wstr", fontPath, "uint", 0x10, "ptr", 0, "int") ; FR_PRIVATE
+                    __OVERLAY_PRIVATE_FONTS.Push(fontPath)
+            }
+        }
+    }
+}
+
+UnloadOverlayPrivateFonts() {
+    global __OVERLAY_PRIVATE_FONTS
+    if !IsObject(__OVERLAY_PRIVATE_FONTS)
+        return
+    for fontPath in __OVERLAY_PRIVATE_FONTS
+        try DllCall("gdi32\RemoveFontResourceExW", "wstr", fontPath, "uint", 0x10, "ptr", 0, "int")
+    __OVERLAY_PRIVATE_FONTS := []
+}
 
 ; === Color helpers (single source of truth) ===
 NormalizeRgb(rgb) {
@@ -131,9 +162,15 @@ HideOutputCaret(*) {
     DllCall("user32\DestroyCaret")
 }
 
+DeferredHideOutputCaret(*) {
+    HideOutputCaret()
+}
+
 QueueHideOutputCaret(*) {
     HideOutputCaret()
-    SetTimer(HideOutputCaret, -1)
+    ; Keep this one-shot callback separate from the periodic suppression timer.
+    ; Reusing HideOutputCaret here would replace its 25 ms timer period.
+    SetTimer(DeferredHideOutputCaret, -1)
 }
 
 StartOutputCaretSuppression(*) {
@@ -143,6 +180,7 @@ StartOutputCaretSuppression(*) {
 
 StopOutputCaretSuppression(*) {
     SetTimer(HideOutputCaret, 0)
+    SetTimer(DeferredHideOutputCaret, 0)
 }
 
 FocusOverlaySink(*) {
@@ -712,6 +750,7 @@ NormalizeUnifiedWindowStyle()
 LoadPrivateFonts()
 global FONT_NAME := LoadCfg("fontName", "Segoe UI")
 global FONT_SIZE := Integer(LoadCfg("fontSize", 22))
+global FONT_BOLD := Integer(LoadCfg("fontBold", 0)) ? 1 : 0
 
 ; --- export glossary envs on startup (screenshot + audio) ---
 ExportGlossaryEnv()
@@ -1354,6 +1393,7 @@ catch {
 }
 
 global Overlay, RectOuter, RectInner, RectPanel, OutputCtl, ClickShield, StatusCtl, FocusSink, CtxMenu
+LoadOverlayPrivateFonts()
 ; WS_EX_NOACTIVATE keeps the overlay visible/topmost while making it incapable
 ; of taking foreground focus from Big Box, an emulator, or a game.
 Overlay := Gui("-Caption +Resize +ToolWindow +E0x08000000 +MinSize" . MinW . "x" . MinH . " +0x02000000", __WIN_TITLE)  ; +WS_CLIPCHILDREN
@@ -1479,7 +1519,7 @@ OnResize(Overlay)
 WM_COPYDATA(wParam, lParam, msg, hwnd) {
     global Overlay
     global BOX_BG, BDR_OUT, BDR_IN, TXT_COLOR
-    global FONT_NAME, FONT_SIZE, BOX_PAD, OUTER_W, INNER_W
+    global FONT_NAME, FONT_SIZE, FONT_BOLD, BOX_PAD, OUTER_W, INNER_W
 
     Critical
     settingsStr := StrGet(NumGet(lParam + A_PtrSize*2, "UPtr"))
@@ -1523,6 +1563,8 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             FONT_NAME := val
         } else if (key = "size") {
             FONT_SIZE := Integer(val)
+        } else if (key = "bold") {
+            FONT_BOLD := Integer(val) ? 1 : 0
         } else if (key = "pad") {
             BOX_PAD := Integer(val)
         } else if (key = "w_out" || key = "outw") {
@@ -1587,7 +1629,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
 
 ApplyTheme() {
     global Overlay, RectOuter, RectInner, RectPanel, OutputCtl, StatusCtl, hBrushEdit
-    global BOX_BG, BDR_OUT, BDR_IN, TXT_COLOR, FONT_NAME, FONT_SIZE, BOX_PAD
+    global BOX_BG, BDR_OUT, BDR_IN, TXT_COLOR, FONT_NAME, FONT_SIZE, FONT_BOLD, BOX_PAD
 
     Overlay.BackColor := BDR_OUT
     RectOuter.Opt("Background" . BDR_OUT)
@@ -1603,8 +1645,9 @@ ApplyTheme() {
     }
 
 
-    Overlay.SetFont("s" . FONT_SIZE . " c" . TXT_COLOR, FONT_NAME)
-    OutputCtl.SetFont("s" . FONT_SIZE . " c" . TXT_COLOR, FONT_NAME)
+    fontOptions := "s" . FONT_SIZE . " c" . TXT_COLOR . (FONT_BOLD ? " bold" : " norm")
+    Overlay.SetFont(fontOptions, FONT_NAME)
+    OutputCtl.SetFont(fontOptions, FONT_NAME)
     if (IsSet(StatusCtl) && StatusCtl)
         StatusCtl.SetFont("s13 c" . TXT_COLOR, "Segoe UI Symbol")
 
@@ -1632,7 +1675,7 @@ ApplyTheme() {
     RefreshAllBg()
     ; SetFont resets a RichEdit's existing character colors to the system
     ; default. Rebuild the stored text formatting immediately so live changes
-    ; retain the configured text/name colors and inline italics.
+    ; retain the configured weight, text/name colors, and inline italics.
     RenderCombined(true)
     QueueHideOutputCaret()
 }
@@ -1832,6 +1875,10 @@ AfterSizeMoveRepaint(wParam, lParam, msg, hwnd) {
     ; One more nudge to be extra-safe on some themes:
     DllCall("User32\UpdateWindow", "ptr", OutputCtl.Hwnd)
 
+    ; RichEdit can recreate its caret during the final resize paint.
+    QueueHideOutputCaret()
+    QueueFocusOverlaySink()
+
     Dbg("AfterSizeMoveRepaint: BG re-applied=" BOX_BG " brush=" hBrushEdit)
     return 0
 }
@@ -1880,7 +1927,7 @@ HideOverlayStatus(*) {
 
 RenderCombined(preserveScroll := false) {
     global OutputCtl, __OcrText, __AudioText
-    global TXT_COLOR
+    global TXT_COLOR, FONT_NAME, FONT_SIZE, FONT_BOLD
 
     scrollPos := 0
     if (preserveScroll) {
@@ -1911,16 +1958,21 @@ EM_SETSEL        := 0x00B1
 EM_SETCHARFORMAT := 0x0444
 SCF_SELECTION    := 0x0001
 CFM_ITALIC       := 0x00000002
+CFM_BOLD         := 0x00000001
 CFM_COLOR        := 0x40000000
+CFM_FACE         := 0x20000000
+CFM_SIZE         := 0x80000000
 
 ; Select-all
 SendMessage(EM_SETSEL, 0, -1, OutputCtl.Hwnd)
 
 cf := Buffer(116, 0)               ; CHARFORMAT2W
 NumPut("UInt", 116, cf, 0)                             ; cbSize
-NumPut("UInt", CFM_COLOR|CFM_ITALIC, cf, 4)            ; dwMask
-NumPut("UInt", 0, cf, 8)                               ; dwEffects (no italic)
+NumPut("UInt", CFM_COLOR|CFM_ITALIC|CFM_BOLD|CFM_FACE|CFM_SIZE, cf, 4) ; dwMask
+NumPut("UInt", FONT_BOLD ? CFM_BOLD : 0, cf, 8)         ; dwEffects
+NumPut("Int", Max(1, Integer(FONT_SIZE)) * 20, cf, 12) ; yHeight in twips
 NumPut("UInt", HexToBGR(TXT_COLOR), cf, 20)            ; crTextColor
+StrPut(SubStr(FONT_NAME, 1, 31), cf.Ptr + 26, 32, "UTF-16") ; szFaceName
 SendMessage(EM_SETCHARFORMAT, SCF_SELECTION, cf.Ptr, OutputCtl.Hwnd)
 
 ; Collapse selection to start
@@ -2335,6 +2387,10 @@ OnResize(guiObj, minmax := "", w := 0, h := 0) {
     } else {
         Dbg("OnResize suppressed during live drag: rect=(" tx "," ty "," tw "," th ")")
     }
+
+    ; Moving/resizing RichEdit can recreate a caret after its child layout pass.
+    QueueHideOutputCaret()
+    QueueFocusOverlaySink()
 
     if (Trim(__AudioText) != "" && Trim(__OcrText) = "")
         SetTimer(ScrollOutputToBottom, -1)
@@ -2865,6 +2921,7 @@ Cleanup(*) {
     global hBrushEdit
     StopOutputCaretSuppression()
     SaveOverlayBounds()
+    UnloadOverlayPrivateFonts()
     if (hBrushEdit)
         DllCall("gdi32\DeleteObject", "ptr", hBrushEdit)
 }
