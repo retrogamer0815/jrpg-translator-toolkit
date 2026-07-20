@@ -1,7 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import io, os, sys, tempfile
+import configparser
+import io
+import os
+import re
+import sys
+import tempfile
+from typing import List, Tuple
+
 from dotenv import load_dotenv
 
 # Console UTF-8 (Windows safe)
@@ -44,6 +51,197 @@ def read_text(path: str) -> str:
     except Exception:
         return ""
 
+
+def load_glossary(path: str) -> List[Tuple[str, str]]:
+    """Load source-to-target mappings using the translator's accepted formats."""
+    entries: List[Tuple[str, str]] = []
+    if not path or not os.path.isfile(path):
+        return entries
+
+    encodings = [
+        "utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be",
+        "cp1252", "cp932",
+    ]
+    text = None
+    for encoding in encodings:
+        try:
+            with open(path, "r", encoding=encoding) as glossary_file:
+                text = glossary_file.read()
+            break
+        except Exception:
+            continue
+    if text is None:
+        return entries
+
+    for raw_line in text.splitlines():
+        line = raw_line.replace("\ufeff", "").strip()
+        if not line or line.startswith("#"):
+            continue
+        source = target = None
+        for separator in ("->", "→", "\t", ":", "="):
+            if separator in line:
+                source_part, target_part = line.split(separator, 1)
+                source, target = source_part.strip(), target_part.strip()
+                break
+        if source and target:
+            entries.append((source, target))
+    return entries
+
+
+def _sentence_case(text: str) -> str:
+    lowered = text.lower()
+    for index, char in enumerate(lowered):
+        if char.isalpha():
+            return lowered[:index] + char.upper() + lowered[index + 1:]
+    return lowered
+
+
+def _adapt_glossary_case(source: str, target: str, matched: str) -> str:
+    """Adapt a replacement's case unless its source declares canonical casing."""
+    source_first_letter = next((char for char in source if char.isalpha()), "")
+    if source_first_letter.isupper():
+        return target
+
+    matched_letters = [char for char in matched if char.isalpha()]
+    if not matched_letters:
+        return target
+    if all(char.isupper() for char in matched_letters):
+        return target.upper()
+    if all(char.islower() for char in matched_letters):
+        return target.lower()
+
+    if re.search(r"\s", source):
+        words = re.findall(r"[^\W\d_]+", matched, flags=re.UNICODE)
+        if words and all(
+            word[0].isupper() and word[1:].islower() for word in words
+        ):
+            return target.title()
+
+    if matched_letters[0].isupper() and all(
+        char.islower() for char in matched_letters[1:]
+    ):
+        return _sentence_case(target)
+
+    return target
+
+
+def apply_target_glossary(
+    text: str,
+    glossary: List[Tuple[str, str]],
+    protected_text: str = "",
+) -> str:
+    """Apply target-language replacements while preserving original source text."""
+    protected_segments = []
+    if protected_text:
+        if protected_text in text:
+            protected_segments = [protected_text]
+        else:
+            protected_segments = [
+                line for line in protected_text.splitlines() if line.strip()
+            ]
+
+    protected_values = []
+    out = text
+    for index, segment in enumerate(protected_segments):
+        token = f"\x00JRPG_PROTECTED_SOURCE_{index}\x00"
+        if segment in out:
+            out = out.replace(segment, token, 1)
+            protected_values.append((token, segment))
+
+    for source, target in glossary:
+        if re.search(r"\s", source):
+            pattern = re.compile(re.escape(source), flags=re.IGNORECASE)
+            out = pattern.sub(
+                lambda match: _adapt_glossary_case(
+                    source, target, match.group(0)
+                ),
+                out,
+            )
+        else:
+            pattern = re.compile(
+                rf"\b(?P<core>{re.escape(source)})(?P<suf>s|'s|’s)?\b",
+                flags=re.IGNORECASE,
+            )
+            out = pattern.sub(
+                lambda match: (
+                    _adapt_glossary_case(source, target, match.group("core"))
+                    + (match.group("suf") or "")
+                ),
+                out,
+            )
+
+    for token, segment in protected_values:
+        out = out.replace(token, segment)
+    return out
+
+
+def build_source_glossary_prompt(glossary: List[Tuple[str, str]]) -> str:
+    if not glossary:
+        return ""
+    lines = [
+        "Terminology overrides for this explanation:",
+        "Keep the Original Japanese line unchanged.",
+        "In meanings, glosses, and target-language paraphrases, use these exact "
+        "Japanese-to-target mappings:",
+    ]
+    lines.extend(f"- {source} → {target}" for source, target in glossary)
+    return "\n".join(lines)
+
+
+def resolve_glossary_paths(project_root: str) -> Tuple[str, str]:
+    """Resolve the profiles selected in the control panel's Terminology tab."""
+    source_path = (
+        os.environ.get("JP2TL_GLOSSARY_PATH", "").strip()
+        or os.environ.get("JP2EN_GLOSSARY_PATH", "").strip()
+    )
+    target_path = (
+        os.environ.get("TL2TL_GLOSSARY_PATH", "").strip()
+        or os.environ.get("EN2EN_GLOSSARY_PATH", "").strip()
+    )
+    if source_path and target_path:
+        return source_path, target_path
+
+    settings_dir = (
+        os.environ.get("SETTINGS_DIR", "").strip()
+        or os.path.join(project_root, "Settings")
+    )
+    source_profile = target_profile = "default"
+    for ini_name in ("control.ini", "config.ini"):
+        ini_path = os.path.join(settings_dir, ini_name)
+        if not os.path.isfile(ini_path):
+            continue
+        for encoding in (
+            "utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be",
+            "cp1252", "cp932",
+        ):
+            try:
+                config = configparser.ConfigParser(interpolation=None)
+                with open(ini_path, "r", encoding=encoding) as ini_file:
+                    config.read_file(ini_file)
+                source_profile = (
+                    config.get(
+                        "cfg", "jp2enGlossaryProfile", fallback="default"
+                    ).strip()
+                    or "default"
+                )
+                target_profile = (
+                    config.get(
+                        "cfg", "en2enGlossaryProfile", fallback="default"
+                    ).strip()
+                    or "default"
+                )
+                break
+            except Exception:
+                continue
+        break
+
+    glossary_dir = os.path.join(settings_dir, "glossaries")
+    if not source_path:
+        source_path = os.path.join(glossary_dir, source_profile, "jp2en.txt")
+    if not target_path:
+        target_path = os.path.join(glossary_dir, target_profile, "en2en.txt")
+    return source_path, target_path
+
 # Env + provider
 try:
     from pathlib import Path
@@ -84,6 +282,12 @@ if not GEM_MODEL.startswith("models/"):
 
 # Optional custom prompt from file
 EXPLAIN_PROMPT_FILE = os.environ.get("EXPLAIN_PROMPT_FILE", "").strip()
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+JP2TL_GLOSSARY_PATH, TL2TL_GLOSSARY_PATH = resolve_glossary_paths(PROJECT_ROOT)
+JP2TL_GLOSSARY = load_glossary(JP2TL_GLOSSARY_PATH)
+TL2TL_GLOSSARY = load_glossary(TL2TL_GLOSSARY_PATH)
 
 BASE_PROMPT = """You are a friendly tutor for learners of Japanese (upper beginner to intermediate).
 Input is a short Japanese line (from a JRPG). Produce a concise, readable explanation in PLAIN TEXT.
@@ -141,6 +345,9 @@ if not jp:
     sys.exit(2)
 
 prompt = prompt_tpl.format(jp=jp)
+source_glossary_prompt = build_source_glossary_prompt(JP2TL_GLOSSARY)
+if source_glossary_prompt:
+    prompt += "\n\n" + source_glossary_prompt
 
 try:
     text = ""
@@ -276,6 +483,9 @@ except Exception as e:
 
 if not text:
     text = "(No explanation returned)"
+
+if TL2TL_GLOSSARY:
+    text = apply_target_glossary(text, TL2TL_GLOSSARY, protected_text=jp)
 
 # Always update the live explainer.txt (overlay reads this)
 atomic_write_text(EXPLAINER_TXT, text)
