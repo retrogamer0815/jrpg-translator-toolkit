@@ -1,43 +1,42 @@
-# JRPG Translator v0.7.5
+# JRPG Translator v0.8.0
 
-This release focuses on emulator-friendly startup, a more compact live-audio
-workflow, responsive control-panel sizing, capture reliability, and overlay
-polish.
+v0.8.0 makes model selection and overlay customization practical from a
+controller while extending terminology consistency to screenshots,
+explanations, and live audio.
 
 ## Highlights
 
-- A single `Audio Translation On/Off` button now controls and displays live-audio
-  state without a separate listening toggle or status area.
-- Audio start and stop actions provide non-activating on-screen confirmations.
-- The control panel can now be resized below its full design size; native
-  scrollbars keep every control and tab accessible in compact windows.
-- The tab row adapts to narrow windows and retains readable label beginnings.
-- Background startup and overlay launch behavior better preserve emulator focus
-  and avoid surfacing the Windows taskbar when launched through a game front end.
-- Translator and Explainer overlays now initialize independently while sharing
-  the same overlay implementation.
-- Inactive overlay scrolling no longer consumes the mouse wheel in unrelated
-  Windows applications, and scrolling no longer restores the text caret.
-- Capture commands automatically start Translator when necessary, and window
-  highlighting follows the currently hovered desktop or application window.
-- Overlay window-color settings are simpler, with compatibility handling kept
-  for Windows 10 borders.
-- Terminology Overrides now use language-neutral `JP -> TL` and `TL -> TL`
-  wording for any prompt-selected target language.
-- Model lists use natural sorting and include additional current OpenAI and
-  Gemini defaults.
-- The canonical program names are `JRPG Translator.exe`,
-  `JRPG Translator.ahk`, `bin/overlay.exe`, and `bin/overlay.ahk`.
+- Screenshot Translation, Explanation, and Audio Translation now keep model
+  lists appropriate to their individual workflows.
+- The new `Add model` dialog can browse compatible OpenAI and Gemini models
+  available to your API key or accept a model ID manually.
+- Online model results are filtered by task, naturally sorted, cached locally,
+  and fully navigable with arrow keys and Enter.
+- Overlay transparency, font weight, and colors can now be configured without a
+  mouse.
+- The new controller color editor shows live hue, saturation, and brightness
+  previews on informative gradient tracks.
+- Translator and Explainer have independent Bold font settings, with improved
+  Japanese pixel-font support for PixelMplus10 and PixelMplus12.
+- Terminology Overrides now use case-insensitive matching with exact replacement
+  casing and apply to screenshot translations and explanations. TL-to-TL rules
+  also apply to live-audio output.
+- Glossary and prompt editors now follow dark mode and open without selecting all
+  existing text.
+- Appearance and model controls have more consistent alignment, sizing,
+  disabled states, and controller focus behavior.
+- The advanced Paths tab is hidden by default, Debug mode defaults to off, and
+  both remain available through `Settings/control.ini` for advanced users.
 
 ## Install Or Update
 
-1. Download and extract the complete v0.7.5 portable ZIP.
+1. Download and extract the complete v0.8.0 portable ZIP.
 2. Run `JRPG Translator.exe`.
 3. Add API keys in the control panel or through Windows environment variables.
 
 When updating an existing installation, keep a backup of your `Settings`
 folder. The release contains maintained `default` prompt profiles, so preserve
-any customized files that use the same names. The bundled `example` glossary
-does not replace customized glossary profiles.
+any customized files that use the same names. Online model catalogs are cached
+locally and can be refreshed from each `Add model` dialog.
 
 See `CHANGELOG.md` for the complete list of changes.
