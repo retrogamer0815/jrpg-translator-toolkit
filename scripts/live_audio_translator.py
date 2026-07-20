@@ -1,12 +1,15 @@
 import asyncio
 import base64
+import configparser
 import json
 import os
+import re
 import sys
 import tempfile
 import time
 import traceback
 from pathlib import Path
+from typing import List, Tuple
 
 import numpy as np
 import soundcard as sc
@@ -53,7 +56,153 @@ def _get_key(*names, file_var=None):
     return ""
 
 
+def load_glossary(path: str) -> List[Tuple[str, str]]:
+    """Load source-to-target mappings using the translator's accepted formats."""
+    entries: List[Tuple[str, str]] = []
+    if not path or not os.path.isfile(path):
+        return entries
+
+    encodings = [
+        "utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be",
+        "cp1252", "cp932",
+    ]
+    text = None
+    for encoding in encodings:
+        try:
+            with open(path, "r", encoding=encoding) as glossary_file:
+                text = glossary_file.read()
+            break
+        except Exception:
+            continue
+    if text is None:
+        return entries
+
+    for raw_line in text.splitlines():
+        line = raw_line.replace("\ufeff", "").strip()
+        if not line or line.startswith("#"):
+            continue
+        source = target = None
+        for separator in ("->", "→", "\t", ":", "="):
+            if separator in line:
+                source_part, target_part = line.split(separator, 1)
+                source, target = source_part.strip(), target_part.strip()
+                break
+        if source and target:
+            entries.append((source, target))
+    return entries
+
+
+def _sentence_case(text: str) -> str:
+    lowered = text.lower()
+    for index, char in enumerate(lowered):
+        if char.isalpha():
+            return lowered[:index] + char.upper() + lowered[index + 1:]
+    return lowered
+
+
+def _adapt_glossary_case(source: str, target: str, matched: str) -> str:
+    """Adapt a replacement's case unless its source declares canonical casing."""
+    source_first_letter = next((char for char in source if char.isalpha()), "")
+    if source_first_letter.isupper():
+        return target
+
+    matched_letters = [char for char in matched if char.isalpha()]
+    if not matched_letters:
+        return target
+    if all(char.isupper() for char in matched_letters):
+        return target.upper()
+    if all(char.islower() for char in matched_letters):
+        return target.lower()
+
+    if re.search(r"\s", source):
+        words = re.findall(r"[^\W\d_]+", matched, flags=re.UNICODE)
+        if words and all(
+            word[0].isupper() and word[1:].islower() for word in words
+        ):
+            return target.title()
+
+    if matched_letters[0].isupper() and all(
+        char.islower() for char in matched_letters[1:]
+    ):
+        return _sentence_case(target)
+
+    return target
+
+
+def apply_target_glossary(
+    text: str,
+    glossary: List[Tuple[str, str]],
+) -> str:
+    """Apply case-insensitive, boundary-aware target-language replacements."""
+    out = text
+    for source, target in glossary:
+        if re.search(r"\s", source):
+            pattern = re.compile(re.escape(source), flags=re.IGNORECASE)
+            out = pattern.sub(
+                lambda match: _adapt_glossary_case(
+                    source, target, match.group(0)
+                ),
+                out,
+            )
+        else:
+            pattern = re.compile(
+                rf"\b(?P<core>{re.escape(source)})(?P<suf>s|'s|’s)?\b",
+                flags=re.IGNORECASE,
+            )
+            out = pattern.sub(
+                lambda match: (
+                    _adapt_glossary_case(source, target, match.group("core"))
+                    + (match.group("suf") or "")
+                ),
+                out,
+            )
+    return out
+
+
+def resolve_target_glossary_path(project_root: Path) -> str:
+    """Resolve the TL-to-TL profile selected in the Terminology Overrides tab."""
+    explicit_path = (
+        os.environ.get("TL2TL_GLOSSARY_PATH", "").strip()
+        or os.environ.get("EN2EN_GLOSSARY_PATH", "").strip()
+    )
+    if explicit_path:
+        return explicit_path
+
+    settings_dir = Path(
+        os.environ.get("SETTINGS_DIR", "").strip()
+        or project_root / "Settings"
+    )
+    profile = "default"
+    for ini_name in ("control.ini", "config.ini"):
+        ini_path = settings_dir / ini_name
+        if not ini_path.is_file():
+            continue
+        for encoding in (
+            "utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be",
+            "cp1252", "cp932",
+        ):
+            try:
+                config = configparser.ConfigParser(interpolation=None)
+                with open(ini_path, "r", encoding=encoding) as ini_file:
+                    config.read_file(ini_file)
+                profile = (
+                    config.get(
+                        "cfg", "en2enGlossaryProfile", fallback="default"
+                    ).strip()
+                    or "default"
+                )
+                break
+            except Exception:
+                continue
+        break
+
+    return str(settings_dir / "glossaries" / profile / "en2en.txt")
+
+
 _load_dotenv_files()
+
+TL2TL_GLOSSARY_PATH = resolve_target_glossary_path(PROJECT_ROOT)
+TL2TL_GLOSSARY = load_glossary(TL2TL_GLOSSARY_PATH)
 
 OPENAI_API_KEY = _get_key(
     "OPENAI_API_KEY", "OPENAI_LOCAL_KEY", "OPENAI_API_KEY_LOCAL", "OPENAI_KEY",
@@ -195,9 +344,12 @@ class TranscriptBuffer:
         self.write()
 
     def write(self):
-        if self.text != self.last_write:
-            atomic_write_text(AUDIO_TXT, self.text)
-            self.last_write = self.text
+        display_text = trim_display(
+            apply_target_glossary(self.text, TL2TL_GLOSSARY)
+        )
+        if display_text != self.last_write:
+            atomic_write_text(AUDIO_TXT, display_text)
+            self.last_write = display_text
 
 
 async def audio_sender(ws, speaker, make_event):
