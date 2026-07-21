@@ -26,6 +26,8 @@ through mapping tools such as JoyToKey, Steam Input, or DS4Windows.
 - Configurable hotkeys, spatial controller navigation, and optional dark mode.
 - Non-activating overlays that can remain visible without taking focus from the
   game or pausing an emulator.
+- Optional per-game LaunchBox / Big Box integration with JoyToKey profile
+  switching.
 
 ## Requirements
 
@@ -111,6 +113,28 @@ allows emulator options such as RetroArch's pause-when-inactive behavior to
 remain enabled while translations are visible. Opening the control panel still
 activates it normally.
 
+The Translation Window and Explanation Window tabs also include a
+`Move / Resize` mode. With an XInput-compatible controller, the left stick moves
+the selected overlay and the right stick resizes it. Arrow keys provide a
+fallback; hold the configured Screenshot + Translate key while pressing arrows
+to resize. Enter saves the new bounds and Escape restores the previous bounds.
+
+## LaunchBox / Big Box Integration
+
+A preview plugin is included as source under `integrations/launchbox`. It adds
+`JRPG Translator Setup...` to each game's LaunchBox context menu and Big Box
+details menu. Per game, it can:
+
+- start JRPG Translator in background mode and close only the instance it
+  started;
+- start JoyToKey or switch an existing instance to a selected profile; and
+- restore the previous JoyToKey profile when the game exits.
+
+The plugin setup window can browse for the Translator executable, JoyToKey
+executable, and JoyToKey profile folder. See
+[`integrations/launchbox/README.md`](integrations/launchbox/README.md) for build,
+packaging, and installation instructions.
+
 ## API Keys and Privacy
 
 The recommended key-storage method is Windows user environment variables:
@@ -173,6 +197,7 @@ are ignored by Git.
 | `scripts/live_audio_translator.py` | Direct streaming audio translation |
 | `scripts/explainer.py` | Japanese-learning explanations |
 | `scripts/model_catalog.py` | Provider model discovery, filtering, sorting, and caching |
+| `integrations/launchbox/` | Optional per-game LaunchBox / Big Box and JoyToKey integration |
 
 Runtime messages and generated overlay text are exchanged through
 `%TEMP%\JRPG_Overlay`.

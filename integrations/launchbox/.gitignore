@@ -1,0 +1,8 @@
+bin/
+obj/
+dist/
+.dotnet-home/
+PluginData/
+*.bak-*
+build*.log
+runtime.log

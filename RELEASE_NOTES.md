@@ -1,42 +1,43 @@
-# JRPG Translator v0.8.0
+# JRPG Translator v0.8.5
 
-v0.8.0 makes model selection and overlay customization practical from a
-controller while extending terminology consistency to screenshots,
-explanations, and live audio.
+v0.8.5 makes overlay placement practical without putting down the controller,
+fixes repeat translation requests for unchanged screenshots, and adds a preview
+LaunchBox / Big Box integration.
 
 ## Highlights
 
-- Screenshot Translation, Explanation, and Audio Translation now keep model
-  lists appropriate to their individual workflows.
-- The new `Add model` dialog can browse compatible OpenAI and Gemini models
-  available to your API key or accept a model ID manually.
-- Online model results are filtered by task, naturally sorted, cached locally,
-  and fully navigable with arrow keys and Enter.
-- Overlay transparency, font weight, and colors can now be configured without a
-  mouse.
-- The new controller color editor shows live hue, saturation, and brightness
-  previews on informative gradient tracks.
-- Translator and Explainer have independent Bold font settings, with improved
-  Japanese pixel-font support for PixelMplus10 and PixelMplus12.
-- Terminology Overrides now use case-insensitive matching with exact replacement
-  casing and apply to screenshot translations and explanations. TL-to-TL rules
-  also apply to live-audio output.
-- Glossary and prompt editors now follow dark mode and open without selecting all
-  existing text.
-- Appearance and model controls have more consistent alignment, sizing,
-  disabled states, and controller focus behavior.
-- The advanced Paths tab is hidden by default, Debug mode defaults to off, and
-  both remain available through `Settings/control.ini` for advanced users.
+- Translator and Explainer now have dedicated `Move / Resize` modes in their
+  appearance tabs.
+- XInput controllers work directly in adjustment mode: the left stick moves the
+  overlay and the right stick resizes it, with precise low-tilt control and
+  faster movement at full tilt.
+- Arrow keys provide a controller-mapper fallback. Hold the configured
+  Screenshot + Translate key while pressing arrows to resize.
+- Enter saves the new window bounds; Escape restores the previous bounds. The
+  control panel returns automatically after either action.
+- Translation, explanation, overlay, and wheel hotkeys are isolated while an
+  overlay is being adjusted, preventing mapped controller inputs from launching
+  unrelated actions.
+- Repeating Screenshot + Translate with the same capture, visible text, and
+  model now completes normally instead of leaving the request glyph active.
+- A preview LaunchBox / Big Box plugin is now included under
+  `integrations/launchbox`.
+- The plugin adds per-game JRPG Translator enablement, JoyToKey profile
+  selection, automatic background startup and cleanup, and restoration of the
+  previously active JoyToKey profile.
+- Plugin setup works from LaunchBox and Big Box, supports portable path storage
+  and browse controls, and includes reproducible build, smoke-test, and ZIP
+  packaging scripts.
 
 ## Install Or Update
 
-1. Download and extract the complete v0.8.0 portable ZIP.
+1. Download and extract the complete v0.8.5 portable ZIP.
 2. Run `JRPG Translator.exe`.
-3. Add API keys in the control panel or through Windows environment variables.
+3. Keep a backup of your existing `Settings` folder when updating.
 
-When updating an existing installation, keep a backup of your `Settings`
-folder. The release contains maintained `default` prompt profiles, so preserve
-any customized files that use the same names. Online model catalogs are cached
-locally and can be refreshed from each `Add model` dialog.
+The LaunchBox integration is optional and distributed separately from the main
+portable application. Extract its packaged folder into `LaunchBox\Plugins`,
+restart LaunchBox, then choose `JRPG Translator Setup...` for a game. Source and
+packaging instructions are in `integrations/launchbox/README.md`.
 
 See `CHANGELOG.md` for the complete list of changes.

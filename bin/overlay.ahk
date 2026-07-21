@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+﻿#Requires AutoHotkey v2.0
 #SingleInstance Off
 #Warn
 #NoTrayIcon
@@ -1328,12 +1328,14 @@ global hBrushEdit := 0
 global OverlayDir := A_Temp "\JRPG_Overlay"
 global AudioTxt     := OverlayDir . "\audio.txt"
 global OcrTxt       := OverlayDir . "\ocr.txt"
+global OcrDoneTxt   := OverlayDir . "\ocr.done"
 global ExplainerTxt := OverlayDir . "\explainer.txt"
 global PauseFlag    := OverlayDir "\audio.pause"
 global __OcrText := ""
 global __AudioText := ""
 global __LastAudioRaw := ""
 global __LastOcrRaw   := ""
+global __LastOcrDoneRaw := ""
 global __LastExplainRaw := ""
 
 MinW := 200, MinH := 120
@@ -2136,6 +2138,8 @@ ParseInlineMarkers(s) {
 
 HandleMouseWheel(wParam, lParam, msg, hwnd) {
     global Overlay, OutputCtl
+    if OverlayControllerAdjustmentActive()
+        return 0
     ; Only act if the wheel event hit the overlay window itself
     if (!IsSet(Overlay) || hwnd != Overlay.Hwnd)
         return
@@ -2248,6 +2252,8 @@ ScrollOutputByWheelDelta(delta) {
 }
 
 WheelToEdit(wParam, lParam, msg, hwnd) {
+    if OverlayControllerAdjustmentActive()
+        return 0
     ; Mouse clicks are caught by ClickShield, so scroll the RichEdit manually.
     delta := (wParam >> 16) & 0xFFFF
     if (delta >= 0x8000)
@@ -2290,12 +2296,32 @@ IsTopVisibleJrpgOverlay(overlayHwnd) {
 
 OverlayShouldReceiveGlobalWheel(*) {
     global Overlay
+    if OverlayControllerAdjustmentActive()
+        return false
     if !(IsSet(Overlay) && Overlay && Overlay.Hwnd)
         return false
     ; The global hook exists for JoyToKey/controller scrolling while the real
     ; pointer is parked out of sight. Everywhere else, leave the wheel to the
     ; window under the mouse; hovering the overlay uses its local wheel handler.
     return IsTopVisibleJrpgOverlay(Overlay.Hwnd) && IsMouseParkedInScreenCorner()
+}
+
+OverlayControllerAdjustmentActive() {
+    flagPath := A_Temp "\JRPG_Overlay\controller_adjust.active"
+    if !FileExist(flagPath)
+        return false
+    ownerPid := 0
+    try ownerPid := Integer(Trim(FileRead(flagPath, "UTF-8")))
+    if (ownerPid && ProcessExist(ownerPid))
+        return true
+    try FileDelete(flagPath)
+    return false
+}
+
+OverlayConfiguredHotkeyDispatch(callback, *) {
+    if OverlayControllerAdjustmentActive()
+        return
+    callback.Call()
 }
 
 IsMouseParkedInScreenCorner(edgeTolerance := 12) {
@@ -2748,7 +2774,7 @@ RegisterAllHotkeys() {
     ; ---
 
     try {
-        cb := fun[action]
+        cb := OverlayConfiguredHotkeyDispatch.Bind(fun[action])
         Hotkey(hk, cb, "On")             ; bind (explicitly ON in v2)
         __HK_REG[hk] := cb               ; store callback object for proper unbind
     } catch as e {
@@ -2861,13 +2887,31 @@ PollExplainerFile(){
 }
 
 PollOcrFile() {
-    global OcrTxt, __LastOcrRaw, __OcrText, __AudioText
+    global OcrTxt, OcrDoneTxt, __LastOcrRaw, __LastOcrDoneRaw, __OcrText, __AudioText
     raw := ""
     try if FileExist(OcrTxt)
         raw := FileRead(OcrTxt, "UTF-8")
-    if (raw = __LastOcrRaw)
+
+    doneRaw := ""
+    try if FileExist(OcrDoneTxt)
+        doneRaw := FileRead(OcrDoneTxt, "UTF-8")
+
+    contentChanged := (raw != __LastOcrRaw)
+    completionChanged := (doneRaw != "" && doneRaw != __LastOcrDoneRaw)
+    if (!contentChanged && !completionChanged)
         return
+
     __LastOcrRaw := raw
+    if (doneRaw != "")
+        __LastOcrDoneRaw := doneRaw
+
+    ; A completed request may legitimately return the same translation again.
+    ; In that case, keep the existing rendered text but finish the busy state.
+    if (!contentChanged) {
+        HideOverlayStatus()
+        ScrollOutputToTop()
+        return
+    }
 
     norm := StrReplace(raw, "`r`n", "`n")
     norm := StrReplace(norm, "`r", "`n")

@@ -104,6 +104,7 @@ OVERLAY_DIR = os.path.join(TEMP_DIR, "JRPG_Overlay")
 LAST_JP = os.path.join(OVERLAY_DIR, "last_jp.txt")
 LAST_SRC = os.path.join(OVERLAY_DIR, "last_src.txt")
 OCR_TXT = os.path.join(OVERLAY_DIR, "ocr.txt")
+OCR_DONE = os.path.join(OVERLAY_DIR, "ocr.done")
 os.makedirs(OVERLAY_DIR, exist_ok=True)
 
 
@@ -943,6 +944,7 @@ def main() -> None:
 
     result = translate_images(images, jp2en, en2en)
     atomic_write_text(OCR_TXT, result)
+    atomic_write_text(OCR_DONE, str(time.time_ns()))
 
 
 if __name__ == "__main__":

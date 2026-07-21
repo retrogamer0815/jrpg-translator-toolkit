@@ -2,6 +2,51 @@
 
 All notable changes to JRPG Translator are documented here.
 
+## 0.8.5 - 2026-07-21
+
+This release adds controller-driven overlay positioning, fixes repeat requests
+for unchanged screenshots, and introduces a preview LaunchBox / Big Box
+integration with per-game JoyToKey support.
+
+### Controller Move / Resize
+
+- Added `Move / Resize` commands to the Translation Window and Explanation
+  Window tabs.
+- Added direct XInput support: the left analog stick moves the selected overlay
+  and the right analog stick resizes it, with analog speed scaling for precise
+  small adjustments and faster full-tilt movement.
+- Added keyboard fallback controls. Arrow keys move the overlay; holding the
+  configured Screenshot + Translate key while pressing arrows resizes it.
+- Enter saves the new bounds, Escape restores the previous bounds, and the
+  control panel returns automatically after either action.
+- Temporarily suppresses translation, explanation, overlay, and wheel hotkeys
+  while adjustment mode is active so controller mappings cannot trigger an
+  unrelated workflow.
+- Added on-screen mode guidance and success/cancel notifications while keeping
+  the game from being activated unnecessarily.
+
+### Screenshot request reliability
+
+- Added a separate completion marker for screenshot OCR output so requesting
+  the same capture, text, and model twice is recognized as a new completed
+  request instead of leaving the busy glyph visible indefinitely.
+
+### LaunchBox / Big Box integration preview
+
+- Added the LaunchBox plugin source under `integrations/launchbox`.
+- Added `JRPG Translator Setup...` to the per-game LaunchBox context menu and
+  Big Box game details menu.
+- Added per-game controls for enabling JRPG Translator and selecting a JoyToKey
+  profile.
+- Starts JRPG Translator in background mode before configured games and closes
+  only instances started by the plugin after gameplay.
+- Starts JoyToKey or switches an existing instance to the selected profile,
+  then restores the previous profile when the game exits.
+- Added browse controls for the Translator executable, JoyToKey executable, and
+  JoyToKey profile folder, with portable relative path storage where possible.
+- Improved Big Box profile-selector contrast and keyboard/controller operation.
+- Added repeatable build, smoke-test, and installable ZIP packaging scripts.
+
 ## 0.8.0 - 2026-07-20
 
 This release completes the controller-first configuration workflow, adds

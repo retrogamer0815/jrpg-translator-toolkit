@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+﻿#Requires AutoHotkey v2.0
 #SingleInstance Off
 #Warn
 #NoTrayIcon
@@ -21,6 +21,9 @@ global __CP_MUTEX := DllCall("kernel32\CreateMutexW", "ptr", 0, "int", 0
     , "wstr", "Local\JRPGTranslatorControlPanel", "ptr")
 global __CP_ALREADY_RUNNING := (A_LastError = 183) ; ERROR_ALREADY_EXISTS
 global CPPreviousForegroundHwnd := 0
+global CPOverlayAdjustState := Map("active", false)
+global CPOverlayAdjustHotkeysBound := false
+global CP_OVERLAY_ADJUST_FLAG := A_Temp "\JRPG_Overlay\controller_adjust.active"
 
 CloseControlPanelMutex(*) {
     global __CP_MUTEX
@@ -66,7 +69,14 @@ if (__CP_ALREADY_RUNNING) {
     ExitApp
 }
 
+; Only the primary process owns the temporary controller-adjustment marker.
+CPOverlayAdjustFlag(false)
+OnExit(CPOverlayAdjustOnExit)
+
 SafeCall(fn) {
+    global CPOverlayAdjustState
+    if (CPOverlayAdjustState.Has("active") && CPOverlayAdjustState["active"])
+        return
     Try
         fn()
     Catch as ex
@@ -4433,6 +4443,562 @@ Toast(msg){
 }
 
 ; =========================
+; Controller overlay positioning
+; =========================
+CPFindExactWindow(title, includeHidden := true) {
+    oldMode := A_TitleMatchMode
+    oldHidden := A_DetectHiddenWindows
+    hwnd := 0
+    try {
+        SetTitleMatchMode 3
+        DetectHiddenWindows includeHidden
+        hwnd := WinExist(title)
+    } finally {
+        SetTitleMatchMode oldMode
+        DetectHiddenWindows oldHidden
+    }
+    return hwnd
+}
+
+CPEnsureOverlayForAdjustment(title) {
+    hwnd := CPFindExactWindow(title)
+    if !hwnd {
+        if (title = "Translator")
+            LaunchOverlay()
+        else
+            LaunchExplainerOverlay()
+        hwnd := CPFindExactWindow(title)
+    }
+    if hwnd
+        ShowWindowNoActivate(hwnd)
+    return hwnd
+}
+
+CPOverlayAdjustFlag(enable) {
+    global CP_OVERLAY_ADJUST_FLAG
+    flagDir := A_Temp "\JRPG_Overlay"
+    try {
+        if enable {
+            if !DirExist(flagDir)
+                DirCreate(flagDir)
+            if !FileExist(CP_OVERLAY_ADJUST_FLAG)
+                FileAppend(ProcessExist(), CP_OVERLAY_ADJUST_FLAG, "UTF-8")
+        } else if FileExist(CP_OVERLAY_ADJUST_FLAG) {
+            FileDelete(CP_OVERLAY_ADJUST_FLAG)
+        }
+    }
+}
+
+CPOverlayAdjustHotIf(*) {
+    global CPOverlayAdjustState
+    return CPOverlayAdjustState.Has("active") && CPOverlayAdjustState["active"]
+}
+
+CPOverlayAdjustConsume(*) {
+}
+
+CPRegisterOverlayAdjustHotkeys() {
+    global CPOverlayAdjustHotkeysBound
+    if CPOverlayAdjustHotkeysBound
+        return
+
+    HotIf(CPOverlayAdjustHotIf)
+    try Hotkey("$Enter", CPOverlayAdjustConfirm, "On")
+    try Hotkey("$NumpadEnter", CPOverlayAdjustConfirm, "On")
+    try Hotkey("$Escape", CPOverlayAdjustCancel, "On")
+    try Hotkey("*$Left", CPOverlayAdjustArrow.Bind(-18, 0), "On")
+    try Hotkey("*$Right", CPOverlayAdjustArrow.Bind(18, 0), "On")
+    try Hotkey("*$Up", CPOverlayAdjustArrow.Bind(0, -18), "On")
+    try Hotkey("*$Down", CPOverlayAdjustArrow.Bind(0, 18), "On")
+    try Hotkey("WheelUp", CPOverlayAdjustConsume, "On")
+    try Hotkey("WheelDown", CPOverlayAdjustConsume, "On")
+    HotIf()
+    CPOverlayAdjustHotkeysBound := true
+}
+
+CPJoystickAxis(controllerId, axisName) {
+    value := ""
+    try value := GetKeyState(controllerId "Joy" axisName)
+    if (value = "")
+        return ""
+    return value + 0.0
+}
+
+CPXInputLibrary() {
+    static initialized := false, library := ""
+    if initialized
+        return library
+
+    initialized := true
+    for dllName in ["XInput1_4.dll", "XInput1_3.dll", "XInput9_1_0.dll"] {
+        module := 0
+        try module := DllCall("kernel32\LoadLibraryW", "str", dllName, "ptr")
+        if module {
+            library := dllName
+            break
+        }
+    }
+    return library
+}
+
+CPNormalizeXInputAxis(value) {
+    return (value >= 0) ? value / 32767.0 : value / 32768.0
+}
+
+CPXInputGetState(userIndex) {
+    library := CPXInputLibrary()
+    if (library = "")
+        return false
+
+    stateBuffer := Buffer(16, 0)
+    result := 1
+    try result := DllCall(library "\XInputGetState"
+        , "uint", userIndex, "ptr", stateBuffer.Ptr, "uint")
+    if (result != 0)
+        return false
+
+    return Map(
+        "leftX", CPNormalizeXInputAxis(NumGet(stateBuffer, 8, "short")),
+        "leftY", CPNormalizeXInputAxis(NumGet(stateBuffer, 10, "short")),
+        "rightX", CPNormalizeXInputAxis(NumGet(stateBuffer, 12, "short")),
+        "rightY", CPNormalizeXInputAxis(NumGet(stateBuffer, 14, "short"))
+    )
+}
+
+CPControllerRightAxes(controllerName) {
+    lowerName := StrLower(controllerName)
+    if (InStr(lowerName, "dualsense")
+     || InStr(lowerName, "dualshock")
+     || InStr(lowerName, "wireless controller"))
+        return ["Z", "R"]
+    return ["R", "U"]
+}
+
+CPScanOverlayAdjustControllers() {
+    controllers := []
+
+    Loop 4 {
+        userIndex := A_Index - 1
+        xinputState := CPXInputGetState(userIndex)
+        if IsObject(xinputState) {
+            controllers.Push(Map(
+                "type", "xinput",
+                "id", userIndex,
+                "name", "XInput controller " A_Index,
+                "baseline", xinputState
+            ))
+        }
+    }
+
+    Loop 16 {
+        controllerId := A_Index
+        controllerName := ""
+        try controllerName := Trim(GetKeyState(controllerId "JoyName"))
+        if (controllerName = "")
+            continue
+
+        rightAxes := CPControllerRightAxes(controllerName)
+        baseline := Map()
+        for axisName in ["X", "Y", "Z", "R", "U", "V"] {
+            value := CPJoystickAxis(controllerId, axisName)
+            baseline[axisName] := (value = "") ? 50.0 : value
+        }
+        controllers.Push(Map(
+            "type", "legacy",
+            "id", controllerId,
+            "name", controllerName,
+            "rightX", rightAxes[1],
+            "rightY", rightAxes[2],
+            "baseline", baseline
+        ))
+    }
+    return controllers
+}
+
+CPReadOverlayAdjustAxes(controller) {
+    if (controller["type"] = "xinput") {
+        current := CPXInputGetState(controller["id"])
+        if !IsObject(current)
+            return false
+        baseline := controller["baseline"]
+        return Map(
+            "moveX", Max(-1.0, Min(1.0, current["leftX"] - baseline["leftX"])),
+            "moveY", Max(-1.0, Min(1.0, baseline["leftY"] - current["leftY"])),
+            "sizeX", Max(-1.0, Min(1.0, current["rightX"] - baseline["rightX"])),
+            "sizeY", Max(-1.0, Min(1.0, baseline["rightY"] - current["rightY"]))
+        )
+    }
+
+    return Map(
+        "moveX", CPOverlayAdjustAxis(controller, "X"),
+        "moveY", CPOverlayAdjustAxis(controller, "Y"),
+        "sizeX", CPOverlayAdjustAxis(controller, controller["rightX"]),
+        "sizeY", CPOverlayAdjustAxis(controller, controller["rightY"])
+    )
+}
+
+CPDetectOverlayAdjustController() {
+    global CPOverlayAdjustState
+    state := CPOverlayAdjustState
+    if !state["controllers"].Length
+        return false
+
+    bestController := 0
+    bestScore := 0.0
+    for controller in state["controllers"] {
+        axes := CPReadOverlayAdjustAxes(controller)
+        if !IsObject(axes)
+            continue
+        score := Max(Abs(axes["moveX"]), Abs(axes["moveY"])
+            , Abs(axes["sizeX"]), Abs(axes["sizeY"]))
+        if (score > bestScore) {
+            bestScore := score
+            bestController := controller
+        }
+    }
+
+    if (!IsObject(bestController) || bestScore < 0.15)
+        return false
+
+    state["controller"] := bestController
+    CPUpdateOverlayAdjustHud(true)
+    return true
+}
+
+CPOverlayAdjustAxis(controller, axisName) {
+    value := CPJoystickAxis(controller["id"], axisName)
+    if (value = "")
+        return 0.0
+    centered := (value - controller["baseline"][axisName]) / 50.0
+    return Max(-1.0, Min(1.0, centered))
+}
+
+CPOverlayAdjustVelocity(axisValue, maximumSpeed := 620.0) {
+    magnitude := Abs(axisValue)
+    deadZone := 0.16
+    if (magnitude <= deadZone)
+        return 0.0
+    normalized := (magnitude - deadZone) / (1.0 - deadZone)
+    speed := 12.0 + (maximumSpeed - 12.0) * normalized * normalized
+
+    precisionPoint := 0.15
+    halfTiltPoint := (0.5 - deadZone) / (1.0 - deadZone)
+    if (normalized <= precisionPoint) {
+        boostFactor := 1.0
+    } else if (normalized <= halfTiltPoint) {
+        boostFactor := 1.0 + 1.25
+            * (normalized - precisionPoint) / (halfTiltPoint - precisionPoint)
+    } else {
+        boostFactor := 2.25 + 0.75
+            * (normalized - halfTiltPoint) / (1.0 - halfTiltPoint)
+    }
+    speed *= boostFactor
+    return (axisValue < 0) ? -speed : speed
+}
+
+CPOverlayAdjustWholePixels(stateKey, amount) {
+    global CPOverlayAdjustState
+    total := CPOverlayAdjustState[stateKey] + amount
+    whole := (total >= 0) ? Floor(total) : Ceil(total)
+    CPOverlayAdjustState[stateKey] := total - whole
+    return whole
+}
+
+CPClampOverlayAdjustRect(&x, &y, &w, &h) {
+    virtualX := DllCall("user32\GetSystemMetrics", "int", 76, "int")
+    virtualY := DllCall("user32\GetSystemMetrics", "int", 77, "int")
+    virtualW := DllCall("user32\GetSystemMetrics", "int", 78, "int")
+    virtualH := DllCall("user32\GetSystemMetrics", "int", 79, "int")
+    if (virtualW <= 0 || virtualH <= 0)
+        return
+
+    w := Max(200, Min(w, virtualW))
+    h := Max(120, Min(h, virtualH))
+    x := Max(virtualX, Min(x, virtualX + virtualW - w))
+    y := Max(virtualY, Min(y, virtualY + virtualH - h))
+}
+
+CPApplyOverlayAdjustRect(x, y, w, h) {
+    global CPOverlayAdjustState
+    state := CPOverlayAdjustState
+    if !(state["active"] && DllCall("user32\IsWindow", "ptr", state["hwnd"], "int"))
+        return false
+
+    CPClampOverlayAdjustRect(&x, &y, &w, &h)
+    state["x"] := x, state["y"] := y, state["w"] := w, state["h"] := h
+    try WinMove(x, y, w, h, "ahk_id " state["hwnd"])
+    CPUpdateOverlayAdjustHud()
+    return true
+}
+
+CPOverlayAdjustNudge(deltaX, deltaY, deltaW, deltaH, *) {
+    global CPOverlayAdjustState
+    state := CPOverlayAdjustState
+    if !(state.Has("active") && state["active"])
+        return
+    CPApplyOverlayAdjustRect(
+        state["x"] + deltaX,
+        state["y"] + deltaY,
+        state["w"] + deltaW,
+        state["h"] + deltaH
+    )
+}
+
+CPOverlayAdjustModifierKey(hotkeyText) {
+    keyName := RegExReplace(Trim(hotkeyText), "i)\s+up$")
+    if InStr(keyName, " & ") {
+        keyParts := StrSplit(keyName, " & ")
+        keyName := Trim(keyParts[keyParts.Length])
+    }
+    return RegExReplace(keyName, "^[~*$<>!^+#]+")
+}
+
+CPOverlayAdjustResizeModifierHeld() {
+    global CPOverlayAdjustState
+    state := CPOverlayAdjustState
+    if !(state.Has("resizeModifierKey") && state["resizeModifierKey"] != "")
+        return false
+    isPressed := false
+    try isPressed := GetKeyState(state["resizeModifierKey"], "P")
+    return !!isPressed
+}
+
+CPOverlayAdjustArrow(deltaX, deltaY, *) {
+    if CPOverlayAdjustResizeModifierHeld()
+        CPOverlayAdjustNudge(0, 0, deltaX, deltaY)
+    else
+        CPOverlayAdjustNudge(deltaX, deltaY, 0, 0)
+}
+
+CPCreateOverlayAdjustHud() {
+    global CPOverlayAdjustState, controlDarkMode
+    state := CPOverlayAdjustState
+    hud := Gui("+ToolWindow -Caption +AlwaysOnTop +E0x20")
+    hud.BackColor := controlDarkMode ? "202124" : "F3F3F3"
+    hud.MarginX := 12, hud.MarginY := 8
+    hud.SetFont("s10 " (controlDarkMode ? "cFFFFFF" : "c202124"), "Segoe UI")
+    hudText := hud.Add("Text", "w720 h62 Center", "")
+    state["hud"] := hud
+    state["hudText"] := hudText
+    CPUpdateOverlayAdjustHud(true)
+    hud.Show("NA AutoSize")
+    CPPositionOverlayAdjustHud()
+}
+
+CPPositionOverlayAdjustHud() {
+    global CPOverlayAdjustState
+    state := CPOverlayAdjustState
+    if !(state.Has("hud") && state["hud"])
+        return
+
+    centerX := state["x"] + state["w"] / 2
+    centerY := state["y"] + state["h"] / 2
+    workLeft := 0, workTop := 0, workRight := A_ScreenWidth, workBottom := A_ScreenHeight
+    try monitorCount := MonitorGetCount()
+    catch {
+        monitorCount := 0
+    }
+    Loop monitorCount {
+        try MonitorGetWorkArea(A_Index, &left, &top, &right, &bottom)
+        catch
+            continue
+        if (centerX >= left && centerX < right && centerY >= top && centerY < bottom) {
+            workLeft := left, workTop := top, workRight := right, workBottom := bottom
+            break
+        }
+    }
+
+    try state["hud"].GetPos(,, &hudW, &hudH)
+    catch
+        return
+    hudX := Round(workLeft + (workRight - workLeft - hudW) / 2)
+    hudY := workTop + 16
+    try state["hud"].Move(hudX, hudY)
+}
+
+CPUpdateOverlayAdjustHud(force := false) {
+    global CPOverlayAdjustState
+    state := CPOverlayAdjustState
+    if !(state.Has("hudText") && state["hudText"])
+        return
+    now := A_TickCount
+    if (!force && state.Has("lastHudTick") && now - state["lastHudTick"] < 100)
+        return
+    state["lastHudTick"] := now
+
+    controllerLine := "Move either analog stick to select a controller"
+    if (state.Has("controller") && IsObject(state["controller"]))
+        controllerLine := state["controller"]["name"]
+    state["hudText"].Text := "Adjusting " state["title"] " | " controllerLine
+        . "`nLeft stick or arrows: move | Right stick or hold Screenshot + Translate + arrows: resize"
+        . "`nEnter saves | Esc cancels | " state["w"] " x " state["h"]
+    CPPositionOverlayAdjustHud()
+}
+
+CPOverlayAdjustTick(*) {
+    global CPOverlayAdjustState
+    state := CPOverlayAdjustState
+    if !(state.Has("active") && state["active"])
+        return
+    if !DllCall("user32\IsWindow", "ptr", state["hwnd"], "int") {
+        CPFinishOverlayAdjustment(false)
+        return
+    }
+
+    now := A_TickCount
+    deltaSeconds := Min(0.05, Max(0.001, (now - state["lastTick"]) / 1000.0))
+    state["lastTick"] := now
+
+    if !(state.Has("controller") && IsObject(state["controller"])) {
+        if (now - state["lastScanTick"] >= 1000) {
+            state["controllers"] := CPScanOverlayAdjustControllers()
+            state["lastScanTick"] := now
+        }
+        CPDetectOverlayAdjustController()
+        CPUpdateOverlayAdjustHud()
+        return
+    }
+
+    controller := state["controller"]
+    axes := CPReadOverlayAdjustAxes(controller)
+    if !IsObject(axes) {
+        state.Delete("controller")
+        state["controllers"] := CPScanOverlayAdjustControllers()
+        state["lastScanTick"] := now
+        CPUpdateOverlayAdjustHud(true)
+        return
+    }
+    moveX := CPOverlayAdjustVelocity(axes["moveX"], 620.0)
+    moveY := CPOverlayAdjustVelocity(axes["moveY"], 620.0)
+    sizeX := CPOverlayAdjustVelocity(axes["sizeX"], 520.0)
+    sizeY := CPOverlayAdjustVelocity(axes["sizeY"], 520.0)
+
+    deltaX := CPOverlayAdjustWholePixels("fractionX", moveX * deltaSeconds)
+    deltaY := CPOverlayAdjustWholePixels("fractionY", moveY * deltaSeconds)
+    deltaW := CPOverlayAdjustWholePixels("fractionW", sizeX * deltaSeconds)
+    deltaH := CPOverlayAdjustWholePixels("fractionH", sizeY * deltaSeconds)
+    if (deltaX || deltaY || deltaW || deltaH)
+        CPApplyOverlayAdjustRect(state["x"] + deltaX, state["y"] + deltaY
+            , state["w"] + deltaW, state["h"] + deltaH)
+}
+
+StartOverlayAdjustment(title, *) {
+    global ui, CPOverlayAdjustState, CPPreviousForegroundHwnd, iniPath
+    state := CPOverlayAdjustState
+    if (state.Has("active") && state["active"])
+        return
+
+    hwnd := CPEnsureOverlayForAdjustment(title)
+    if !hwnd {
+        MsgBox("The " title " overlay could not be opened.", "Move / Resize", 48)
+        return
+    }
+
+    x := 0, y := 0, w := 0, h := 0
+    try WinGetPos(&x, &y, &w, &h, "ahk_id " hwnd)
+    if (w <= 0 || h <= 0) {
+        MsgBox("The " title " overlay bounds could not be read.", "Move / Resize", 48)
+        return
+    }
+
+    state.Clear()
+    state["active"] := true
+    state["title"] := title
+    state["hwnd"] := hwnd
+    state["originalX"] := x, state["originalY"] := y
+    state["originalW"] := w, state["originalH"] := h
+    state["x"] := x, state["y"] := y, state["w"] := w, state["h"] := h
+    state["wasTopmost"] := !!(WinGetExStyle("ahk_id " hwnd) & 0x00000008)
+    state["returnHwnd"] := CPPreviousForegroundHwnd
+    screenshotHotkey := Trim(IniRead(iniPath, "hotkeys", "screenshot_translate", "^+t"))
+    state["resizeModifierKey"] := CPOverlayAdjustModifierKey(screenshotHotkey)
+    state["controllers"] := CPScanOverlayAdjustControllers()
+    state["lastScanTick"] := A_TickCount
+    state["lastTick"] := A_TickCount
+    state["acceptAfter"] := A_TickCount + 400
+    state["fractionX"] := 0.0, state["fractionY"] := 0.0
+    state["fractionW"] := 0.0, state["fractionH"] := 0.0
+    state["lastHudTick"] := 0
+
+    CPOverlayAdjustFlag(true)
+    CPRegisterOverlayAdjustHotkeys()
+    DllCall("user32\SetWindowPos", "ptr", hwnd, "ptr", -1
+        , "int", 0, "int", 0, "int", 0, "int", 0, "uint", 0x0013)
+    CPCreateOverlayAdjustHud()
+
+    SavePanelBounds()
+    ui.Hide()
+    SetTimer(RestoreControlPanelReturnWindow, -1)
+    SetTimer(CPOverlayAdjustTick, 20)
+}
+
+CPOverlayAdjustConfirm(*) {
+    global CPOverlayAdjustState
+    if (A_TickCount < CPOverlayAdjustState["acceptAfter"])
+        return
+    CPFinishOverlayAdjustment(true)
+}
+
+CPOverlayAdjustCancel(*) {
+    CPFinishOverlayAdjustment(false)
+}
+
+CPRestoreControlPanelAfterAdjustment(title, returnHwnd := 0) {
+    global ui, CPPreviousForegroundHwnd, btnMoveResize, btnMoveResize_EW
+    if !(IsSet(ui) && ui && ui.Hwnd)
+        return
+
+    CPPreviousForegroundHwnd := returnHwnd
+    ui.Show()
+    try WinActivate("ahk_id " ui.Hwnd)
+    try {
+        if (title = "Translator")
+            btnMoveResize.Focus()
+        else
+            btnMoveResize_EW.Focus()
+    }
+}
+
+CPFinishOverlayAdjustment(saveChanges, quiet := false) {
+    global CPOverlayAdjustState
+    state := CPOverlayAdjustState
+    if !(state.Has("active") && state["active"])
+        return
+
+    SetTimer(CPOverlayAdjustTick, 0)
+    title := state["title"]
+    hwnd := state["hwnd"]
+    if (!saveChanges && DllCall("user32\IsWindow", "ptr", hwnd, "int"))
+        try WinMove(state["originalX"], state["originalY"], state["originalW"], state["originalH"], "ahk_id " hwnd)
+
+    if DllCall("user32\IsWindow", "ptr", hwnd, "int") {
+        if !state["wasTopmost"]
+            DllCall("user32\SetWindowPos", "ptr", hwnd, "ptr", -2
+                , "int", 0, "int", 0, "int", 0, "int", 0, "uint", 0x0013)
+        SendOverlayCmdTo(title, "action=save_bounds")
+        if (title = "Explainer")
+            SetTimer(SaveExplainerBoundsIfChanged, -1)
+    }
+
+    try state["hud"].Destroy()
+    state["active"] := false
+    CPOverlayAdjustFlag(false)
+    if !quiet {
+        returnHwnd := state.Has("returnHwnd") ? state["returnHwnd"] : 0
+        SetTimer(CPRestoreControlPanelAfterAdjustment.Bind(title, returnHwnd), -100)
+        Toast(title (saveChanges ? " position saved" : " adjustment canceled"))
+    }
+}
+
+CPOverlayAdjustOnExit(*) {
+    global CPOverlayAdjustState
+    if (CPOverlayAdjustState.Has("active") && CPOverlayAdjustState["active"])
+        CPFinishOverlayAdjustment(false, true)
+    else
+        CPOverlayAdjustFlag(false)
+}
+
+; =========================
 ; GUI
 ; =========================
 ui := Gui("+Resize +MinSize" CP_VIEWPORT_MIN_W "x" CP_VIEWPORT_MIN_H " +0x300000", "JRPG Translator")
@@ -4718,6 +5284,13 @@ btnPSave := ui.Add("Button", "x+6 w70",  "Save")
 btnPLoad := ui.Add("Button", "x+6 w70",  "Load")
 btnPDel  := ui.Add("Button", "x+6 w70",  "Delete")
 
+twControlX := twLabelX + twLabelW + pad
+btnMoveResize := ui.Add("Button", "x" twControlX " y+20 w180", "Move / Resize")
+txtMoveResize := ui.Add("Text", "x" twControlX " y+5 w590 cGray"
+    , "Left stick or arrows move; right stick or Screenshot + Translate + arrows resize. Enter saves, Esc cancels.")
+CPRegisterMutedControl(txtMoveResize)
+btnMoveResize.OnEvent("Click", StartOverlayAdjustment.Bind("Translator"))
+
 RefreshProfilesList( IniRead(iniPath, "profiles", "translator_last", "") )
 
 btnPSave.OnEvent("Click", (*) => (
@@ -4878,6 +5451,13 @@ btnProfCreate_EW := ui.Add("Button", "x+8 w80", "Add")
 btnProfSave_EW := ui.Add("Button", "x+6 w70", "Save")
 btnProfLoad_EW := ui.Add("Button", "x+6 w70", "Load")
 btnProfDel_EW  := ui.Add("Button", "x+6 w70", "Delete")
+
+ewControlX := ewLabelX + ewLabelW + pad
+btnMoveResize_EW := ui.Add("Button", "x" ewControlX " y+20 w180", "Move / Resize")
+txtMoveResize_EW := ui.Add("Text", "x" ewControlX " y+5 w590 cGray"
+    , "Left stick or arrows move; right stick or Screenshot + Translate + arrows resize. Enter saves, Esc cancels.")
+CPRegisterMutedControl(txtMoveResize_EW)
+btnMoveResize_EW.OnEvent("Click", StartOverlayAdjustment.Bind("Explainer"))
 
 ; populate dropdown
 Refresh_ddlProf_EW(*) {
@@ -7707,18 +8287,11 @@ SendOverlayTheme(targetTitle := "") {
 }
 
 ; ---------------------------------------------------------------
-; Send a generic command string to the Translator overlay via WM_COPYDATA
-SendOverlayCmd(s) {
-    target := WinExist("ahk_exe AutoHotkey64.exe ahk_class AutoHotkey ahk_pid " ProcessExist() " ahk_title Translator")
-    if !target {
-        ; fallback: try any window titled exactly "Translator"
-        oldMode := A_TitleMatchMode
-        SetTitleMatchMode(3)
-        target := WinExist("Translator")
-        SetTitleMatchMode(oldMode)
-        if !target
-            return false
-    }
+; Send a generic command string to either overlay via WM_COPYDATA.
+SendOverlayCmdTo(title, s) {
+    target := CPFindExactWindow(title)
+    if !target
+        return false
     ; --- Send UTF-16 payload ---
     buf := Buffer(StrLen(s)*2 + 2, 0)
     StrPut(s, buf, "UTF-16")
@@ -7728,4 +8301,8 @@ SendOverlayCmd(s) {
     NumPut("Ptr",  buf.Ptr,  cds, 2*A_PtrSize)
     DllCall("User32\SendMessageW", "Ptr", target, "UInt", 0x004A, "Ptr", 0, "Ptr", cds.Ptr)
     return true
+}
+
+SendOverlayCmd(s) {
+    return SendOverlayCmdTo("Translator", s)
 }

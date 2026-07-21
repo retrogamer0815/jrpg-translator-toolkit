@@ -1,0 +1,17 @@
+{
+  "PluginId": "759fdb5b-bc11-4c11-9dce-00607d52f4cc",
+  "UserId": 0,
+  "Name": "JRPG Translator Integration",
+  "Developer": "retrogamer0815",
+  "Brief": "Configures JRPG Translator and JoyToKey for individual games.",
+  "Description": "Adds game-specific JRPG Translator and JoyToKey setup to LaunchBox and Big Box, including automatic launch, cleanup, profile switching, and previous-profile restoration.",
+  "Requirements": "LaunchBox 13.26 or newer",
+  "Credits": null,
+  "OperatingSystemFamily": "Windows",
+  "InstalledVersion": "0.1.0-preview",
+  "SourceCodeUrl": "https://github.com/retrogamer0815/jrpg-translator-toolkit/tree/main/integrations/launchbox",
+  "SupportUrl": "https://github.com/retrogamer0815/jrpg-translator-toolkit/issues",
+  "HomePageUrl": "https://github.com/retrogamer0815/jrpg-translator-toolkit",
+  "TipJarUrl": null,
+  "Tags": []
+}
