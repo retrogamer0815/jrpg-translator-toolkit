@@ -8,10 +8,18 @@ DllCall("shell32\SetCurrentProcessExplicitAppUserModelID", "wstr", "JRPGTranslat
 ; Big Box and other front ends can pass --background to initialize everything
 ; without showing or activating the control panel.
 global CP_BACKGROUND_START := false
-for __cpArg in A_Args {
-    if (StrLower(__cpArg) = "--background") {
+global CP_START_PROFILE := ""
+global CP_START_TRANSLATOR := false
+for __cpIndex, __cpArg in A_Args {
+    __cpArgLower := StrLower(__cpArg)
+    if (__cpArgLower = "--background") {
         CP_BACKGROUND_START := true
-        break
+    } else if (__cpArgLower = "--open-translator") {
+        CP_START_TRANSLATOR := true
+    } else if (__cpArgLower = "--profile" && __cpIndex < A_Args.Length) {
+        CP_START_PROFILE := A_Args[__cpIndex + 1]
+    } else if RegExMatch(__cpArg, "i)^--profile=(.*)$", &__cpProfileMatch) {
+        CP_START_PROFILE := __cpProfileMatch[1]
     }
 }
 
@@ -24,6 +32,29 @@ global CPPreviousForegroundHwnd := 0
 global CPOverlayAdjustState := Map("active", false)
 global CPOverlayAdjustHotkeysBound := false
 global CP_OVERLAY_ADJUST_FLAG := A_Temp "\JRPG_Overlay\controller_adjust.active"
+global CPControllerInputsEnabled := false
+global CPControllerCaptureActive := false
+global CPControllerPreviousTokens := Map()
+global CPControllerBindings := Map()
+global CPControllerBindingEdits := Map()
+global CPControllerAssignButtons := Map()
+global CPControllerDisableButtons := Map()
+global CPControlsKeyboardControls := []
+global CPControlsControllerControls := []
+global CPControlsCurrentView := "keyboard"
+global CPControllerLastDeviceName := ""
+global CPControllerLastStatusText := ""
+global CPControllerNavPreviousState := Map()
+global CPControllerNavTargetHwnd := 0
+global CPControllerNavHeldDirection := ""
+global CPControllerNavNextRepeatAt := 0
+global CPControllerNavHeldSince := 0
+global CPControllerLastNativeNavigationAt := Map()
+global CPFontSizeAdjustState := Map("active", false)
+global CPFontSizeAdjustSyncing := false
+global CPMaxPngAdjustState := Map("active", false)
+global CPMaxPngAdjustSyncing := false
+global CPControllerColorDialogState := Map("active", false)
 
 CloseControlPanelMutex(*) {
     global __CP_MUTEX
@@ -49,8 +80,21 @@ ShowWindowNoActivate(hwnd) {
 
 OnExit(CloseControlPanelMutex)
 
+SendControlPanelCopyData(hwnd, payload) {
+    if !hwnd
+        return false
+    cpPayloadBuffer := Buffer(StrPut(payload, "UTF-16") * 2, 0)
+    StrPut(payload, cpPayloadBuffer, "UTF-16")
+    cpCopyData := Buffer(A_PtrSize * 3, 0)
+    NumPut("UPtr", 0, cpCopyData, 0)
+    NumPut("UPtr", cpPayloadBuffer.Size, cpCopyData, A_PtrSize)
+    NumPut("Ptr", cpPayloadBuffer.Ptr, cpCopyData, A_PtrSize * 2)
+    return DllCall("user32\SendMessageW", "ptr", hwnd, "uint", 0x004A
+        , "ptr", 0, "ptr", cpCopyData.Ptr, "ptr")
+}
+
 if (__CP_ALREADY_RUNNING) {
-    if (!CP_BACKGROUND_START) {
+    if (!CP_BACKGROUND_START || CP_START_PROFILE != "") {
         __cpOldDhw := A_DetectHiddenWindows
         __cpOldTitleMode := A_TitleMatchMode
         try {
@@ -58,8 +102,12 @@ if (__CP_ALREADY_RUNNING) {
             SetTitleMatchMode 3
             __cpExistingHwnd := WinExist("JRPG Translator")
             if (__cpExistingHwnd) {
-                DllCall("user32\ShowWindow", "ptr", __cpExistingHwnd, "int", 5) ; SW_SHOW
-                try WinActivate("ahk_id " __cpExistingHwnd)
+                if (CP_START_PROFILE != "")
+                    SendControlPanelCopyData(__cpExistingHwnd, "apply_profile=" CP_START_PROFILE)
+                if (!CP_BACKGROUND_START) {
+                    DllCall("user32\ShowWindow", "ptr", __cpExistingHwnd, "int", 5) ; SW_SHOW
+                    try WinActivate("ahk_id " __cpExistingHwnd)
+                }
             }
         } finally {
             SetTitleMatchMode __cpOldTitleMode
@@ -152,6 +200,7 @@ global CPControllerColorGradientSliders := Map()
 global CPControllerColorGradientMessageRegistered := false
 global CPThemeMessagesRegistered := false
 global CPComboArrowOverlays := []
+global CPCapturePickerNavigation := Map()
 
 ; -------- Scrollable control-panel canvas --------
 ; The existing layout remains a fixed minimum design surface. When the window is
@@ -909,10 +958,8 @@ appDir      := portableRoot
 iniPath     := appDir "\control.ini"
 envPath     := appDir "\.env"
 overlayDir  := A_Temp "\JRPG_Overlay"      ; runtime-only stuff stays in temp
-profilesDir := appDir "\profiles"
-; --- Explanation profiles subfolder ---
-profilesDir_EW := profilesDir "\explainer"
-try DirCreate(profilesDir_EW)
+gameProfilesDir := appDir "\game_profiles"
+try DirCreate(gameProfilesDir)
 
 ; Keeps the current registration so we can unbind/rebind on changes
 global __HK_LAUNCH_EXPL_REQ := ""
@@ -1368,6 +1415,8 @@ CPMarkFocusedTabFromFallback(*) {
 UpdateCPFocusRing(*) {
     global ui, CPFocusVisualCtrl, CPFocusVisualHwnd, CPFocusVisualNavHwnd, controlDarkMode
     if !(IsSet(ui) && ui && ui.Hwnd && DllCall("user32\IsWindowVisible", "ptr", ui.Hwnd, "int")) {
+        CPUpdateFontSizeControllerHint()
+        CPUpdateMaxPngControllerHint()
         CPRestoreFocusVisual()
         CPSetTabFocusIndicator(false)
         return
@@ -1375,10 +1424,14 @@ UpdateCPFocusRing(*) {
 
     hwnd := CPFocusRingTargetHwnd(CPFocusedHwnd())
     if !hwnd {
+        CPUpdateFontSizeControllerHint()
+        CPUpdateMaxPngControllerHint()
         CPRestoreFocusVisual()
         CPSetTabFocusIndicator(false)
         return
     }
+    CPUpdateFontSizeControllerHint(hwnd)
+    CPUpdateMaxPngControllerHint(hwnd)
     if (IsSet(CPFocusVisualHwnd) && CPFocusVisualHwnd = hwnd) {
         if CPIsColorSwatchControl(hwnd)
             CPShowColorFocusFrame(hwnd)
@@ -1711,11 +1764,332 @@ CPForwardIfComboOpen(keyName) {
     return true
 }
 
+CPFontSizeAdjustActive() {
+    global CPFontSizeAdjustState
+    return IsObject(CPFontSizeAdjustState)
+        && CPFontSizeAdjustState.Has("active")
+        && CPFontSizeAdjustState["active"]
+}
+
+CPFontSizeAdjustKindForHwnd(hwnd) {
+    global edFSize, udFSize, edFSize_EW, udFSize_EW
+    if !hwnd
+        return ""
+    try {
+        if ((IsSet(edFSize) && IsObject(edFSize) && hwnd = edFSize.Hwnd)
+         || (IsSet(udFSize) && IsObject(udFSize) && hwnd = udFSize.Hwnd))
+            return "translator"
+        if ((IsSet(edFSize_EW) && IsObject(edFSize_EW) && hwnd = edFSize_EW.Hwnd)
+         || (IsSet(udFSize_EW) && IsObject(udFSize_EW) && hwnd = udFSize_EW.Hwnd))
+            return "explainer"
+    }
+    return ""
+}
+
+CPUpdateFontSizeControllerHint(hwnd := 0) {
+    global txtFontSizeHint, txtFontSizeHint_EW, CPFocusVisualNavHwnd, controlDarkMode
+    static cpLastHintState := ""
+
+    cpSizeKind := CPFontSizeAdjustKindForHwnd(hwnd)
+    cpHasNavFocus := (cpSizeKind != "")
+        && IsSet(CPFocusVisualNavHwnd) && (CPFocusVisualNavHwnd = hwnd)
+    cpSizeActive := cpHasNavFocus && CPFontSizeAdjustActive()
+    cpHintState := (cpHasNavFocus ? cpSizeKind : "hidden") "|" cpSizeActive "|" (controlDarkMode ? 1 : 0)
+    if (cpHintState = cpLastHintState)
+        return
+    cpLastHintState := cpHintState
+
+    if IsSet(txtFontSizeHint)
+        try txtFontSizeHint.Visible := false
+    if IsSet(txtFontSizeHint_EW)
+        try txtFontSizeHint_EW.Visible := false
+    if !cpHasNavFocus
+        return
+
+    cpHintCtrl := (cpSizeKind = "translator") ? txtFontSizeHint : txtFontSizeHint_EW
+    cpHintColors := CPPalette(controlDarkMode)
+    cpHintCtrl.Text := cpSizeActive ? "< A >" : "A"
+    cpHintCtrl.Opt("+Background" (cpSizeActive ? cpHintColors["accentFocus"] : cpHintColors["focus"]))
+    cpHintCtrl.SetFont("Bold c" (cpSizeActive ? cpHintColors["accentText"]
+        : (controlDarkMode ? cpHintColors["accentText"] : cpHintColors["accentFocus"])))
+    cpHintCtrl.Visible := true
+    try cpHintCtrl.Redraw()
+}
+
+CPFontSizeAdjustSyncControls(cpSizeState, cpSizeValue) {
+    global CPFontSizeAdjustSyncing
+    CPFontSizeAdjustSyncing := true
+    try {
+        cpSizeState["edit"].Value := cpSizeValue
+        cpSizeState["spinner"].Value := cpSizeValue
+    } finally {
+        CPFontSizeAdjustSyncing := false
+    }
+}
+
+CPFontSizeAdjustStart(hwnd) {
+    global CPFontSizeAdjustState
+    global edFSize, udFSize, fontSize
+    global edFSize_EW, udFSize_EW, fontSize_EW
+
+    cpSizeKind := CPFontSizeAdjustKindForHwnd(hwnd)
+    if (cpSizeKind = "")
+        return false
+    if CPMaxPngAdjustActive()
+        CPMaxPngAdjustFinish(true)
+
+    if (cpSizeKind = "translator") {
+        cpSizeEdit := edFSize
+        cpSizeSpinner := udFSize
+        cpSizeOriginal := Max(6, Min(128, Integer(fontSize)))
+        cpSizeMin := 6
+        cpSizeMax := 128
+    } else {
+        cpSizeEdit := edFSize_EW
+        cpSizeSpinner := udFSize_EW
+        cpSizeOriginal := Max(6, Min(200, Integer(fontSize_EW)))
+        cpSizeMin := 6
+        cpSizeMax := 200
+    }
+    cpSizeValue := cpSizeOriginal
+    try {
+        cpSizePendingText := Trim(cpSizeEdit.Value)
+        if (cpSizePendingText != "")
+            cpSizeValue := Max(cpSizeMin, Min(cpSizeMax, Integer(cpSizePendingText)))
+    }
+
+    CPFontSizeAdjustState := Map(
+        "active", true,
+        "kind", cpSizeKind,
+        "edit", cpSizeEdit,
+        "spinner", cpSizeSpinner,
+        "original", cpSizeOriginal,
+        "value", cpSizeValue,
+        "min", cpSizeMin,
+        "max", cpSizeMax,
+        "step", 1)
+    CPFontSizeAdjustSyncControls(CPFontSizeAdjustState, cpSizeValue)
+    CPSetFocusHwnd(cpSizeEdit.Hwnd)
+    UpdateCPFocusRing()
+    return true
+}
+
+CPFontSizeAdjustHandleDirection(cpSizeDirection) {
+    global CPFontSizeAdjustState, fontSize, fontSize_EW
+    if !CPFontSizeAdjustActive()
+        return false
+
+    cpSizeFocusedKind := CPFontSizeAdjustKindForHwnd(CPFocusedHwnd())
+    if (cpSizeFocusedKind != CPFontSizeAdjustState["kind"]) {
+        CPFontSizeAdjustFinish(true)
+        return false
+    }
+    cpSizeStep := CPFontSizeAdjustState.Has("step") ? CPFontSizeAdjustState["step"] : 1
+    if (cpSizeDirection = "Up" || cpSizeDirection = "Right")
+        cpSizeDelta := cpSizeStep
+    else if (cpSizeDirection = "Down" || cpSizeDirection = "Left")
+        cpSizeDelta := -cpSizeStep
+    else
+        return true
+
+    cpSizeValue := Max(CPFontSizeAdjustState["min"]
+        , Min(CPFontSizeAdjustState["max"], CPFontSizeAdjustState["value"] + cpSizeDelta))
+    if (cpSizeValue = CPFontSizeAdjustState["value"])
+        return true
+
+    CPFontSizeAdjustState["value"] := cpSizeValue
+    if (CPFontSizeAdjustState["kind"] = "translator")
+        fontSize := cpSizeValue
+    else
+        fontSize_EW := cpSizeValue
+    CPFontSizeAdjustSyncControls(CPFontSizeAdjustState, cpSizeValue)
+    SendOverlayTheme()
+    return true
+}
+
+CPFontSizeAdjustFinish(cpSizeSave := true) {
+    global CPFontSizeAdjustState, fontSize, fontSize_EW
+    if !CPFontSizeAdjustActive()
+        return false
+
+    cpSizeState := CPFontSizeAdjustState
+    cpSizeValue := cpSizeSave ? cpSizeState["value"] : cpSizeState["original"]
+    if (cpSizeState["kind"] = "translator")
+        fontSize := cpSizeValue
+    else
+        fontSize_EW := cpSizeValue
+
+    CPFontSizeAdjustState := Map("active", false)
+    CPFontSizeAdjustSyncControls(cpSizeState, cpSizeValue)
+    if cpSizeSave {
+        SaveAll()
+        DbgCP("Font size controller adjustment saved: " cpSizeState["kind"] " -> " cpSizeValue)
+    } else {
+        DbgCP("Font size controller adjustment canceled: " cpSizeState["kind"] " -> " cpSizeValue)
+    }
+    SendOverlayTheme()
+    CPSetFocusHwnd(cpSizeState["edit"].Hwnd)
+    UpdateCPFocusRing()
+    return true
+}
+
+CPFontSizeAdjustCancel() {
+    return CPFontSizeAdjustFinish(false)
+}
+
+CPMaxPngAdjustActive() {
+    global CPMaxPngAdjustState
+    return IsObject(CPMaxPngAdjustState)
+        && CPMaxPngAdjustState.Has("active")
+        && CPMaxPngAdjustState["active"]
+}
+
+CPMaxPngAdjustForHwnd(hwnd) {
+    global eCapMax
+    if !hwnd
+        return false
+    try return IsSet(eCapMax) && IsObject(eCapMax) && hwnd = eCapMax.Hwnd
+    return false
+}
+
+CPUpdateMaxPngControllerHint(hwnd := 0) {
+    global txtCapMaxHint, CPFocusVisualNavHwnd, controlDarkMode
+    static cpLastMaxPngHintState := ""
+
+    cpHasNavFocus := CPMaxPngAdjustForHwnd(hwnd)
+        && IsSet(CPFocusVisualNavHwnd) && (CPFocusVisualNavHwnd = hwnd)
+    cpAdjustActive := cpHasNavFocus && CPMaxPngAdjustActive()
+    cpHintState := (cpHasNavFocus ? "shown" : "hidden") "|" cpAdjustActive "|" (controlDarkMode ? 1 : 0)
+    if (cpHintState = cpLastMaxPngHintState)
+        return
+    cpLastMaxPngHintState := cpHintState
+
+    if IsSet(txtCapMaxHint)
+        try txtCapMaxHint.Visible := false
+    if !cpHasNavFocus
+        return
+
+    cpHintColors := CPPalette(controlDarkMode)
+    txtCapMaxHint.Text := cpAdjustActive ? "< A >" : "A"
+    txtCapMaxHint.Opt("+Background" (cpAdjustActive ? cpHintColors["accentFocus"] : cpHintColors["focus"]))
+    txtCapMaxHint.SetFont("Bold c" (cpAdjustActive ? cpHintColors["accentText"]
+        : (controlDarkMode ? cpHintColors["accentText"] : cpHintColors["accentFocus"])))
+    txtCapMaxHint.Visible := true
+    try txtCapMaxHint.Redraw()
+}
+
+CPMaxPngAdjustSyncValue(cpMaxPngValue) {
+    global CPMaxPngAdjustSyncing, eCapMax
+    CPMaxPngAdjustSyncing := true
+    try eCapMax.Value := cpMaxPngValue
+    finally CPMaxPngAdjustSyncing := false
+}
+
+CPMaxPngAdjustStart(hwnd) {
+    global CPMaxPngAdjustState, capMaxKB, eCapMax
+    if !CPMaxPngAdjustForHwnd(hwnd)
+        return false
+    if CPFontSizeAdjustActive()
+        CPFontSizeAdjustFinish(true)
+
+    cpMaxPngOriginal := Max(100, Min(10000, Integer(capMaxKB)))
+    cpMaxPngValue := cpMaxPngOriginal
+    try {
+        cpPendingText := Trim(eCapMax.Value)
+        if (cpPendingText != "")
+            cpMaxPngValue := Max(100, Min(10000, Integer(cpPendingText)))
+    }
+
+    CPMaxPngAdjustState := Map(
+        "active", true,
+        "original", cpMaxPngOriginal,
+        "value", cpMaxPngValue,
+        "min", 100,
+        "max", 10000,
+        "stepHorizontal", 100,
+        "stepVertical", 500)
+    CPMaxPngAdjustSyncValue(cpMaxPngValue)
+    CPSetFocusHwnd(eCapMax.Hwnd)
+    UpdateCPFocusRing()
+    return true
+}
+
+CPMaxPngAdjustHandleDirection(cpMaxPngDirection) {
+    global CPMaxPngAdjustState
+    if !CPMaxPngAdjustActive()
+        return false
+
+    if !CPMaxPngAdjustForHwnd(CPFocusedHwnd()) {
+        CPMaxPngAdjustFinish(true)
+        return false
+    }
+    cpMaxPngHorizontalStep := CPMaxPngAdjustState.Has("stepHorizontal")
+        ? CPMaxPngAdjustState["stepHorizontal"] : 100
+    cpMaxPngVerticalStep := CPMaxPngAdjustState.Has("stepVertical")
+        ? CPMaxPngAdjustState["stepVertical"] : 500
+    switch cpMaxPngDirection {
+        case "Right": cpMaxPngDelta := cpMaxPngHorizontalStep
+        case "Left": cpMaxPngDelta := -cpMaxPngHorizontalStep
+        case "Up": cpMaxPngDelta := cpMaxPngVerticalStep
+        case "Down": cpMaxPngDelta := -cpMaxPngVerticalStep
+        default: return true
+    }
+
+    cpMaxPngValue := Max(CPMaxPngAdjustState["min"]
+        , Min(CPMaxPngAdjustState["max"], CPMaxPngAdjustState["value"] + cpMaxPngDelta))
+    if (cpMaxPngValue = CPMaxPngAdjustState["value"])
+        return true
+
+    CPMaxPngAdjustState["value"] := cpMaxPngValue
+    CPMaxPngAdjustSyncValue(cpMaxPngValue)
+    return true
+}
+
+CPMaxPngAdjustFinish(cpMaxPngSave := true) {
+    global CPMaxPngAdjustState, capMaxKB, eCapMax
+    if !CPMaxPngAdjustActive()
+        return false
+
+    cpMaxPngState := CPMaxPngAdjustState
+    cpMaxPngValue := cpMaxPngSave ? cpMaxPngState["value"] : cpMaxPngState["original"]
+    capMaxKB := cpMaxPngValue
+    CPMaxPngAdjustState := Map("active", false)
+    CPMaxPngAdjustSyncValue(cpMaxPngValue)
+    if cpMaxPngSave {
+        SaveAll()
+        DbgCP("Max PNG size controller adjustment saved: " cpMaxPngValue " KB")
+    } else {
+        DbgCP("Max PNG size controller adjustment canceled: " cpMaxPngValue " KB")
+    }
+    CPSetFocusHwnd(eCapMax.Hwnd)
+    UpdateCPFocusRing()
+    return true
+}
+
+CPMaxPngAdjustCancel() {
+    return CPMaxPngAdjustFinish(false)
+}
+
 CPNavMove(dir, *) {
+    global eCapMax, btnCapPick
+
+    if CPFontSizeAdjustHandleDirection(dir)
+        return
+    if CPMaxPngAdjustHandleDirection(dir)
+        return
+
     if CPForwardIfComboOpen(dir)
         return
 
     curHwnd := CPFocusedHwnd()
+    if (dir = "Down") {
+        try {
+            if (curHwnd = eCapMax.Hwnd) {
+                CPSetFocusHwnd(btnCapPick.Hwnd)
+                return
+            }
+        }
+    }
     if (curHwnd && CPHwndIsTrackbar(curHwnd) && (dir = "Left" || dir = "Right")) {
         ; The $-prefixed navigation hotkeys do not retrigger on this synthetic
         ; key, so the native slider receives it and fires its Change event.
@@ -1815,26 +2189,78 @@ CPNavMove(dir, *) {
     SetTimer(CPMarkFocusedTabFromFallback, -1)
 }
 
+CPControllerKeyboardMirrorActive(command) {
+    ; JoyToKey can mirror the same physical controller press as an arrow,
+    ; Enter, Space, or Escape key. Native controller navigation owns that
+    ; press while the corresponding physical control is held, so discard only
+    ; the mirrored keyboard event and leave genuine keyboard input untouched.
+    global CPControllerLastNativeNavigationAt
+    static cpMirrorGraceUntil := Map()
+    static cpMirrorReleaseGraceMs := 180
+    static cpNativeActionGraceMs := 650
+
+    cpMirrorNow := A_TickCount
+    if (CPControllerLastNativeNavigationAt.Has(command)
+     && cpMirrorNow - CPControllerLastNativeNavigationAt[command] <= cpNativeActionGraceMs)
+        return true
+
+    snapshot := CPControllerReadSnapshot()
+    if !snapshot["connected"]
+        return false
+
+    cpMirrorState := CPControllerNavigationState(snapshot)
+    if !cpMirrorState.Has(command)
+        return false
+
+    if cpMirrorState[command] {
+        cpMirrorGraceUntil[command] := cpMirrorNow + cpMirrorReleaseGraceMs
+        return true
+    }
+    return cpMirrorGraceUntil.Has(command)
+        && cpMirrorNow <= cpMirrorGraceUntil[command]
+}
+
 CPNavUp(*) {
+    if CPControllerKeyboardMirrorActive("Up")
+        return
     CPNavMove("Up")
 }
 
 CPNavDown(*) {
+    if CPControllerKeyboardMirrorActive("Down")
+        return
     CPNavMove("Down")
 }
 
 CPNavLeft(*) {
+    if CPControllerKeyboardMirrorActive("Left")
+        return
     CPNavMove("Left")
 }
 
 CPNavRight(*) {
+    if CPControllerKeyboardMirrorActive("Right")
+        return
     CPNavMove("Right")
 }
 
 CPNavActivate(keyName := "Enter", *) {
+    if CPFontSizeAdjustActive() {
+        CPFontSizeAdjustFinish(true)
+        return
+    }
+    if CPMaxPngAdjustActive() {
+        CPMaxPngAdjustFinish(true)
+        return
+    }
     hwnd := CPFocusedHwnd()
+    if (keyName = "Enter" && CPFontSizeAdjustStart(hwnd))
+        return
+    if (keyName = "Enter" && CPMaxPngAdjustStart(hwnd))
+        return
     if (keyName = "Enter" && CPIsColorSwatchControl(hwnd)) {
-        CPAdjustColorSwatchWithController(hwnd)
+        ; Let the controller polling callback finish before the modal editor opens.
+        SetTimer(CPAdjustColorSwatchWithController.Bind(hwnd), -1)
         return
     }
     if (hwnd && CPHwndIsCombo(hwnd) && !CPComboDropped(hwnd)) {
@@ -1849,11 +2275,25 @@ CPNavActivate(keyName := "Enter", *) {
 }
 
 CPNavEnter(*) {
+    if CPControllerKeyboardMirrorActive("Activate")
+        return
     CPNavActivate("Enter")
 }
 
 CPNavSpace(*) {
+    if CPControllerKeyboardMirrorActive("Activate")
+        return
     CPNavActivate("Space")
+}
+
+CPNavEscape(*) {
+    if CPControllerKeyboardMirrorActive("Cancel")
+        return
+    if CPFontSizeAdjustCancel()
+        return
+    if CPMaxPngAdjustCancel()
+        return
+    HideControlPanel()
 }
 
 CPNavSwitchTab(dir) {
@@ -1913,7 +2353,7 @@ RegisterControlPanelArrowNavigation() {
     try Hotkey("$PgUp", CPNavPrevTab, "On")
     try Hotkey("$PgDn", CPNavNextTab, "On")
     try Hotkey("~LButton", CPMouseTabClick, "On")
-    try Hotkey("$Esc", HideControlPanel, "On")
+    try Hotkey("$Esc", CPNavEscape, "On")
     HotIfWinActive()
 
     __CP_ARROW_NAV_BOUND := true
@@ -1969,8 +2409,6 @@ global hkBtnDef := Map()  ; action -> "Default" button
 global hkDirty  := false
 
 
-if !DirExist(profilesDir)
-    DirCreate(profilesDir)
 promptsDir  := appDir "\prompts"
 if !DirExist(promptsDir)
     DirCreate(promptsDir)
@@ -2505,6 +2943,13 @@ SetCapMaxKB(v) {
     SaveAll()
 }
 
+SetCapMaxKBFromUI(v) {
+    global CPMaxPngAdjustSyncing
+    if CPMaxPngAdjustSyncing
+        return
+    SetCapMaxKB(v)
+}
+
 EnsureOverlayDir(){
     global overlayDir
     if !DirExist(overlayDir)
@@ -2680,6 +3125,7 @@ StartTempHideWatcher(kind := "region") {
     oldMTime := ""
     try oldMTime := FileGetTime(iniPath, "M")
     global __OldIniMTime := oldMTime
+    global __OldPickSeq := IniRead(iniPath, "capture", "pickSeq", "")
     global __CapWatchActive := true
 
 
@@ -2689,8 +3135,8 @@ StartTempHideWatcher(kind := "region") {
     ; start polling the INI every 150ms for a completed selection
     SetTimer(WatchCapDone, 150)
 
-    ; fail-safe: force show again after 15s
-    SetTimer(CapWatchFallback, -15000)
+    ; Controller adjustment can take a while; Esc/confirm restores immediately.
+    SetTimer(CapWatchFallback, -120000)
 }
 
 FinishCapWatch() {
@@ -2711,9 +3157,14 @@ CapWatchFallback(*) {
 }
 
 WatchCapDone(*) {
-    global ui, iniPath, __HideWatchKind, __OldMode, __OldRect, __OldTit, __OldIniMTime
+    global ui, iniPath, __HideWatchKind, __OldMode, __OldRect, __OldTit, __OldIniMTime, __OldPickSeq
 
     curMode := IniRead(iniPath, "capture", "mode", "")
+	curPickSeq := IniRead(iniPath, "capture", "pickSeq", "")
+	if (curPickSeq != "" && curPickSeq != __OldPickSeq) {
+		FinishCapWatch()
+		return
+	}
 	    curMTime := ""
     try curMTime := FileGetTime(iniPath, "M")
     if (__HideWatchKind = "region") {
@@ -2732,9 +3183,129 @@ WatchCapDone(*) {
 }
 
 ; --- NEW: tiny modal picker to choose Region vs Window (native) ---
+CapturePickerStyleFocusedButton(buttons, focusedHwnd) {
+    global controlDarkMode
+
+    colors := CPPalette(controlDarkMode)
+    for buttonCtrl in buttons {
+        try buttonCtrl.Opt("-Default")
+        try CPApplyThemeToControl(buttonCtrl.Hwnd, controlDarkMode)
+        try buttonCtrl.SetFont("Norm c" colors["text"])
+    }
+
+    for buttonCtrl in buttons {
+        if (buttonCtrl.Hwnd != focusedHwnd)
+            continue
+        try buttonCtrl.Opt("+Default")
+        try buttonCtrl.SetFont("Bold c" (controlDarkMode ? colors["accentText"] : colors["accentFocus"]))
+        try buttonCtrl.Redraw()
+        break
+    }
+}
+
+CapturePickerRefreshFocus(guiHwnd, buttons, focusState, *) {
+    if !DllCall("user32\IsWindow", "ptr", guiHwnd, "int")
+        return
+
+    focusedHwnd := DllCall("user32\GetFocus", "ptr")
+    if (focusState["last"] = focusedHwnd)
+        return
+    focusState["last"] := focusedHwnd
+    CapturePickerStyleFocusedButton(buttons, focusedHwnd)
+}
+
+CapturePickerRegisterNavigation(buttons, navigationState) {
+    global CPCapturePickerNavigation
+    static messageRegistered := false
+
+    if !messageRegistered {
+        OnMessage(0x0100, CapturePickerOnKeyDown) ; WM_KEYDOWN
+        messageRegistered := true
+    }
+
+    for buttonCtrl in buttons
+        CPCapturePickerNavigation[buttonCtrl.Hwnd] := navigationState
+}
+
+CapturePickerUnregisterNavigation(buttons) {
+    global CPCapturePickerNavigation
+
+    for buttonCtrl in buttons {
+        buttonHwnd := buttonCtrl.Hwnd
+        if CPCapturePickerNavigation.Has(buttonHwnd)
+            CPCapturePickerNavigation.Delete(buttonHwnd)
+    }
+}
+
+CapturePickerOnKeyDown(wParam, lParam, msg, hwnd) {
+    global CPCapturePickerNavigation
+
+    focusedHwnd := DllCall("user32\GetFocus", "ptr")
+    if !CPCapturePickerNavigation.Has(focusedHwnd)
+        return
+
+    navigationState := CPCapturePickerNavigation[focusedHwnd]
+    regionHwnd := navigationState["region"]
+    windowHwnd := navigationState["window"]
+    cancelHwnd := navigationState["cancel"]
+    targetHwnd := 0
+
+    if (focusedHwnd = regionHwnd) {
+        navigationState["top"] := regionHwnd
+        if (wParam = 0x27)       ; Right
+            targetHwnd := windowHwnd
+        else if (wParam = 0x28)  ; Down
+            targetHwnd := cancelHwnd
+    } else if (focusedHwnd = windowHwnd) {
+        navigationState["top"] := windowHwnd
+        if (wParam = 0x25)       ; Left
+            targetHwnd := regionHwnd
+        else if (wParam = 0x28)  ; Down
+            targetHwnd := cancelHwnd
+    } else if (focusedHwnd = cancelHwnd) {
+        if (wParam = 0x26)       ; Up
+            targetHwnd := navigationState["top"]
+    }
+
+    if targetHwnd {
+        DllCall("user32\SetFocus", "ptr", targetHwnd, "ptr")
+        CapturePickerStyleFocusedButton(navigationState["buttons"], targetHwnd)
+        return 0
+    }
+
+    ; A controller confirmation is delivered to owned dialogs as Enter. Treat
+    ; keyboard Enter/Space the same way, while a real pointer click continues
+    ; through the ordinary Click event with the default "mouse" source.
+    if (wParam = 0x0D || wParam = 0x20) { ; Enter or Space
+        navigationState["activationSource"] := "controller"
+        SendMessage(0x00F5, 0, 0, focusedHwnd) ; BM_CLICK
+        return 0
+    }
+
+    ; Consume unused arrows so native dialog order cannot move sideways.
+    if (wParam >= 0x25 && wParam <= 0x28)
+        return 0
+}
+
+CapturePickerClose(g, guiHwnd, focusTimer, buttons, *) {
+    SetTimer(focusTimer, 0)
+    if !DllCall("user32\IsWindow", "ptr", guiHwnd, "int")
+        return
+
+    CapturePickerUnregisterNavigation(buttons)
+    try g.Destroy()
+}
+
+CapturePickerChoose(g, guiHwnd, focusTimer, buttons, navigationState, mode, *) {
+    inputSource := navigationState.Has("activationSource")
+        ? navigationState["activationSource"] : "mouse"
+    CapturePickerClose(g, guiHwnd, focusTimer, buttons)
+    _SendCapPick(mode, inputSource)
+}
+
 ; --- Native capture mode picker (clamped to virtual desktop, near mouse) ---
 OpenCapturePicker(*) {
-    global capMaxKB, capMode
+    global ui, controlDarkMode
 
     CoordMode "Mouse", "Screen"
     MouseGetPos &mx, &my
@@ -2745,21 +3316,37 @@ OpenCapturePicker(*) {
     vsw := SysGet(78)  ; SM_CXVIRTUALSCREEN
     vsh := SysGet(79)  ; SM_CYVIRTUALSCREEN
 
-    g := Gui("+ToolWindow -Caption +AlwaysOnTop -DPIScale")
-    g.BackColor := "101825"
-    g.MarginX := 12, g.MarginY := 12
-    g.SetFont("s10", "Segoe UI")
+    g := Gui("+Owner" ui.Hwnd " +ToolWindow -Caption +AlwaysOnTop -DPIScale")
+    colors := CPPalette(controlDarkMode)
+    g.BackColor := colors["window"]
+    g.MarginX := 16, g.MarginY := 16
+    g.SetFont("s10 c" colors["text"], "Segoe UI")
 
-        g.Add("Text", "cWhite", "Select capture mode")
-    g.Add("Text", "w0 h0") ; spacer
+    g.SetFont("s12 Bold c" colors["text"])
+    g.Add("Text", "w336 c" colors["text"], "Select capture mode")
+    g.SetFont("s10 Norm c" colors["text"])
 
-    b1 := g.Add("Button", "xm y+8 w120", "Region")
-    b2 := g.Add("Button", "x+m w140",      "Window")   ; widen to prevent wrap
-    bCancel := g.Add("Button", "xm y+8 w272", "Cancel") ; 120 + 12 (margin) + 140
+    b1 := g.Add("Button", "xm y+12 w160 h46", "Region")
+    b2 := g.Add("Button", "x+m w160 h46", "Window")
+    bCancel := g.Add("Button", "xm y+12 w336 h46", "Cancel") ; 160 + 16 (margin) + 160
+    buttons := [b1, b2, bCancel]
+    focusState := Map("last", -1)
+    navigationState := Map(
+        "region", b1.Hwnd,
+        "window", b2.Hwnd,
+        "cancel", bCancel.Hwnd,
+        "top", b1.Hwnd,
+        "buttons", buttons,
+        "activationSource", "mouse"
+    )
+    focusTimer := CapturePickerRefreshFocus.Bind(g.Hwnd, buttons, focusState)
+    CapturePickerRegisterNavigation(buttons, navigationState)
 
-    b1.OnEvent("Click", (*) => (g.Hide(), _SendCapPick("region")))
-    b2.OnEvent("Click", (*) => (g.Hide(), _SendCapPick("window")))
-    bCancel.OnEvent("Click", (*) => g.Destroy())
+    b1.OnEvent("Click", CapturePickerChoose.Bind(g, g.Hwnd, focusTimer, buttons, navigationState, "region"))
+    b2.OnEvent("Click", CapturePickerChoose.Bind(g, g.Hwnd, focusTimer, buttons, navigationState, "window"))
+    bCancel.OnEvent("Click", CapturePickerClose.Bind(g, g.Hwnd, focusTimer, buttons))
+    g.OnEvent("Escape", CapturePickerClose.Bind(g, g.Hwnd, focusTimer, buttons))
+    g.OnEvent("Close", CapturePickerClose.Bind(g, g.Hwnd, focusTimer, buttons))
 
     g.Show("AutoSize NoActivate x" vsx+vsw " y" vsy+vsh)
     g.GetPos(, &dlgW, &dlgH)
@@ -2769,10 +3356,13 @@ OpenCapturePicker(*) {
     y := Max(vsy, Min(y, vsy + vsh - dlgH))
     g.Move(x, y)
     g.Show()
-
+    CPApplyOwnedDialogTheme(g)
+    b1.Focus()
+    CapturePickerRefreshFocus(g.Hwnd, buttons, focusState)
+    SetTimer(focusTimer, 60)
 
     ; clean up if left open
-    SetTimer(() => g.Destroy(), -120000)
+    SetTimer(CapturePickerClose.Bind(g, g.Hwnd, focusTimer, buttons), -120000)
 }
 
 TranslatorWindowExists() {
@@ -2804,12 +3394,13 @@ EnsureTranslatorForCapture() {
     return false
 }
 
-_SendCapPick(kind) {
+_SendCapPick(kind, inputSource := "mouse") {
     global capMaxKB
     ; compose a simple, future-proof key=value payload
     payload := "capcmd=pick"
             .  "|kind=" kind
             .  "|maxkb=" capMaxKB
+            .  "|regionpreset=" ((kind = "region" && inputSource != "mouse") ? 1 : 0)
 
     if !EnsureTranslatorForCapture() {
         Toast("Could not open Translator")
@@ -3388,6 +3979,568 @@ Hotkeys_OnRevert() {
     SetTimer(() => ToolTip(), -900)
 }
 ; ===============================================================
+
+; ===================== Direct controller inputs =====================
+CPControllerTokenDisplay(token) {
+    static labels := Map(
+        "X:DPAD_UP", "D-pad Up", "X:DPAD_DOWN", "D-pad Down",
+        "X:DPAD_LEFT", "D-pad Left", "X:DPAD_RIGHT", "D-pad Right",
+        "X:START", "Menu / Start", "X:BACK", "View / Back",
+        "X:LS", "Left stick click", "X:RS", "Right stick click",
+        "X:LB", "Left shoulder", "X:RB", "Right shoulder",
+        "X:A", "A / Cross", "X:B", "B / Circle",
+        "X:X", "X / Square", "X:Y", "Y / Triangle",
+        "X:LT", "Left trigger", "X:RT", "Right trigger"
+    )
+    if labels.Has(token)
+        return labels[token]
+    if InStr(token, "J:") = 1
+        return SubStr(token, 3)
+    return token
+}
+
+CPControllerReadSnapshot() {
+    static xinputButtons := [
+        [0x0001, "X:DPAD_UP"], [0x0002, "X:DPAD_DOWN"],
+        [0x0004, "X:DPAD_LEFT"], [0x0008, "X:DPAD_RIGHT"],
+        [0x0010, "X:START"], [0x0020, "X:BACK"],
+        [0x0040, "X:LS"], [0x0080, "X:RS"],
+        [0x0100, "X:LB"], [0x0200, "X:RB"],
+        [0x1000, "X:A"], [0x2000, "X:B"],
+        [0x4000, "X:X"], [0x8000, "X:Y"]
+    ]
+    snapshot := Map("connected", false, "name", "", "tokens", Map())
+
+    Loop 4 {
+        userIndex := A_Index - 1
+        state := CPXInputGetState(userIndex)
+        if !IsObject(state)
+            continue
+        if !snapshot["connected"] {
+            snapshot["connected"] := true
+            snapshot["name"] := "XInput controller " A_Index
+        }
+        buttons := state["buttons"]
+        for buttonInfo in xinputButtons {
+            if (buttons & buttonInfo[1])
+                snapshot["tokens"][buttonInfo[2]] := true
+        }
+        if (state["leftTrigger"] >= 128)
+            snapshot["tokens"]["X:LT"] := true
+        if (state["rightTrigger"] >= 128)
+            snapshot["tokens"]["X:RT"] := true
+    }
+    if snapshot["connected"]
+        return snapshot
+
+    ; DualSense and other non-XInput devices are exposed through the legacy
+    ; joystick API. Button numbering follows Windows' controller panel.
+    Loop 16 {
+        controllerId := A_Index
+        controllerName := ""
+        try controllerName := Trim(GetKeyState(controllerId "JoyName"))
+        if (controllerName = "")
+            continue
+        if !snapshot["connected"] {
+            snapshot["connected"] := true
+            snapshot["name"] := controllerName
+        }
+        Loop 32 {
+            buttonIndex := A_Index
+            pressed := false
+            try pressed := GetKeyState(controllerId "Joy" buttonIndex)
+            if pressed
+                snapshot["tokens"]["J:Button " buttonIndex] := true
+        }
+        pov := -1
+        try pov := GetKeyState(controllerId "JoyPOV")
+        if (pov >= 0) {
+            if (pov >= 31500 || pov <= 4500)
+                snapshot["tokens"]["J:D-pad Up"] := true
+            if (pov >= 4500 && pov <= 13500)
+                snapshot["tokens"]["J:D-pad Right"] := true
+            if (pov >= 13500 && pov <= 22500)
+                snapshot["tokens"]["J:D-pad Down"] := true
+            if (pov >= 22500 && pov <= 31500)
+                snapshot["tokens"]["J:D-pad Left"] := true
+        }
+    }
+    return snapshot
+}
+
+CPControllerUpdateStatus(snapshot := 0) {
+    global txtControllerStatus, CPControllerInputsEnabled, CPControllerLastStatusText
+    if !IsSet(txtControllerStatus)
+        return
+    if !CPControllerInputsEnabled {
+        newStatus := "Action bindings are off. D-pad / A / B still navigate this window."
+    } else {
+        if !IsObject(snapshot)
+            snapshot := CPControllerReadSnapshot()
+        newStatus := snapshot["connected"]
+            ? "Detected: " snapshot["name"]
+            : "No compatible controller detected."
+    }
+    if (newStatus != CPControllerLastStatusText) {
+        txtControllerStatus.Value := newStatus
+        CPControllerLastStatusText := newStatus
+    }
+}
+
+CPControllerLoadBindings() {
+    global iniPath, hotkeyActions, CPControllerBindings, CPControllerBindingEdits
+    CPControllerBindings := Map()
+    for actionKey in hotkeyActions {
+        token := Trim(IniRead(iniPath, "controller_inputs", actionKey, ""))
+        CPControllerBindings[actionKey] := token
+        if CPControllerBindingEdits.Has(actionKey)
+            CPControllerBindingEdits[actionKey].Value := token = "" ? "Disabled" : CPControllerTokenDisplay(token)
+    }
+}
+
+CPControllerSaveBinding(action, token) {
+    global iniPath, CPControllerBindings, CPControllerBindingEdits
+    CPControllerBindings[action] := token
+    IniWrite(token, iniPath, "controller_inputs", action)
+    if CPControllerBindingEdits.Has(action)
+        CPControllerBindingEdits[action].Value := token = "" ? "Disabled" : CPControllerTokenDisplay(token)
+}
+
+CPControllerCaptureDialog(action) {
+    global ui, hotkeyLabels, controlDarkMode, CPControllerCaptureActive
+    result := ""
+    closed := false
+    armed := false
+    dlg := Gui("+Owner" ui.Hwnd " +MinSize500x190", "Assign controller button")
+    dlg.MarginX := 22, dlg.MarginY := 18
+    dlg.SetFont("s10", "Segoe UI")
+    dlg.BackColor := CPPalette(controlDarkMode)["window"]
+    dlg.Add("Text", "xm w500", "Action: " hotkeyLabels[action])
+    dlg.Add("Text", "xm y+14 w500", "Release all buttons, then press the controller button to assign.")
+    status := dlg.Add("Text", "xm y+18 w500 cGray", "Waiting for a controller...")
+    cancel := dlg.Add("Button", "xm y+22 w120", "Cancel")
+    cancel.OnEvent("Click", (*) => (closed := true))
+    dlg.OnEvent("Close", (*) => (closed := true))
+    dlg.OnEvent("Escape", (*) => (closed := true))
+
+    CPControllerCaptureActive := true
+    try {
+        dlg.Show("w550 h210 Center")
+        CPApplyOwnedDialogTheme(dlg)
+        cancel.Focus()
+        while !closed {
+            snapshot := CPControllerReadSnapshot()
+            if snapshot["connected"] {
+                if !armed {
+                    status.Value := "Detected " snapshot["name"] ". Release all buttons to arm capture."
+                    if (snapshot["tokens"].Count = 0) {
+                        armed := true
+                        status.Value := "Ready. Press one controller button."
+                    }
+                } else if (snapshot["tokens"].Count > 0) {
+                    for token, _ in snapshot["tokens"] {
+                        result := token
+                        closed := true
+                        break
+                    }
+                }
+            } else {
+                status.Value := "No compatible controller detected."
+            }
+            Sleep(20)
+        }
+    } finally {
+        CPControllerCaptureActive := false
+        try dlg.Destroy()
+    }
+    return result
+}
+
+CPControllerAssign(action, *) {
+    global hotkeyActions, hotkeyLabels, CPControllerBindings
+    token := CPControllerCaptureDialog(action)
+    if (token = "")
+        return
+    for otherAction in hotkeyActions {
+        if (otherAction != action && CPControllerBindings.Has(otherAction)
+         && CPControllerBindings[otherAction] = token) {
+            response := MsgBox(
+                CPControllerTokenDisplay(token) " is currently assigned to '"
+                hotkeyLabels[otherAction] "'.`n`nMove it to '" hotkeyLabels[action] "'?",
+                "Controller assignment", "YesNo Icon?")
+            if (response != "Yes")
+                return
+            CPControllerSaveBinding(otherAction, "")
+            break
+        }
+    }
+    CPControllerSaveBinding(action, token)
+}
+
+CPControllerDisable(action, *) {
+    CPControllerSaveBinding(action, "")
+}
+
+CPControllerSetEnabled(enabled, persist := true) {
+    global iniPath, CPControllerInputsEnabled, CPControllerPreviousTokens
+    global CPControllerLastDeviceName, CPControllerLastStatusText, cbControllerInputsEnabled
+    CPControllerInputsEnabled := enabled ? true : false
+    if IsSet(cbControllerInputsEnabled)
+        cbControllerInputsEnabled.Value := CPControllerInputsEnabled ? 1 : 0
+    if persist
+        IniWrite(CPControllerInputsEnabled ? 1 : 0, iniPath, "controller_inputs", "enabled")
+    CPControllerPreviousTokens := Map()
+    CPControllerLastDeviceName := ""
+    CPControllerLastStatusText := ""
+    ; Basic foreground navigation is always available. When optional action
+    ; bindings are off, the poll returns before reading a controller unless the
+    ; control panel or one of its dialogs is actually in the foreground.
+    SetTimer(CPControllerPoll, 20)
+    CPControllerUpdateStatus()
+}
+
+CPControllerEnabledChanged(*) {
+    global cbControllerInputsEnabled
+    CPControllerSetEnabled(cbControllerInputsEnabled.Value != 0)
+}
+
+CPOverlayWindowHwnd(title) {
+    oldMode := A_TitleMatchMode
+    oldHidden := A_DetectHiddenWindows
+    hwnd := 0
+    try {
+        SetTitleMatchMode(3)
+        DetectHiddenWindows(true)
+        hwnd := WinExist(title)
+    } finally {
+        DetectHiddenWindows(oldHidden)
+        SetTitleMatchMode(oldMode)
+    }
+    return hwnd
+}
+
+CPControllerWriteOverlayCommand(commandName) {
+    global overlayDir
+    try {
+        EnsureOverlayDir()
+        commandPath := overlayDir "\" commandName
+        if FileExist(commandPath)
+            FileDelete(commandPath)
+        FileAppend("", commandPath, "UTF-8")
+        return true
+    } catch as ex {
+        DbgCP("Controller command failed for " commandName ": " ex.Message)
+        return false
+    }
+}
+
+CPControllerTranslatorAction(commandName) {
+    if !CPOverlayWindowHwnd("Translator")
+        LaunchOverlay()
+    if !CPOverlayWindowHwnd("Translator") {
+        Toast("Translator is not running")
+        return
+    }
+    try ApplyShotSettings()
+    CPControllerWriteOverlayCommand(commandName)
+}
+
+CPControllerToggleTranslator() {
+    if CPOverlayWindowHwnd("Translator")
+        CPControllerWriteOverlayCommand("cmd.toggle_translator")
+    else
+        LaunchOverlay()
+}
+
+CPControllerToggleExplainer() {
+    if CPOverlayWindowHwnd("Explainer")
+        CPControllerWriteOverlayCommand("cmd.toggle_explainer")
+    else
+        LaunchExplainerOverlay()
+}
+
+CPControllerDispatchAction(action) {
+    try {
+        switch action {
+            case "screenshot_translate":
+                CPControllerTranslatorAction("cmd.oneshot_translate")
+            case "explain_last_translation":
+                ExplainNow()
+            case "hide_show_translator":
+                CPControllerToggleTranslator()
+            case "hide_show_explainer":
+                CPControllerToggleExplainer()
+            case "hide_show_control_panel":
+                ToggleControlPanel()
+            case "take_screenshot":
+                CPControllerTranslatorAction("cmd.take_screenshot")
+            case "screenshot_translation":
+                CPControllerTranslatorAction("cmd.screenshot_translation")
+            case "launch_explainer_request":
+                CP_LaunchExplainerRequest()
+            case "recapture_region":
+                CPControllerTranslatorAction("cmd.recapture_region")
+            case "start_stop_audio":
+                StartStopAudio()
+        }
+    } catch as ex {
+        DbgCP("Direct controller action failed for " action ": " ex.Message)
+        Toast("Controller action failed")
+    }
+}
+
+CPControllerNavigationTarget() {
+    global ui
+    if !(IsSet(ui) && ui && ui.Hwnd)
+        return 0
+    if !DllCall("user32\IsWindowVisible", "ptr", ui.Hwnd, "int")
+        return 0
+
+    cpNavForeground := DllCall("user32\GetForegroundWindow", "ptr")
+    if !cpNavForeground
+        return 0
+
+    ; Owned dialogs are part of the control-panel workflow. Follow the owner
+    ; chain instead of matching titles so every existing and future dialog can
+    ; use the same default controller navigation safely.
+    cpNavOwner := cpNavForeground
+    Loop 16 {
+        if (cpNavOwner = ui.Hwnd)
+            return cpNavForeground
+        cpNavOwner := DllCall("user32\GetWindow", "ptr", cpNavOwner, "uint", 4, "ptr") ; GW_OWNER
+        if !cpNavOwner
+            break
+    }
+    return 0
+}
+
+CPControllerNavigationState(snapshot) {
+    cpNavTokens := snapshot["tokens"]
+    cpNavIsXInput := InStr(snapshot["name"], "XInput controller ") = 1
+    cpNavIsPlayStation := RegExMatch(snapshot["name"], "i)(DualSense|DualShock|Wireless Controller|PlayStation)")
+    cpNavConfirmToken := cpNavIsPlayStation ? "J:Button 2" : "J:Button 1"
+    cpNavCancelToken := cpNavIsPlayStation ? "J:Button 3" : "J:Button 2"
+
+    return Map(
+        "Up", cpNavTokens.Has(cpNavIsXInput ? "X:DPAD_UP" : "J:D-pad Up"),
+        "Down", cpNavTokens.Has(cpNavIsXInput ? "X:DPAD_DOWN" : "J:D-pad Down"),
+        "Left", cpNavTokens.Has(cpNavIsXInput ? "X:DPAD_LEFT" : "J:D-pad Left"),
+        "Right", cpNavTokens.Has(cpNavIsXInput ? "X:DPAD_RIGHT" : "J:D-pad Right"),
+        "Activate", cpNavTokens.Has(cpNavIsXInput ? "X:A" : cpNavConfirmToken),
+        "Cancel", cpNavTokens.Has(cpNavIsXInput ? "X:B" : cpNavCancelToken)
+    )
+}
+
+CPControllerResetNavigation(targetHwnd := 0, navState := 0) {
+    global CPControllerNavPreviousState, CPControllerNavTargetHwnd
+    global CPControllerNavHeldDirection, CPControllerNavNextRepeatAt, CPControllerNavHeldSince
+    CPControllerNavTargetHwnd := targetHwnd
+    CPControllerNavPreviousState := IsObject(navState) ? navState : Map()
+    CPControllerNavHeldDirection := ""
+    CPControllerNavNextRepeatAt := 0
+    CPControllerNavHeldSince := 0
+}
+
+CPControllerSendDialogKey(keyName) {
+    ; A send level above the dialog hotkeys' default input level lets existing
+    ; custom keyboard navigation handle the event. Dialogs without custom
+    ; handlers simply receive the native key.
+    try {
+        SendLevel(1)
+        SendEvent("{" keyName "}")
+    } finally {
+        SendLevel(0)
+    }
+}
+
+CPControllerDispatchNavigation(command, targetHwnd) {
+    global ui, CPControllerLastNativeNavigationAt
+    if (targetHwnd = ui.Hwnd) {
+        CPControllerLastNativeNavigationAt[command] := A_TickCount
+        switch command {
+            case "Up", "Down", "Left", "Right":
+                CPNavMove(command)
+            case "Activate":
+                ; Bypass the keyboard mirror guard: this command originated
+                ; from the native controller path itself.
+                CPNavActivate("Enter")
+            case "Cancel":
+                if CPFontSizeAdjustCancel()
+                    return
+                if CPMaxPngAdjustCancel()
+                    return
+                ; B / Circle is reserved for backing out of a temporary UI
+                ; state. The main panel has a dedicated hide/show action, so a
+                ; stray cancel press must never hide it.
+                cpNavFocusedHwnd := CPFocusedHwnd()
+                if (cpNavFocusedHwnd && CPHwndIsCombo(cpNavFocusedHwnd)
+                 && CPComboDropped(cpNavFocusedHwnd))
+                    CPShowCombo(cpNavFocusedHwnd, false)
+        }
+        return
+    }
+
+    if CPControllerColorDispatch(command, targetHwnd)
+        return
+
+    switch command {
+        case "Up", "Down", "Left", "Right":
+            CPControllerSendDialogKey(command)
+        case "Activate":
+            CPControllerSendDialogKey("Enter")
+        case "Cancel":
+            CPControllerSendDialogKey("Esc")
+    }
+}
+
+CPControllerHandleNavigation(snapshot, targetHwnd) {
+    global CPControllerNavPreviousState, CPControllerNavTargetHwnd
+    global CPControllerNavHeldDirection, CPControllerNavNextRepeatAt, CPControllerNavHeldSince
+    cpNavState := CPControllerNavigationState(snapshot)
+
+    ; Opening the panel with a controller button must not immediately activate
+    ; whichever control receives focus. The first frame establishes a baseline.
+    if (targetHwnd != CPControllerNavTargetHwnd || CPControllerNavPreviousState.Count = 0) {
+        CPControllerResetNavigation(targetHwnd, cpNavState)
+        return
+    }
+
+    cpNavDirections := ["Up", "Down", "Left", "Right"]
+    cpNavNewDirection := ""
+    for cpNavDirection in cpNavDirections {
+        if (cpNavState[cpNavDirection] && !CPControllerNavPreviousState[cpNavDirection]) {
+            cpNavNewDirection := cpNavDirection
+            break
+        }
+    }
+
+    if (cpNavNewDirection != "") {
+        CPControllerDispatchNavigation(cpNavNewDirection, targetHwnd)
+        CPControllerNavHeldDirection := cpNavNewDirection
+        CPControllerNavHeldSince := A_TickCount
+        cpNavAcceleratedSliderRepeat := CPControllerAcceleratedSliderRepeatActive(targetHwnd, cpNavNewDirection)
+        CPControllerNavNextRepeatAt := A_TickCount + (cpNavAcceleratedSliderRepeat ? 280 : 340)
+    } else if (CPControllerNavHeldDirection != "" && cpNavState[CPControllerNavHeldDirection]) {
+        if (A_TickCount >= CPControllerNavNextRepeatAt) {
+            ; Tab changes are discrete controller actions. Repeating a held
+            ; D-pad direction here makes a single deliberate press skip tabs,
+            ; especially when a mapper also mirrors it as an arrow key.
+            cpNavFocusedHwnd := targetHwnd = ui.Hwnd ? CPFocusedHwnd() : 0
+            cpNavAcceleratedSliderRepeat := CPControllerAcceleratedSliderRepeatActive(
+                targetHwnd, CPControllerNavHeldDirection)
+            cpNavRepeatSteps := 1
+            cpNavRepeatDelay := 90
+            if cpNavAcceleratedSliderRepeat {
+                cpNavHeldMs := A_TickCount - CPControllerNavHeldSince
+                cpNavRepeatSteps := cpNavHeldMs >= 1100 ? 4 : (cpNavHeldMs >= 650 ? 2 : 1)
+                cpNavRepeatDelay := 55
+            }
+            if !(cpNavFocusedHwnd && CPHwndIsTab(cpNavFocusedHwnd)) {
+                Loop cpNavRepeatSteps
+                    CPControllerDispatchNavigation(CPControllerNavHeldDirection, targetHwnd)
+            }
+            CPControllerNavNextRepeatAt := A_TickCount + cpNavRepeatDelay
+        }
+    } else {
+        CPControllerNavHeldDirection := ""
+        CPControllerNavNextRepeatAt := 0
+        CPControllerNavHeldSince := 0
+    }
+
+    if (cpNavState["Activate"] && !CPControllerNavPreviousState["Activate"])
+        CPControllerDispatchNavigation("Activate", targetHwnd)
+    if (cpNavState["Cancel"] && !CPControllerNavPreviousState["Cancel"])
+        CPControllerDispatchNavigation("Cancel", targetHwnd)
+
+    CPControllerNavPreviousState := cpNavState
+}
+
+CPControllerPoll(*) {
+    global CPControllerInputsEnabled, CPControllerCaptureActive
+    global CPControllerPreviousTokens, CPControllerBindings, hotkeyActions
+    global CPControllerLastDeviceName, CPOverlayAdjustState
+    if CPControllerCaptureActive
+        return
+    if ((CPOverlayAdjustState.Has("active") && CPOverlayAdjustState["active"])
+     || CPControllerModalFlagActive()) {
+        CPControllerPreviousTokens := Map()
+        CPControllerResetNavigation()
+        return
+    }
+
+    cpNavTarget := CPControllerNavigationTarget()
+    if (!CPControllerInputsEnabled && !cpNavTarget) {
+        CPControllerResetNavigation()
+        return
+    }
+
+    snapshot := CPControllerReadSnapshot()
+    CPControllerUpdateStatus(snapshot)
+    if !snapshot["connected"] {
+        CPControllerPreviousTokens := Map()
+        CPControllerLastDeviceName := ""
+        CPControllerResetNavigation(cpNavTarget)
+        return
+    }
+
+    if cpNavTarget {
+        CPControllerHandleNavigation(snapshot, cpNavTarget)
+        CPControllerPreviousTokens := snapshot["tokens"]
+        CPControllerLastDeviceName := snapshot["name"]
+        return
+    }
+
+    CPControllerResetNavigation()
+    if !CPControllerInputsEnabled
+        return
+
+    ; On connection or controller changes, use the first frame only as the
+    ; baseline so a button already being held cannot trigger unexpectedly.
+    if (snapshot["name"] != CPControllerLastDeviceName) {
+        CPControllerLastDeviceName := snapshot["name"]
+        CPControllerPreviousTokens := snapshot["tokens"]
+        return
+    }
+
+    for actionKey in hotkeyActions {
+        if !CPControllerBindings.Has(actionKey)
+            continue
+        token := CPControllerBindings[actionKey]
+        if (token != "" && snapshot["tokens"].Has(token)
+         && !CPControllerPreviousTokens.Has(token)) {
+            CPControllerDispatchAction(actionKey)
+        }
+    }
+    CPControllerPreviousTokens := snapshot["tokens"]
+}
+
+CPAddControlsViewControl(viewName, ctrl) {
+    global CPControlsKeyboardControls, CPControlsControllerControls
+    if (viewName = "controller")
+        CPControlsControllerControls.Push(ctrl)
+    else
+        CPControlsKeyboardControls.Push(ctrl)
+    return ctrl
+}
+
+CPSetControlsView(viewName, persist := true, *) {
+    global iniPath, CPControlsCurrentView, CPControlsKeyboardControls, CPControlsControllerControls
+    global rbControlsKeyboard, rbControlsController
+    if (viewName != "controller")
+        viewName := "keyboard"
+    CPControlsCurrentView := viewName
+    if IsSet(rbControlsKeyboard)
+        rbControlsKeyboard.Value := viewName = "keyboard" ? 1 : 0
+    if IsSet(rbControlsController)
+        rbControlsController.Value := viewName = "controller" ? 1 : 0
+    for ctrl in CPControlsKeyboardControls
+        try ctrl.Visible := viewName = "keyboard"
+    for ctrl in CPControlsControllerControls
+        try ctrl.Visible := viewName = "controller"
+    if persist
+        IniWrite(viewName, iniPath, "controller_inputs", "view")
+}
+; =====================================================================
 
 ; ===============================================================
 
@@ -4022,7 +5175,33 @@ ModelCatalogQueryWithFeedback(provider, purpose, forceRefresh := false) {
     finally ToolTip()
 }
 
+ModelPickerControlAlive(control) {
+    try {
+        hwnd := control.Hwnd
+        return hwnd && DllCall("user32\IsWindow", "ptr", hwnd, "int")
+    } catch {
+        return false
+    }
+}
+
+ModelPickerControlsAlive(controls*) {
+    for control in controls
+        if !ModelPickerControlAlive(control)
+            return false
+    return true
+}
+
+ModelPickerFinish(pickerDialog, pickerState, selection := "", *) {
+    if pickerState["closed"]
+        return
+    pickerState["result"] := selection
+    pickerState["closed"] := true
+    try pickerDialog.Destroy()
+}
+
 ModelPickerPopulate(modelListBox, modelStatus, modelAddButton, catalog, existingModels) {
+    if !ModelPickerControlsAlive(modelListBox, modelStatus, modelAddButton)
+        return 0
     SendMessage(0x0184, 0, 0, modelListBox.Hwnd) ; LB_RESETCONTENT
     availableModels := []
     for modelId in catalog["models"]
@@ -4053,6 +5232,8 @@ ModelPickerPopulate(modelListBox, modelStatus, modelAddButton, catalog, existing
 }
 
 ModelPickerAccept(modelListBox, finishPicker, *) {
+    if !ModelPickerControlAlive(modelListBox)
+        return
     chosenModel := Trim(modelListBox.Text)
     if (chosenModel = "") {
         SoundBeep(1100, 80)
@@ -4061,7 +5242,23 @@ ModelPickerAccept(modelListBox, finishPicker, *) {
     finishPicker.Call(chosenModel)
 }
 
+ModelPickerActivate(modelListBox, modelAddButton, refreshButton, cancelButton, finishPicker, *) {
+    if !ModelPickerControlsAlive(modelListBox, modelAddButton, refreshButton, cancelButton)
+        return
+    focusHwnd := DllCall("user32\GetFocus", "ptr")
+    if (focusHwnd = modelListBox.Hwnd || focusHwnd = modelAddButton.Hwnd) {
+        if modelAddButton.Enabled
+            ModelPickerAccept(modelListBox, finishPicker)
+    } else if (focusHwnd = refreshButton.Hwnd) {
+        SendMessage(0x00F5, 0, 0, refreshButton.Hwnd) ; BM_CLICK
+    } else if (focusHwnd = cancelButton.Hwnd) {
+        SendMessage(0x00F5, 0, 0, cancelButton.Hwnd)
+    }
+}
+
 ModelPickerNavigate(direction, modelListBox, modelAddButton, refreshButton, cancelButton, *) {
+    if !ModelPickerControlsAlive(modelListBox, modelAddButton, refreshButton, cancelButton)
+        return
     focusHwnd := DllCall("user32\GetFocus", "ptr")
     if (focusHwnd = modelListBox.Hwnd) {
         itemCount := SendMessage(0x018B, 0, 0, modelListBox.Hwnd) ; LB_GETCOUNT
@@ -4111,29 +5308,51 @@ ModelPickerNavigate(direction, modelListBox, modelAddButton, refreshButton, canc
         refreshButton.Focus()
 }
 
-ModelPickerRefresh(provider, purpose, existingModels, pickerDialog, modelListBox, modelStatus, modelAddButton, refreshButton, *) {
-    previousStatus := modelStatus.Text
-    modelListBox.Enabled := false
-    modelAddButton.Enabled := false
-    refreshButton.Enabled := false
-    modelStatus.Text := "Refreshing the online model catalog..."
-
-    refreshedCatalog := ModelCatalogQueryWithFeedback(provider, purpose, true)
-    refreshButton.Enabled := true
-    if !refreshedCatalog["ok"] {
-        modelStatus.Text := previousStatus
-        modelListBox.Enabled := true
-        modelAddButton.Enabled := Trim(modelListBox.Text) != ""
-        MsgBox("The online model list could not be refreshed.`n`n" refreshedCatalog["error"], "Browse models", 48)
+ModelPickerRefresh(provider, purpose, existingModels, pickerDialog, modelListBox, modelStatus, modelAddButton, refreshButton, pickerState, *) {
+    if pickerState["closed"] || pickerState["refreshing"]
         return
-    }
+    if !ModelPickerControlsAlive(pickerDialog, modelListBox, modelStatus, modelAddButton, refreshButton)
+        return
 
-    ModelPickerPopulate(modelListBox, modelStatus, modelAddButton, refreshedCatalog, existingModels)
-    CPApplyOwnedDialogTheme(pickerDialog)
-    if modelListBox.Enabled
-        modelListBox.Focus()
-    else
-        refreshButton.Focus()
+    pickerState["refreshing"] := true
+    try {
+        previousStatus := modelStatus.Text
+        modelListBox.Enabled := false
+        modelAddButton.Enabled := false
+        refreshButton.Enabled := false
+        modelStatus.Text := "Refreshing the online model catalog..."
+
+        refreshedCatalog := ModelCatalogQueryWithFeedback(provider, purpose, true)
+
+        ; The network query yields to the GUI. The user may close the picker while
+        ; it is running, so never resume against controls that no longer exist.
+        if pickerState["closed"]
+            return
+        if !ModelPickerControlsAlive(pickerDialog, modelListBox, modelStatus, modelAddButton, refreshButton)
+            return
+
+        refreshButton.Enabled := true
+        if !refreshedCatalog["ok"] {
+            modelStatus.Text := previousStatus
+            modelListBox.Enabled := true
+            modelAddButton.Enabled := Trim(modelListBox.Text) != ""
+            MsgBox("The online model list could not be refreshed.`n`n" refreshedCatalog["error"], "Browse models", 48)
+            return
+        }
+
+        ModelPickerPopulate(modelListBox, modelStatus, modelAddButton, refreshedCatalog, existingModels)
+        if pickerState["closed"] || !ModelPickerControlAlive(pickerDialog)
+            return
+        CPApplyOwnedDialogTheme(pickerDialog)
+        if !ModelPickerControlsAlive(modelListBox, refreshButton)
+            return
+        if modelListBox.Enabled
+            modelListBox.Focus()
+        else
+            refreshButton.Focus()
+    } finally {
+        pickerState["refreshing"] := false
+    }
 }
 
 OnlineModelPicker(provider, purpose, existingModels, catalog) {
@@ -4148,8 +5367,7 @@ OnlineModelPicker(provider, purpose, existingModels, catalog) {
         purposeLabel := "Audio Translation"
     else
         purposeLabel := "JRPG Translator"
-    pickerResult := ""
-    pickerClosed := false
+    pickerState := Map("closed", false, "refreshing", false, "result", "")
     pickerDialog := Gui("+Owner" ui.Hwnd " +AlwaysOnTop", "Browse " providerName " models")
     pickerDialog.MarginX := 18, pickerDialog.MarginY := 16
     pickerDialog.SetFont("s10", "Segoe UI")
@@ -4157,14 +5375,14 @@ OnlineModelPicker(provider, purpose, existingModels, catalog) {
     pickerDialog.Add("Text", "xm y+5 w560", "The list contains compatible models available to the configured API key.")
     modelListBox := pickerDialog.Add("ListBox", "xm y+12 w560 r16")
     modelStatus := pickerDialog.Add("Text", "xm y+8 w560 h42")
-    modelAddButton := pickerDialog.Add("Button", "xm y+12 w120 Default", "Add model")
+    modelAddButton := pickerDialog.Add("Button", "xm y+12 w120", "Add model")
     refreshButton := pickerDialog.Add("Button", "x+8 w100", "Refresh")
     cancelButton := pickerDialog.Add("Button", "x+8 w100", "Cancel")
 
-    finishPicker := (selection) => (pickerResult := selection, pickerClosed := true, pickerDialog.Destroy())
+    finishPicker := ModelPickerFinish.Bind(pickerDialog, pickerState)
     modelAddButton.OnEvent("Click", ModelPickerAccept.Bind(modelListBox, finishPicker))
     modelListBox.OnEvent("DoubleClick", ModelPickerAccept.Bind(modelListBox, finishPicker))
-    refreshButton.OnEvent("Click", ModelPickerRefresh.Bind(provider, purpose, existingModels, pickerDialog, modelListBox, modelStatus, modelAddButton, refreshButton))
+    refreshButton.OnEvent("Click", ModelPickerRefresh.Bind(provider, purpose, existingModels, pickerDialog, modelListBox, modelStatus, modelAddButton, refreshButton, pickerState))
     cancelButton.OnEvent("Click", (*) => finishPicker.Call(""))
     pickerDialog.OnEvent("Escape", (*) => finishPicker.Call(""))
     pickerDialog.OnEvent("Close", (*) => finishPicker.Call(""))
@@ -4175,6 +5393,8 @@ OnlineModelPicker(provider, purpose, existingModels, catalog) {
     HotIfWinActive(pickerHotIf)
     for keyName, direction in pickerArrowHotkeys
         try Hotkey(keyName, ModelPickerNavigate.Bind(direction, modelListBox, modelAddButton, refreshButton, cancelButton), "On")
+    try Hotkey("$Enter", ModelPickerActivate.Bind(modelListBox, modelAddButton, refreshButton, cancelButton, finishPicker), "On")
+    try Hotkey("$NumpadEnter", ModelPickerActivate.Bind(modelListBox, modelAddButton, refreshButton, cancelButton, finishPicker), "On")
     HotIfWinActive()
 
     try {
@@ -4184,15 +5404,17 @@ OnlineModelPicker(provider, purpose, existingModels, catalog) {
             modelListBox.Focus()
         else
             refreshButton.Focus()
-        while !pickerClosed
+        while !pickerState["closed"]
             Sleep(30)
     } finally {
         HotIfWinActive(pickerHotIf)
         for keyName, direction in pickerArrowHotkeys
             try Hotkey(keyName, "Off")
+        try Hotkey("$Enter", "Off")
+        try Hotkey("$NumpadEnter", "Off")
         HotIfWinActive()
     }
-    return pickerResult
+    return pickerState["result"]
 }
 
 AddModelInteractive(modelArray, modelKey, modelCombo, provider, purpose) {
@@ -4489,6 +5711,18 @@ CPOverlayAdjustFlag(enable) {
     }
 }
 
+CPControllerModalFlagActive() {
+    global CP_OVERLAY_ADJUST_FLAG
+    if !FileExist(CP_OVERLAY_ADJUST_FLAG)
+        return false
+    ownerPid := 0
+    try ownerPid := Integer(Trim(FileRead(CP_OVERLAY_ADJUST_FLAG, "UTF-8")))
+    if (ownerPid && ProcessExist(ownerPid))
+        return true
+    try FileDelete(CP_OVERLAY_ADJUST_FLAG)
+    return false
+}
+
 CPOverlayAdjustHotIf(*) {
     global CPOverlayAdjustState
     return CPOverlayAdjustState.Has("active") && CPOverlayAdjustState["active"]
@@ -4558,6 +5792,10 @@ CPXInputGetState(userIndex) {
         return false
 
     return Map(
+        "packet", NumGet(stateBuffer, 0, "uint"),
+        "buttons", NumGet(stateBuffer, 4, "ushort"),
+        "leftTrigger", NumGet(stateBuffer, 6, "uchar"),
+        "rightTrigger", NumGet(stateBuffer, 7, "uchar"),
         "leftX", CPNormalizeXInputAxis(NumGet(stateBuffer, 8, "short")),
         "leftY", CPNormalizeXInputAxis(NumGet(stateBuffer, 10, "short")),
         "rightX", CPNormalizeXInputAxis(NumGet(stateBuffer, 12, "short")),
@@ -4637,6 +5875,104 @@ CPReadOverlayAdjustAxes(controller) {
     )
 }
 
+CPReadOverlayAdjustButtons(controller) {
+    if (controller["type"] = "xinput") {
+        currentState := CPXInputGetState(controller["id"])
+        if !IsObject(currentState)
+            return false
+        buttonBits := currentState["buttons"]
+        return Map(
+            "confirm", !!(buttonBits & 0x1000),
+            "cancel", !!(buttonBits & 0x2000)
+        )
+    }
+
+    controllerName := controller["name"]
+    isPlayStationController := RegExMatch(controllerName
+        , "i)(DualSense|DualShock|Wireless Controller|PlayStation)")
+    confirmButtonIndex := isPlayStationController ? 2 : 1
+    cancelButtonIndex := isPlayStationController ? 3 : 2
+    confirmPressed := false
+    cancelPressed := false
+    try confirmPressed := GetKeyState(controller["id"] "Joy" confirmButtonIndex)
+    try cancelPressed := GetKeyState(controller["id"] "Joy" cancelButtonIndex)
+    return Map("confirm", !!confirmPressed, "cancel", !!cancelPressed)
+}
+
+CPOverlayAdjustControllerKey(controller) {
+    return controller["type"] ":" controller["id"]
+}
+
+CPInitializeOverlayAdjustButtonStates() {
+    global CPOverlayAdjustState
+    state := CPOverlayAdjustState
+    buttonStates := Map()
+    for candidateController in state["controllers"] {
+        candidateButtons := CPReadOverlayAdjustButtons(candidateController)
+        if IsObject(candidateButtons)
+            buttonStates[CPOverlayAdjustControllerKey(candidateController)] := candidateButtons
+    }
+    state["controllerButtonStates"] := buttonStates
+}
+
+CPHandlePendingOverlayAdjustControllerButtons() {
+    global CPOverlayAdjustState
+    state := CPOverlayAdjustState
+    if !(state.Has("controllerButtonStates") && IsObject(state["controllerButtonStates"]))
+        state["controllerButtonStates"] := Map()
+    buttonStates := state["controllerButtonStates"]
+
+    for candidateController in state["controllers"] {
+        candidateKey := CPOverlayAdjustControllerKey(candidateController)
+        currentButtons := CPReadOverlayAdjustButtons(candidateController)
+        if !IsObject(currentButtons)
+            continue
+        if !buttonStates.Has(candidateKey) {
+            buttonStates[candidateKey] := currentButtons
+            continue
+        }
+
+        previousButtons := buttonStates[candidateKey]
+        buttonStates[candidateKey] := currentButtons
+        if (currentButtons["cancel"] && !previousButtons["cancel"]) {
+            CPOverlayAdjustCancel()
+            return true
+        }
+        if (A_TickCount >= state["acceptAfter"]
+            && currentButtons["confirm"] && !previousButtons["confirm"]) {
+            CPOverlayAdjustConfirm()
+            return true
+        }
+    }
+    return false
+}
+
+CPHandleOverlayAdjustControllerButtons(controller) {
+    global CPOverlayAdjustState
+    state := CPOverlayAdjustState
+    currentButtons := CPReadOverlayAdjustButtons(controller)
+    if !IsObject(currentButtons)
+        return false
+
+    if !(state.Has("controllerButtons") && IsObject(state["controllerButtons"])) {
+        state["controllerButtons"] := currentButtons
+        return false
+    }
+
+    previousButtons := state["controllerButtons"]
+    state["controllerButtons"] := currentButtons
+    if (currentButtons["cancel"] && !previousButtons["cancel"]) {
+        CPOverlayAdjustCancel()
+        return true
+    }
+    if (A_TickCount >= state["acceptAfter"]
+        && currentButtons["confirm"] && !previousButtons["confirm"]) {
+        CPOverlayAdjustConfirm()
+        return true
+    }
+    return false
+}
+
 CPDetectOverlayAdjustController() {
     global CPOverlayAdjustState
     state := CPOverlayAdjustState
@@ -4661,6 +5997,13 @@ CPDetectOverlayAdjustController() {
         return false
 
     state["controller"] := bestController
+    controllerKey := CPOverlayAdjustControllerKey(bestController)
+    initialButtons := (state.Has("controllerButtonStates")
+        && state["controllerButtonStates"].Has(controllerKey))
+        ? state["controllerButtonStates"][controllerKey]
+        : CPReadOverlayAdjustButtons(bestController)
+    state["controllerButtons"] := IsObject(initialButtons)
+        ? initialButtons : Map("confirm", false, "cancel", false)
     CPUpdateOverlayAdjustHud(true)
     return true
 }
@@ -4777,49 +6120,71 @@ CPCreateOverlayAdjustHud() {
     hud.BackColor := controlDarkMode ? "202124" : "F3F3F3"
     hud.MarginX := 12, hud.MarginY := 8
     hud.SetFont("s10 " (controlDarkMode ? "cFFFFFF" : "c202124"), "Segoe UI")
-    hudText := hud.Add("Text", "w720 h62 Center", "")
+    hudText := hud.Add("Text", "w540 h78 Center", "")
     state["hud"] := hud
     state["hudText"] := hudText
+    state["hudReady"] := false
     CPUpdateOverlayAdjustHud(true)
     hud.Show("NA AutoSize")
+    state["hudReady"] := true
     CPPositionOverlayAdjustHud()
 }
 
 CPPositionOverlayAdjustHud() {
     global CPOverlayAdjustState
     state := CPOverlayAdjustState
-    if !(state.Has("hud") && state["hud"])
+    if !(state.Has("active") && state["active"] && state.Has("hud") && state["hud"]
+        && state.Has("hudReady") && state["hudReady"])
         return
 
-    centerX := state["x"] + state["w"] / 2
-    centerY := state["y"] + state["h"] / 2
+    hudHwnd := 0
+    try hudHwnd := state["hud"].Hwnd
+    if !(hudHwnd && DllCall("user32\IsWindow", "ptr", hudHwnd, "int"))
+        return
+
     workLeft := 0, workTop := 0, workRight := A_ScreenWidth, workBottom := A_ScreenHeight
-    try monitorCount := MonitorGetCount()
-    catch {
-        monitorCount := 0
-    }
-    Loop monitorCount {
-        try MonitorGetWorkArea(A_Index, &left, &top, &right, &bottom)
-        catch
-            continue
-        if (centerX >= left && centerX < right && centerY >= top && centerY < bottom) {
-            workLeft := left, workTop := top, workRight := right, workBottom := bottom
-            break
-        }
+    monitorHandle := DllCall("user32\MonitorFromWindow", "ptr", state["hwnd"]
+        , "uint", 2, "ptr")
+    monitorInfo := Buffer(40, 0)
+    NumPut("uint", 40, monitorInfo, 0)
+    if (monitorHandle && DllCall("user32\GetMonitorInfoW", "ptr", monitorHandle
+        , "ptr", monitorInfo.Ptr, "int")) {
+        workLeft := NumGet(monitorInfo, 20, "int")
+        workTop := NumGet(monitorInfo, 24, "int")
+        workRight := NumGet(monitorInfo, 28, "int")
+        workBottom := NumGet(monitorInfo, 32, "int")
     }
 
-    try state["hud"].GetPos(,, &hudW, &hudH)
-    catch
+    windowRect := Buffer(16, 0)
+    if !DllCall("user32\GetWindowRect", "ptr", hudHwnd, "ptr", windowRect.Ptr, "int")
         return
+    hudW := NumGet(windowRect, 8, "int") - NumGet(windowRect, 0, "int")
+    hudH := NumGet(windowRect, 12, "int") - NumGet(windowRect, 4, "int")
+    if (hudW <= 0 || hudH <= 0)
+        return
+    margin := 12
     hudX := Round(workLeft + (workRight - workLeft - hudW) / 2)
-    hudY := workTop + 16
-    try state["hud"].Move(hudX, hudY)
+    hudY := workTop + margin
+    maximumX := workRight - hudW - margin
+    maximumY := workBottom - hudH - margin
+    hudX := (maximumX >= workLeft + margin)
+        ? Max(workLeft + margin, Min(hudX, maximumX)) : workLeft
+    hudY := (maximumY >= workTop + margin)
+        ? Max(workTop + margin, Min(hudY, maximumY)) : workTop
+    DllCall("user32\SetWindowPos", "ptr", hudHwnd, "ptr", 0
+        , "int", hudX, "int", hudY, "int", 0, "int", 0
+        , "uint", 0x0015)
 }
 
 CPUpdateOverlayAdjustHud(force := false) {
     global CPOverlayAdjustState
     state := CPOverlayAdjustState
-    if !(state.Has("hudText") && state["hudText"])
+    if !(state.Has("active") && state["active"] && state.Has("hudText") && state["hudText"])
+        return
+    hudTextControl := state["hudText"]
+    hudTextHwnd := 0
+    try hudTextHwnd := hudTextControl.Hwnd
+    if !(hudTextHwnd && DllCall("user32\IsWindow", "ptr", hudTextHwnd, "int"))
         return
     now := A_TickCount
     if (!force && state.Has("lastHudTick") && now - state["lastHudTick"] < 100)
@@ -4829,9 +6194,11 @@ CPUpdateOverlayAdjustHud(force := false) {
     controllerLine := "Move either analog stick to select a controller"
     if (state.Has("controller") && IsObject(state["controller"]))
         controllerLine := state["controller"]["name"]
-    state["hudText"].Text := "Adjusting " state["title"] " | " controllerLine
+    try hudTextControl.Text := "Adjusting " state["title"] " | " controllerLine
         . "`nLeft stick or arrows: move | Right stick or hold Screenshot + Translate + arrows: resize"
-        . "`nEnter saves | Esc cancels | " state["w"] " x " state["h"]
+        . "`nA / Cross / Enter saves | B / Circle / Esc cancels | " state["w"] " x " state["h"]
+    catch
+        return
     CPPositionOverlayAdjustHud()
 }
 
@@ -4854,12 +6221,16 @@ CPOverlayAdjustTick(*) {
             state["controllers"] := CPScanOverlayAdjustControllers()
             state["lastScanTick"] := now
         }
+        if CPHandlePendingOverlayAdjustControllerButtons()
+            return
         CPDetectOverlayAdjustController()
         CPUpdateOverlayAdjustHud()
         return
     }
 
     controller := state["controller"]
+    if CPHandleOverlayAdjustControllerButtons(controller)
+        return
     axes := CPReadOverlayAdjustAxes(controller)
     if !IsObject(axes) {
         state.Delete("controller")
@@ -4913,6 +6284,7 @@ StartOverlayAdjustment(title, *) {
     screenshotHotkey := Trim(IniRead(iniPath, "hotkeys", "screenshot_translate", "^+t"))
     state["resizeModifierKey"] := CPOverlayAdjustModifierKey(screenshotHotkey)
     state["controllers"] := CPScanOverlayAdjustControllers()
+    CPInitializeOverlayAdjustButtonStates()
     state["lastScanTick"] := A_TickCount
     state["lastTick"] := A_TickCount
     state["acceptAfter"] := A_TickCount + 400
@@ -4966,6 +6338,7 @@ CPFinishOverlayAdjustment(saveChanges, quiet := false) {
         return
 
     SetTimer(CPOverlayAdjustTick, 0)
+    state["active"] := false
     title := state["title"]
     hwnd := state["hwnd"]
     if (!saveChanges && DllCall("user32\IsWindow", "ptr", hwnd, "int"))
@@ -4981,7 +6354,9 @@ CPFinishOverlayAdjustment(saveChanges, quiet := false) {
     }
 
     try state["hud"].Destroy()
-    state["active"] := false
+    try state.Delete("hudText")
+    try state.Delete("hud")
+    try state.Delete("hudReady")
     CPOverlayAdjustFlag(false)
     if !quiet {
         returnHwnd := state.Has("returnHwnd") ? state["returnHwnd"] : 0
@@ -4996,6 +6371,508 @@ CPOverlayAdjustOnExit(*) {
         CPFinishOverlayAdjustment(false, true)
     else
         CPOverlayAdjustFlag(false)
+}
+
+; =========================
+; Unified profiles
+; =========================
+GameProfileSafeName(name) {
+    name := Trim(name)
+    name := RegExReplace(name, '[\\/:*?"<>|]+', "_")
+    name := RegExReplace(name, "[\. ]+$", "")
+    if RegExMatch(name, 'i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$')
+        name := "_" name
+    return name
+}
+
+GameProfilePath(name) {
+    global gameProfilesDir
+    return gameProfilesDir "\" GameProfileSafeName(name) ".ini"
+}
+
+ListGameProfiles() {
+    global gameProfilesDir
+    out := []
+    if DirExist(gameProfilesDir) {
+        Loop Files gameProfilesDir "\*.ini", "F"
+            out.Push(RegExReplace(A_LoopFileName, "i)\.ini$", ""))
+    }
+    if out.Length {
+        textList := ""
+        for item in out
+            textList .= item "`n"
+        textList := Sort(RTrim(textList, "`n"))
+        out := StrSplit(textList, "`n")
+    }
+    return out
+}
+
+GameProfileBoundsPath(title) {
+    global appDir
+    return appDir "\overlay_" (title = "Explainer" ? "explainer" : "translator") ".ini"
+}
+
+GameProfileSnapshotBounds(title) {
+    if CPFindExactWindow(title) {
+        try SendOverlayCmdTo(title, "action=save_bounds")
+        Sleep(120)
+    }
+
+    path := GameProfileBoundsPath(title)
+    bounds := Map()
+    for key in ["x", "y", "w", "h", "dpi"] {
+        value := IniRead(path, "win", key, "")
+        if (value != "" && IsNumber(value))
+            bounds[key] := Integer(value)
+    }
+    return bounds
+}
+
+GameProfileWriteBounds(profilePath, section, bounds) {
+    for key in ["x", "y", "w", "h", "dpi"] {
+        if bounds.Has(key)
+            IniWriteRetry(bounds[key], profilePath, section, key)
+    }
+}
+
+GameProfileReadInt(path, section, key, fallback, minValue := "", maxValue := "") {
+    value := IniRead(path, section, key, fallback)
+    if !IsNumber(value)
+        value := fallback
+    value := Integer(value)
+    if (minValue != "")
+        value := Max(value, minValue)
+    if (maxValue != "")
+        value := Min(value, maxValue)
+    return value
+}
+
+GameProfileReadColor(path, section, key, fallback) {
+    value := StrUpper(Trim(IniRead(path, section, key, fallback)))
+    return RegExMatch(value, "i)^[0-9a-f]{6}$") ? value : fallback
+}
+
+GameProfileAppendWarning(&warnings, message) {
+    warnings .= (warnings = "" ? "" : "`n") "- " message
+}
+
+GameProfileSave(name, announce := true) {
+    global iniPath, postCodes
+    global ddlPrompt, ddlPost, ddlEPr, ddlJPG, ddlENG
+    global chkGuess, chkName, chkOpenTW, chkTop_TW, chkOpenEW, chkTop_EW
+    global overlayTrans, boxBgHex, txtHex, nameHex, fontName, fontSize, fontBold
+    global overlayTrans_EW, boxBgHex_EW, txtHex_EW, fontName_EW, fontSize_EW, fontBold_EW
+
+    name := GameProfileSafeName(name)
+    if (name = "") {
+        MsgBox("Please enter a non-empty profile name.", "Profiles", "OK Icon!")
+        return false
+    }
+
+    path := GameProfilePath(name)
+    try {
+        if FileExist(path)
+            FileCopy(path, path ".bak", true)
+
+        promptName := Trim(ddlPrompt.Text)
+        explainPromptName := Trim(ddlEPr.Text)
+        postValue := (ddlPost.Value >= 1 && ddlPost.Value <= postCodes.Length) ? postCodes[ddlPost.Value] : "tt"
+        jpProfile := Trim(ddlJPG.Text)
+        tlProfile := Trim(ddlENG.Text)
+
+        IniWriteRetry(1, path, "profile", "schemaVersion")
+        IniWriteRetry(name, path, "profile", "name")
+        IniWriteRetry(FormatTime(, "yyyy-MM-dd HH:mm:ss"), path, "profile", "updated")
+
+        IniWriteRetry(promptName, path, "screenshot", "promptProfile")
+        IniWriteRetry(postValue, path, "screenshot", "postProcessing")
+        IniWriteRetry(IniRead(iniPath, "capture", "mode", "region"), path, "screenshot", "captureMode")
+        IniWriteRetry(IniRead(iniPath, "capture", "rect", ""), path, "screenshot", "captureRect")
+        IniWriteRetry(IniRead(iniPath, "capture", "winTitle", ""), path, "screenshot", "captureWindowTitle")
+        IniWriteRetry(chkGuess.Value ? 1 : 0, path, "screenshot", "highlightGuessed")
+        IniWriteRetry(chkName.Value ? 1 : 0, path, "screenshot", "colorSpeaker")
+
+        IniWriteRetry(explainPromptName, path, "explanation", "promptProfile")
+        IniWriteRetry(jpProfile, path, "terminology", "jp2tlProfile")
+        IniWriteRetry(tlProfile, path, "terminology", "tl2tlProfile")
+
+        IniWriteRetry(overlayTrans, path, "translator", "overlayTrans")
+        IniWriteRetry(boxBgHex, path, "translator", "boxBg")
+        IniWriteRetry(txtHex, path, "translator", "txtColor")
+        IniWriteRetry(nameHex, path, "translator", "nameColor")
+        IniWriteRetry(fontName, path, "translator", "fontName")
+        IniWriteRetry(fontSize, path, "translator", "fontSize")
+        IniWriteRetry(fontBold ? 1 : 0, path, "translator", "fontBold")
+        IniWriteRetry(chkOpenTW.Value ? 1 : 0, path, "translator", "openOnLaunch")
+        IniWriteRetry(chkTop_TW.Value ? 1 : 0, path, "translator", "alwaysOnTop")
+        GameProfileWriteBounds(path, "translator", GameProfileSnapshotBounds("Translator"))
+
+        IniWriteRetry(overlayTrans_EW, path, "explainer", "overlayTrans")
+        IniWriteRetry(boxBgHex_EW, path, "explainer", "boxBg")
+        IniWriteRetry(txtHex_EW, path, "explainer", "txtColor")
+        IniWriteRetry(fontName_EW, path, "explainer", "fontName")
+        IniWriteRetry(fontSize_EW, path, "explainer", "fontSize")
+        IniWriteRetry(fontBold_EW ? 1 : 0, path, "explainer", "fontBold")
+        IniWriteRetry(chkOpenEW.Value ? 1 : 0, path, "explainer", "openOnLaunch")
+        IniWriteRetry(chkTop_EW.Value ? 1 : 0, path, "explainer", "alwaysOnTop")
+        GameProfileWriteBounds(path, "explainer", GameProfileSnapshotBounds("Explainer"))
+
+        for key in ["x", "y", "w", "h"] {
+            value := IniRead(iniPath, "explainer_bounds", key, "")
+            if (value != "" && IsNumber(value))
+                IniWriteRetry(Integer(value), path, "explainer_control_bounds", key)
+        }
+
+        IniWriteRetry(name, iniPath, "game_profiles", "active")
+        DbgCP("Saved unified profile: " name)
+        if announce
+            Toast("Profile saved: " name)
+        return true
+    } catch as ex {
+        MsgBox("Could not save profile:`n" ex.Message, "Profiles", "OK Iconx")
+        return false
+    }
+}
+
+GameProfileReadBounds(profilePath, section) {
+    values := Map()
+    for key in ["x", "y", "w", "h", "dpi"] {
+        value := IniRead(profilePath, section, key, "")
+        if (value != "" && IsNumber(value))
+            values[key] := Integer(value)
+    }
+    if !(values.Has("x") && values.Has("y") && values.Has("w") && values.Has("h"))
+        return 0
+
+    if !values.Has("dpi")
+        values["dpi"] := 96
+    return values
+}
+
+GameProfileEnsureBoundsVisible(values) {
+    if !IsObject(values)
+        return values
+
+    visibleMargin := 64
+    dpi := Max(values.Has("dpi") ? values["dpi"] : 96, 96)
+    physicalW := Max(Round(values["w"] * dpi / 96), visibleMargin)
+    physicalH := Max(Round(values["h"] * dpi / 96), visibleMargin)
+    isVisible := false
+    Loop MonitorGetCount() {
+        MonitorGetWorkArea(A_Index, &left, &top, &right, &bottom)
+        if (values["x"] < right - visibleMargin && values["x"] + physicalW > left + visibleMargin
+         && values["y"] < bottom - visibleMargin && values["y"] + physicalH > top + visibleMargin) {
+            isVisible := true
+            break
+        }
+    }
+    if !isVisible {
+        DbgCP("Profile bounds were off-screen; resetting origin to 120,120.")
+        values["x"] := 120
+        values["y"] := 120
+    }
+    return values
+}
+
+GameProfileApplyBounds(title, profilePath, section) {
+    ini := GameProfileBoundsPath(title)
+    values := GameProfileEnsureBoundsVisible(GameProfileReadBounds(profilePath, section))
+    if !IsObject(values)
+        return 0
+
+    for key, value in values
+        IniWriteRetry(value, ini, "win", key)
+
+    command := "x=" values["x"] "|y=" values["y"] "|w=" values["w"] "|h=" values["h"] "|dpi=" values["dpi"]
+    try SendOverlayCmdTo(title, command)
+    return values
+}
+
+GameProfileApply(name, announce := true) {
+    global iniPath, postCodes
+    global promptProfile, explainPromptProfile, imgPostproc, jp2enGlossaryProfile, en2enGlossaryProfile
+    global capMode, capRect, capWinInfo
+    global overlayTrans, boxBgHex, txtHex, nameHex, fontName, fontSize, fontBold
+    global overlayTrans_EW, boxBgHex_EW, txtHex_EW, fontName_EW, fontSize_EW, fontBold_EW
+    global ddlPrompt, ddlPost, ddlEPr, ddlJPG, ddlENG
+    global chkGuess, chkName, chkOpenTW, chkTop_TW, chkOpenEW, chkTop_EW
+    global slTrans, lblTransPct, rectBg, rectTxt, rectName, ddlFont, edFSize, udFSize, chkFontBold
+    global slTrans_EW, lblTransPct_EW, rectBg_EW, rectTxt_EW, ddlFont_EW, edFSize_EW, udFSize_EW, chkFontBold_EW
+    global promptsDir, explainPromptsDir
+    global ewX, ewY, ewW, ewH, ew_lastX, ew_lastY, ew_lastW, ew_lastH, ew_bounds_watch_running
+
+    path := GameProfilePath(name)
+    if !FileExist(path) {
+        if announce
+            MsgBox("Profile not found:`n" path, "Profiles", "OK Icon!")
+        else
+            DbgCP("Requested Profile was not found: " path)
+        return false
+    }
+    if (GameProfileReadInt(path, "profile", "schemaVersion", 0) != 1) {
+        if announce
+            MsgBox("This profile uses an unsupported format.", "Profiles", "OK Icon!")
+        else
+            DbgCP("Requested Profile uses an unsupported format: " path)
+        return false
+    }
+
+    warnings := ""
+    candidate := Trim(IniRead(path, "screenshot", "promptProfile", promptProfile))
+    if (candidate != "" && FileExist(promptsDir "\" candidate ".txt"))
+        promptProfile := candidate
+    else
+        GameProfileAppendWarning(&warnings, "Screenshot prompt '" candidate "' was not found; the current prompt was kept.")
+
+    candidate := Trim(IniRead(path, "explanation", "promptProfile", explainPromptProfile))
+    if (candidate != "" && FileExist(explainPromptsDir "\" candidate ".txt"))
+        explainPromptProfile := candidate
+    else
+        GameProfileAppendWarning(&warnings, "Explanation prompt '" candidate "' was not found; the current prompt was kept.")
+
+    postValue := Trim(IniRead(path, "screenshot", "postProcessing", imgPostproc))
+    imgPostproc := ArrHas(postCodes, postValue) ? postValue : imgPostproc
+
+    glossaryList := ListGlossaryProfiles()
+    candidate := Trim(IniRead(path, "terminology", "jp2tlProfile", jp2enGlossaryProfile))
+    if ArrHas(glossaryList, candidate)
+        jp2enGlossaryProfile := candidate
+    else
+        GameProfileAppendWarning(&warnings, "JP -> TL glossary '" candidate "' was not found; the current selection was kept.")
+    candidate := Trim(IniRead(path, "terminology", "tl2tlProfile", en2enGlossaryProfile))
+    if ArrHas(glossaryList, candidate)
+        en2enGlossaryProfile := candidate
+    else
+        GameProfileAppendWarning(&warnings, "TL -> TL glossary '" candidate "' was not found; the current selection was kept.")
+
+    capMode := StrLower(Trim(IniRead(path, "screenshot", "captureMode", capMode)))
+    if (capMode != "window")
+        capMode := "region"
+    capRect := Trim(IniRead(path, "screenshot", "captureRect", capRect))
+    capWinInfo := IniRead(path, "screenshot", "captureWindowTitle", capWinInfo)
+
+    overlayTrans := GameProfileReadInt(path, "translator", "overlayTrans", overlayTrans, 0, 255)
+    boxBgHex := GameProfileReadColor(path, "translator", "boxBg", boxBgHex)
+    txtHex := GameProfileReadColor(path, "translator", "txtColor", txtHex)
+    nameHex := GameProfileReadColor(path, "translator", "nameColor", nameHex)
+    fontName := IniRead(path, "translator", "fontName", fontName)
+    fontSize := GameProfileReadInt(path, "translator", "fontSize", fontSize, 6, 128)
+    fontBold := GameProfileReadInt(path, "translator", "fontBold", fontBold) ? 1 : 0
+
+    overlayTrans_EW := GameProfileReadInt(path, "explainer", "overlayTrans", overlayTrans_EW, 0, 255)
+    boxBgHex_EW := GameProfileReadColor(path, "explainer", "boxBg", boxBgHex_EW)
+    txtHex_EW := GameProfileReadColor(path, "explainer", "txtColor", txtHex_EW)
+    fontName_EW := IniRead(path, "explainer", "fontName", fontName_EW)
+    fontSize_EW := GameProfileReadInt(path, "explainer", "fontSize", fontSize_EW, 6, 200)
+    fontBold_EW := GameProfileReadInt(path, "explainer", "fontBold", fontBold_EW) ? 1 : 0
+    SyncUnifiedWindowAppearance()
+
+    RefreshPromptProfilesList(promptProfile)
+    postIndex := ArrIndexOf(postCodes, imgPostproc)
+    ddlPost.Value := postIndex ? postIndex : 1
+    RefreshExplainPromptProfilesList(explainPromptProfile)
+    RefreshGlossaryProfilesList(jp2enGlossaryProfile, en2enGlossaryProfile)
+
+    chkGuess.Value := GameProfileReadInt(path, "screenshot", "highlightGuessed", chkGuess.Value) ? 1 : 0
+    chkName.Value := GameProfileReadInt(path, "screenshot", "colorSpeaker", chkName.Value) ? 1 : 0
+    chkOpenTW.Value := GameProfileReadInt(path, "translator", "openOnLaunch", chkOpenTW.Value) ? 1 : 0
+    chkTop_TW.Value := GameProfileReadInt(path, "translator", "alwaysOnTop", chkTop_TW.Value) ? 1 : 0
+    chkOpenEW.Value := GameProfileReadInt(path, "explainer", "openOnLaunch", chkOpenEW.Value) ? 1 : 0
+    chkTop_EW.Value := GameProfileReadInt(path, "explainer", "alwaysOnTop", chkTop_EW.Value) ? 1 : 0
+
+    slTrans.Value := overlayTrans
+    lblTransPct.Value := Round(overlayTrans / 255 * 100) "%"
+    rectBg.Opt("Background" boxBgHex)
+    rectTxt.Opt("Background" txtHex)
+    rectName.Opt("Background" nameHex)
+    try ddlFont.Text := fontName
+    try edFSize.Value := fontSize, udFSize.Value := fontSize
+    chkFontBold.Value := fontBold
+
+    slTrans_EW.Value := overlayTrans_EW
+    lblTransPct_EW.Value := Round(overlayTrans_EW / 255 * 100) "%"
+    rectBg_EW.Opt("Background" boxBgHex_EW)
+    rectTxt_EW.Opt("Background" txtHex_EW)
+    try ddlFont_EW.Text := fontName_EW
+    try edFSize_EW.Value := fontSize_EW, udFSize_EW.Value := fontSize_EW
+    chkFontBold_EW.Value := fontBold_EW
+
+    IniWriteRetry(capMode, iniPath, "capture", "mode")
+    IniWriteRetry(capRect, iniPath, "capture", "rect")
+    IniWriteRetry(capWinInfo, iniPath, "capture", "winTitle")
+    IniWriteRetry(explainPromptProfile, iniPath, "cfg", "explainPromptProfile")
+    IniWriteRetry(jp2enGlossaryProfile, iniPath, "cfg", "jp2enGlossaryProfile")
+    IniWriteRetry(en2enGlossaryProfile, iniPath, "cfg", "en2enGlossaryProfile")
+    IniWriteRetry(chkGuess.Value, iniPath, "cfg", "highlightGuessed")
+    IniWriteRetry(chkName.Value, iniPath, "cfg", "colorSpeaker")
+    IniWriteRetry(chkOpenTW.Value, iniPath, "cfg", "openTranslatorOnLaunch")
+    IniWriteRetry(chkTop_TW.Value, iniPath, "cfg", "winTop")
+    IniWriteRetry(chkOpenEW.Value, iniPath, "cfg", "openExplainerOnLaunch")
+    IniWriteRetry(chkTop_EW.Value, iniPath, "cfg_explainer", "winTop")
+    IniWriteRetry(name, iniPath, "game_profiles", "active")
+
+    ; The control panel also tracks the Explainer's outer bounds. Pause its
+    ; watcher while applying so stale live coordinates cannot overwrite the
+    ; profile before the overlay finishes moving.
+    explainerHwndBefore := CPFindExactWindow("Explainer")
+    watcherWasRunning := ew_bounds_watch_running
+    if watcherWasRunning
+        StopExplainerBoundsWatcher()
+
+    explainerBounds := GameProfileEnsureBoundsVisible(GameProfileReadBounds(path, "explainer"))
+    if IsObject(explainerBounds) {
+        ewX := explainerBounds["x"]
+        ewY := explainerBounds["y"]
+    }
+    controlW := IniRead(path, "explainer_control_bounds", "w", "")
+    controlH := IniRead(path, "explainer_control_bounds", "h", "")
+    if (controlW != "" && IsNumber(controlW))
+        ewW := Integer(controlW)
+    else if IsObject(explainerBounds)
+        ewW := Round(explainerBounds["w"] * explainerBounds["dpi"] / 96)
+    if (controlH != "" && IsNumber(controlH))
+        ewH := Integer(controlH)
+    else if IsObject(explainerBounds)
+        ewH := Round(explainerBounds["h"] * explainerBounds["dpi"] / 96)
+    ew_lastX := ewX, ew_lastY := ewY, ew_lastW := ewW, ew_lastH := ewH
+
+    SaveAll()
+    RefreshColorSwatches()
+    RefreshColorSwatches_EW()
+    GameProfileApplyBounds("Translator", path, "translator")
+    appliedExplainerBounds := GameProfileApplyBounds("Explainer", path, "explainer")
+    if IsObject(appliedExplainerBounds) {
+        ewX := appliedExplainerBounds["x"]
+        ewY := appliedExplainerBounds["y"]
+        ew_lastX := ewX, ew_lastY := ewY
+        IniWriteRetry(ewX, iniPath, "explainer_bounds", "x")
+        IniWriteRetry(ewY, iniPath, "explainer_bounds", "y")
+    }
+    SendOverlayTheme()
+
+    for title, topmost in Map("Translator", chkTop_TW.Value, "Explainer", chkTop_EW.Value) {
+        hwnd := CPFindExactWindow(title)
+        if hwnd
+            try WinSetAlwaysOnTop(topmost ? 1 : 0, "ahk_id " hwnd)
+    }
+
+    if (watcherWasRunning || explainerHwndBefore)
+        SetTimer(StartExplainerBoundsWatcher, -350)
+
+    DbgCP("Applied unified profile: " name)
+    if announce
+        Toast("Profile applied: " name)
+    if (warnings != "") {
+        if announce
+            MsgBox("The profile was applied with these exceptions:`n`n" warnings, "Profiles", "OK Icon!")
+        else
+            DbgCP("Profile applied with exceptions: " StrReplace(warnings, "`n", " | "))
+    }
+    return true
+}
+
+CPApplyExternalProfile(name) {
+    name := GameProfileSafeName(name)
+    if (name = "")
+        return
+    if GameProfileApply(name, false)
+        RefreshGameProfilesList(name)
+}
+
+CPControlPanelCopyData(wParam, lParam, msg, hwnd) {
+    if !lParam
+        return 0
+    payloadPtr := NumGet(lParam + A_PtrSize * 2, "UPtr")
+    if !payloadPtr
+        return 0
+    payload := StrGet(payloadPtr, "UTF-16")
+    prefix := "apply_profile="
+    if (SubStr(payload, 1, StrLen(prefix)) != prefix)
+        return 0
+    profileName := SubStr(payload, StrLen(prefix) + 1)
+    SetTimer(CPApplyExternalProfile.Bind(profileName), -10)
+    return 1
+}
+
+RefreshGameProfilesList(select := "") {
+    global ddlGameProfile, iniPath
+    list := ListGameProfiles()
+    ddlGameProfile.Delete()
+    if list.Length {
+        ddlGameProfile.Add(list)
+        if (select = "")
+            select := IniRead(iniPath, "game_profiles", "active", "")
+        index := ArrayIndexOf(list, select)
+        ddlGameProfile.Choose(index ? index : 1)
+    } else {
+        ddlGameProfile.Text := ""
+    }
+    GameProfileUpdateSummary()
+}
+
+GameProfileUpdateSummary(*) {
+    global ddlGameProfile, txtGameProfileState, iniPath
+    if !(IsSet(ddlGameProfile) && IsSet(txtGameProfileState))
+        return
+    name := Trim(ddlGameProfile.Text)
+    active := IniRead(iniPath, "game_profiles", "active", "")
+    if (name = "")
+        txtGameProfileState.Value := "No profiles have been created yet."
+    else
+        txtGameProfileState.Value := "Selected: " name (name = active ? " (last saved or applied)" : "")
+}
+
+CreateGameProfile(*) {
+    global ddlGameProfile
+    input := InputBox("Enter a name for the new profile:", "Create Profile", "w360 h150")
+    if (input.Result != "OK")
+        return
+    name := GameProfileSafeName(input.Value)
+    if (name = "") {
+        MsgBox("Please enter a non-empty profile name.", "Profiles", "OK Icon!")
+        return
+    }
+    path := GameProfilePath(name)
+    if FileExist(path) && MsgBox("Profile '" name "' already exists. Overwrite it?", "Profiles", "YesNo Icon!") != "Yes"
+        return
+    if GameProfileSave(name)
+        RefreshGameProfilesList(name)
+}
+
+SaveSelectedGameProfile(*) {
+    global ddlGameProfile
+    name := Trim(ddlGameProfile.Text)
+    if (name = "") {
+        CreateGameProfile()
+        return
+    }
+    if GameProfileSave(name)
+        RefreshGameProfilesList(name)
+}
+
+ApplySelectedGameProfile(*) {
+    global ddlGameProfile
+    name := Trim(ddlGameProfile.Text)
+    if (name = "") {
+        MsgBox("Select a profile first.", "Profiles", "OK Icon!")
+        return
+    }
+    if GameProfileApply(name)
+        RefreshGameProfilesList(name)
+}
+
+DeleteSelectedGameProfile(*) {
+    global ddlGameProfile, iniPath
+    name := Trim(ddlGameProfile.Text)
+    if (name = "")
+        return
+    if MsgBox("Delete profile '" name "'?`n`nPrompts, terminology files, and overlay settings will not be deleted.", "Profiles", "YesNo Icon!") != "Yes"
+        return
+    path := GameProfilePath(name)
+    try FileDelete(path)
+    if (IniRead(iniPath, "game_profiles", "active", "") = name)
+        IniWriteRetry("", iniPath, "game_profiles", "active")
+    RefreshGameProfilesList()
 }
 
 ; =========================
@@ -5036,10 +6913,10 @@ ui.BackColor := CPPalette(controlDarkMode)["window"]
 
 ; The native tab remains as a page host and focus proxy. A custom tab bar is
 ; created after all page controls so its styling and geometry are predictable.
-tabNames := ["Screenshot Translation","Audio Translation","Translation Window","Explanation","Explanation Window","Terminology Overrides","Hotkeys","API Keys","Paths"]
-CPTabVisiblePages := [1, 2, 3, 4, 5, 6, 7, 8]
+tabNames := ["Screenshot Translation","Audio Translation","Translation Window","Explanation","Explanation Window","Terminology Overrides","Profiles","Controls","API Keys","Paths"]
+CPTabVisiblePages := [1, 2, 3, 4, 5, 6, 7, 8, 9]
 if showPathsTab
-    CPTabVisiblePages.Push(9)
+    CPTabVisiblePages.Push(10)
 tab := ui.Add("Tab", "xm ym w760 h420 Buttons", tabNames)
 
 ; --- Tab 1: SCREENSHOT TRANSLATION
@@ -5140,7 +7017,8 @@ leftBaseY := delY + delH + 16  ; spacing under the delete checkbox
 
 ui.Add("Text", Format("xm y{} w160", leftBaseY), "Max PNG size (KB):")
 eCapMax := ui.Add("Edit", "x+m yp w80 Number", capMaxKB)
-eCapMax.OnEvent("Change", (*) => SetCapMaxKB(eCapMax.Value))
+txtCapMaxHint := ui.Add("Text", "x+8 yp w44 h23 Hidden Center Border +0x200", "A")
+eCapMax.OnEvent("Change", (*) => SetCapMaxKBFromUI(eCapMax.Value))
 
 btnCapPick := ui.Add("Button", "xm y+10 w160", "Capture...")
 btnCapPick.OnEvent("Click", OpenCapturePicker)
@@ -5274,41 +7152,16 @@ ddlFont := ui.Add("DropDownList", "x+m w" twControlW " 0x210", [])
 ui.Add("Text", "x+14 yp", "Size:")
 edFSize := ui.Add("Edit", "x+m w60 Number", fontSize)
 udFSize := ui.Add("UpDown", "Range6-128", fontSize)
-chkFontBold := ui.Add("CheckBox", "x+14 yp+2", "Bold")
+txtFontSizeHint := ui.Add("Text", "x+8 yp w44 h23 Hidden Center Border +0x200", "A")
+chkFontBold := ui.Add("CheckBox", "x+8 yp+2", "Bold")
 chkFontBold.Value := fontBold
 
-ui.Add("Text", "x" twLabelX " y+26 w" twLabelW, "Profile:")
-ddlProf  := ui.Add("DropDownList", "x+m w" twControlW " 0x210", [])
-btnPNew  := ui.Add("Button", "x+8 w80",  "Add")
-btnPSave := ui.Add("Button", "x+6 w70",  "Save")
-btnPLoad := ui.Add("Button", "x+6 w70",  "Load")
-btnPDel  := ui.Add("Button", "x+6 w70",  "Delete")
-
 twControlX := twLabelX + twLabelW + pad
-btnMoveResize := ui.Add("Button", "x" twControlX " y+20 w180", "Move / Resize")
+btnMoveResize := ui.Add("Button", "x" twControlX " y+28 w180", "Move / Resize")
 txtMoveResize := ui.Add("Text", "x" twControlX " y+5 w590 cGray"
     , "Left stick or arrows move; right stick or Screenshot + Translate + arrows resize. Enter saves, Esc cancels.")
 CPRegisterMutedControl(txtMoveResize)
 btnMoveResize.OnEvent("Click", StartOverlayAdjustment.Bind("Translator"))
-
-RefreshProfilesList( IniRead(iniPath, "profiles", "translator_last", "") )
-
-btnPSave.OnEvent("Click", (*) => (
-    name := Trim(ddlProf.Text),
-    name := (name = "" ? "default" : name),
-    SaveProfile(name),
-    RefreshProfilesList(name)
-))
-btnPLoad.OnEvent("Click", (*) => (
-    name := Trim(ddlProf.Text),
-    name != "" ? LoadProfile(name) : 0
-))
-btnPDel.OnEvent("Click", (*) => (
-    name := Trim(ddlProf.Text),
-    (name != "" && MsgBox("Delete profile '" name "'?",, 0x21) = "OK")
-        ? (DeleteProfile(name), RefreshProfilesList()) : 0
-))
-btnPNew.OnEvent("Click", (*) => CreateProfile())
 
 for sw in [rectBg,rectTxt,rectName]
     sw.Cursor := "Hand"
@@ -5440,80 +7293,17 @@ ui.Add("Text", "x" ewLabelX " y+32 w" ewLabelW, "Font:")
 ddlFont_EW := ui.Add("DropDownList", "x+m w" ewControlW " 0x210", [])
 ui.Add("Text", "x+14 yp", "Size:")
 edFSize_EW := ui.Add("Edit", "x+m w60 Number")
-udFSize_EW := ui.Add("UpDown", "Range8-96")
-chkFontBold_EW := ui.Add("CheckBox", "x+14 yp+2", "Bold")
+udFSize_EW := ui.Add("UpDown", "Range6-200")
+txtFontSizeHint_EW := ui.Add("Text", "x+8 yp w44 h23 Hidden Center Border +0x200", "A")
+chkFontBold_EW := ui.Add("CheckBox", "x+8 yp+2", "Bold")
 chkFontBold_EW.Value := fontBold_EW
 
-; --- Explanation Profiles row ---
-ui.Add("Text", "x" ewLabelX " y+26 w" ewLabelW, "Profile:")
-ddlProf_EW := ui.Add("DropDownList", "x+m w" ewControlW " 0x210", [])
-btnProfCreate_EW := ui.Add("Button", "x+8 w80", "Add")
-btnProfSave_EW := ui.Add("Button", "x+6 w70", "Save")
-btnProfLoad_EW := ui.Add("Button", "x+6 w70", "Load")
-btnProfDel_EW  := ui.Add("Button", "x+6 w70", "Delete")
-
 ewControlX := ewLabelX + ewLabelW + pad
-btnMoveResize_EW := ui.Add("Button", "x" ewControlX " y+20 w180", "Move / Resize")
+btnMoveResize_EW := ui.Add("Button", "x" ewControlX " y+28 w180", "Move / Resize")
 txtMoveResize_EW := ui.Add("Text", "x" ewControlX " y+5 w590 cGray"
     , "Left stick or arrows move; right stick or Screenshot + Translate + arrows resize. Enter saves, Esc cancels.")
 CPRegisterMutedControl(txtMoveResize_EW)
 btnMoveResize_EW.OnEvent("Click", StartOverlayAdjustment.Bind("Explainer"))
-
-; populate dropdown
-Refresh_ddlProf_EW(*) {
-    global iniPath, ddlProf_EW
-    list := EW_ListProfiles()
-    ddlProf_EW.Delete()
-    ; AHK v2: Add() expects an Array. Add all at once if we have items.
-    if (list.Length)
-        ddlProf_EW.Add(list)
-    sel := IniRead(iniPath, "profiles", "explainer_last", "")
-    if (sel != "") {
-        idx := ArrayIndexOf(list, sel)
-        ddlProf_EW.Choose(idx ? idx : 1)
-    } else if (list.Length) {
-        ddlProf_EW.Choose(1)
-    }
-}
-Refresh_ddlProf_EW()
-
-; wire buttons
-CreateProfile_EW(*) {
-    global ddlProf_EW
-    ; Always prompt for a name (same behavior as Translation Window)
-    ip := InputBox("Enter new profile name:", "Create Explainer Profile",, "")
-    if (ip.Result != "OK")
-        return
-    name := Trim(ip.Value)
-    if (name = "")
-        return
-
-    path := EW_ProfilePath(name)
-    if FileExist(path) {
-        r := MsgBox(Format('Profile "{}" already exists. Overwrite?', name), "Create Explainer Profile", "YesNo Icon!")
-        if (r != "Yes")
-            return
-    }
-
-    EW_SaveProfile(name)
-    Refresh_ddlProf_EW()
-    ddlProf_EW.Text := name
-}
-
-
-btnProfCreate_EW.OnEvent("Click", CreateProfile_EW)
-
-btnProfSave_EW.OnEvent("Click", (*) => (
-    (name := Trim(ddlProf_EW.Text)) = "" 
-        ? MsgBox("Enter a profile name in the box.") 
-        : (EW_SaveProfile(name), Refresh_ddlProf_EW(), ddlProf_EW.Text := name)
-))
-btnProfLoad_EW.OnEvent("Click", (*) => (
-    (name := Trim(ddlProf_EW.Text)) = "" ? MsgBox("Pick a profile to load.") : EW_LoadProfile(name)
-))
-btnProfDel_EW.OnEvent("Click", (*) => (
-    (name := Trim(ddlProf_EW.Text)) = "" ? MsgBox("Pick a profile to delete.") : (EW_DeleteProfile(name), Refresh_ddlProf_EW())
-))
 
 ; --- wire EW events ---
 for sw in [rectBg_EW,rectTxt_EW]
@@ -5574,8 +7364,39 @@ ddlENG.OnEvent("Change", (*) => GlossaryChanged("en"))
 ; initial fill + selection
 RefreshGlossaryProfilesList(jp2enGlossaryProfile, en2enGlossaryProfile)
 
-; --- Tab 9: PATHS
-tab.UseTab(9)
+; --- Tab 7: PROFILES
+tab.UseTab(7)
+ui.Add("Text", "xm y+4 w0 h0")
+lblGameProfilesTitle := ui.Add("Text", "xm y+10 w760", "Profiles")
+lblGameProfilesTitle.SetFont("Bold")
+txtGameProfileIntro := ui.Add("Text", "xm y+8 w760 cGray"
+    , "Save and restore complete setups for screenshot and explanation prompts, translation post-processing, capture target, terminology overrides, and both overlay windows.")
+txtGameProfileGlobal := ui.Add("Text", "xm y+6 w760 cGray"
+    , "Audio provider, model, input device, and target language remain global and are not changed by a profile.")
+CPRegisterMutedControl(txtGameProfileIntro)
+CPRegisterMutedControl(txtGameProfileGlobal)
+
+ui.Add("Text", "xm y+24 w120", "Profile:")
+ddlGameProfile := ui.Add("DropDownList", "x+m w330 0x210", [])
+btnGameProfileAdd := ui.Add("Button", "x+8 w80", "Add")
+btnGameProfileSave := ui.Add("Button", "x+6 w110", "Save Current")
+btnGameProfileApply := ui.Add("Button", "x+6 w80", "Apply")
+btnGameProfileDelete := ui.Add("Button", "x+6 w80", "Delete")
+
+txtGameProfileState := ui.Add("Text", "xm y+18 w760", "")
+txtGameProfileDetails := ui.Add("Text", "xm y+18 w760 cGray"
+    , "Saved settings include overlay colors, fonts, transparency, size and position, startup/topmost choices, capture region or window, both selected prompts, post-processing, and both terminology profiles.")
+CPRegisterMutedControl(txtGameProfileDetails)
+
+ddlGameProfile.OnEvent("Change", GameProfileUpdateSummary)
+btnGameProfileAdd.OnEvent("Click", CreateGameProfile)
+btnGameProfileSave.OnEvent("Click", SaveSelectedGameProfile)
+btnGameProfileApply.OnEvent("Click", ApplySelectedGameProfile)
+btnGameProfileDelete.OnEvent("Click", DeleteSelectedGameProfile)
+RefreshGameProfilesList()
+
+; --- Tab 10: PATHS
+tab.UseTab(10)
 ui.Add("Text", "xm y+4 w0 h0")  ; spacer
 tPython := ui.Add("Text",  "xm y+6", "Python (.exe)")
 ePython := ui.Add("Edit",  "x+m w560", pythonExe)
@@ -5610,47 +7431,92 @@ cbDebug := ui.Add("CheckBox", opts, "Debug mode")
 TooltipBind(cbDebug, "Write diagnostic logs for the Control Panel, overlays, and live audio translator")
 cbDebug.OnEvent("Click", CPOnDebugModeToggle)
 
-; --- Tab 7: HOTKEYS
-tab.UseTab(7)
-ui.Add("Text", "xm y+4 w0 h0")  ; spacer/header row
+; --- Tab 8: CONTROLS
+tab.UseTab(8)
+ui.Add("Text", "xm y+4 w0 h0")
 
-; Column headers
-ui.Add("Text", "xm y+6 w260", "Action")
-ui.Add("Text", "x+10 w240",   "Current hotkey")
-ui.Add("Text", "x+10 w320",   "")  ; space for buttons
+; Push-like radio buttons make the two input methods feel like views of one
+; page while retaining native keyboard, mouse, and controller navigation.
+global rbControlsKeyboard := ui.Add("Radio", "xm y+6 w180 h32 Group +0x1000", "Keyboard inputs")
+global rbControlsController := ui.Add("Radio", "x+0 yp w180 h32 +0x1000", "Controller inputs")
+rbControlsKeyboard.OnEvent("Click", CPSetControlsView.Bind("keyboard", true))
+rbControlsController.OnEvent("Click", CPSetControlsView.Bind("controller", true))
 
-; Render one row per action (label | current binding | Change / Disable / Default)
-for action in hotkeyActions {
-    label := hotkeyLabels[action]
-    cur   := IniRead(iniPath, "hotkeys", action, hotkeyDefaults[action])
+rbControlsKeyboard.GetPos(&controlsViewX, &controlsViewY, , &controlsViewH)
+controlsContentY := controlsViewY + controlsViewH + 14
+controlsActionX := controlsViewX
+controlsBindingX := controlsActionX + 270
+controlsButtonX := controlsBindingX + 250
+controlsRowY := controlsContentY + 28
+controlsRowStep := 38
 
-     ui.Add("Text", "xm y+10 w260", label)
-    e := ui.Add("Edit", "x+10 w240 ReadOnly", cur)
-    bChg := ui.Add("Button", "x+10 w90",  "Change...")
-    bDis := ui.Add("Button", "x+6  w80",  "Disable")
-    bDef := ui.Add("Button", "x+6  w100", "Default")
+; Keyboard input view. These are the original hotkey controls and continue to
+; work with physical keyboards and keyboard-emulation tools such as JoyToKey.
+CPAddControlsViewControl("keyboard", ui.Add("Text", "x" controlsActionX " y" controlsContentY " w260", "Action"))
+CPAddControlsViewControl("keyboard", ui.Add("Text", "x" controlsBindingX " y" controlsContentY " w240", "Current keyboard input"))
 
-    ; store controls for later wiring
-    hkEdits[action]  := e
-    hkBtnChg[action] := bChg
-    hkBtnDis[action] := bDis
-    hkBtnDef[action] := bDef
-	; --- Wire per-row buttons (bind action key so each row is independent) ---
-    actKey := action  ; freeze the current key for this row
+for keyboardActionKey in hotkeyActions {
+    label := hotkeyLabels[keyboardActionKey]
+    cur := IniRead(iniPath, "hotkeys", keyboardActionKey, hotkeyDefaults[keyboardActionKey])
 
+    lblKeyboardAction := CPAddControlsViewControl("keyboard", ui.Add("Text", "x" controlsActionX " y" controlsRowY " w260 h26 +0x200", label))
+    e := CPAddControlsViewControl("keyboard", ui.Add("Edit", "x" controlsBindingX " y" controlsRowY " w240 h28 ReadOnly", cur))
+    bChg := CPAddControlsViewControl("keyboard", ui.Add("Button", "x" controlsButtonX " y" controlsRowY " w90 h28", "Change..."))
+    bDis := CPAddControlsViewControl("keyboard", ui.Add("Button", "x+6 yp w80 h28", "Disable"))
+    bDef := CPAddControlsViewControl("keyboard", ui.Add("Button", "x+6 yp w100 h28", "Default"))
+
+    hkEdits[keyboardActionKey] := e
+    hkBtnChg[keyboardActionKey] := bChg
+    hkBtnDis[keyboardActionKey] := bDis
+    hkBtnDef[keyboardActionKey] := bDef
+    actKey := keyboardActionKey
     bChg.OnEvent("Click", Hotkey_Row_Change.Bind(actKey))
     bDis.OnEvent("Click", Hotkey_Row_Disable.Bind(actKey))
     bDef.OnEvent("Click", Hotkey_Row_Default.Bind(actKey))
-
+    controlsRowY += controlsRowStep
 }
 
-; --- Conflicts banner + bottom buttons ---
 global hkConflictText
-; reduce top gap and fix a small text height so it doesnâ€™t reserve extra space
-hkConflictText := ui.Add("Text", "xm y+4 w800 h1 cRed", "")
-
-; initial conflict pass
+hkConflictText := CPAddControlsViewControl("keyboard", ui.Add("Text", "x" controlsActionX " y" controlsRowY " w800 h18 cRed", ""))
 Hotkeys_ShowConflicts()
+
+; D-pad / A / B navigation is always available while this window or one of its
+; dialogs is in the foreground. Global action bindings remain opt-in and use
+; rising-edge button presses, so connecting a controller cannot fire an action.
+controllerTopY := controlsContentY
+global cbControllerInputsEnabled := CPAddControlsViewControl("controller", ui.Add("CheckBox", "x" controlsActionX " y" controllerTopY " w330 h28", "Enable direct controller action bindings"))
+global txtControllerStatus := CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsBindingX " y" (controllerTopY + 4) " w570 h24 cGray", "Action bindings are off. D-pad / A / B still navigate this window."))
+CPRegisterMutedControl(txtControllerStatus)
+cbControllerInputsEnabled.OnEvent("Click", CPControllerEnabledChanged)
+
+controllerHeaderY := controllerTopY + 40
+CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsActionX " y" controllerHeaderY " w260", "Action"))
+CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsBindingX " y" controllerHeaderY " w240", "Current controller input"))
+controllerRowY := controllerHeaderY + 28
+
+for controllerActionKey in hotkeyActions {
+    label := hotkeyLabels[controllerActionKey]
+    lblControllerAction := CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsActionX " y" controllerRowY " w260 h26 +0x200", label))
+    controllerEdit := CPAddControlsViewControl("controller", ui.Add("Edit", "x" controlsBindingX " y" controllerRowY " w240 h28 ReadOnly", "Disabled"))
+    btnControllerAssign := CPAddControlsViewControl("controller", ui.Add("Button", "x" controlsButtonX " y" controllerRowY " w90 h28", "Assign"))
+    btnControllerDisable := CPAddControlsViewControl("controller", ui.Add("Button", "x+6 yp w80 h28", "Disable"))
+
+    CPControllerBindingEdits[controllerActionKey] := controllerEdit
+    CPControllerAssignButtons[controllerActionKey] := btnControllerAssign
+    CPControllerDisableButtons[controllerActionKey] := btnControllerDisable
+    controllerAction := controllerActionKey
+    btnControllerAssign.OnEvent("Click", CPControllerAssign.Bind(controllerAction))
+    btnControllerDisable.OnEvent("Click", CPControllerDisable.Bind(controllerAction))
+    controllerRowY += controlsRowStep
+}
+
+txtControllerNote := CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsActionX " y" controllerRowY " w900 h52 cGray", "D-pad, A / Cross, and B / Circle navigate the control panel automatically. Optional action bindings do not consume controller presses; the game still receives them. Avoid assigning the same action through both direct input and keyboard-emulation software."))
+CPRegisterMutedControl(txtControllerNote)
+
+CPControllerLoadBindings()
+savedControlsView := IniRead(iniPath, "controller_inputs", "view", "keyboard")
+CPSetControlsView(savedControlsView, false)
+CPControllerSetEnabled(Integer(IniRead(iniPath, "controller_inputs", "enabled", 0)) != 0, false)
 
 tab.UseTab()
 FixAllEditableCombos()
@@ -5770,8 +7636,8 @@ for ctl in ctls
 ddlPrompt.OnEvent("Change", (*) => (UpdateVars(), SaveAll()))
 ddlPost.OnEvent("Change",   (*) => (UpdateVars(), SaveAll()))
 
-; --- Tab 8: API KEYS
-tab.UseTab(8)
+; --- Tab 9: API KEYS
+tab.UseTab(9)
 ui.Add("Text", "xm y+4 w0 h0")  ; spacer
 
 ; Master toggle: default OFF (use Windows env). If .env exists, reflect that.
@@ -6023,8 +7889,16 @@ UpdateCPFocusRing()
 SetTimer(UpdateCPActiveTabHighlight, 80)
 UpdateCPActiveTabHighlight()
 
-; Auto-open overlays if toggled in cfg
-if (Integer(IniRead(iniPath, "cfg", "openTranslatorOnLaunch", 0))) {
+; LaunchBox can select a unified Profile for a game. A first process applies
+; the command-line selection here; a helper process sends the same request to
+; this hidden window through WM_COPYDATA when the control panel already exists.
+OnMessage(0x004A, CPControlPanelCopyData)
+if (CP_START_PROFILE != "")
+    CPApplyExternalProfile(CP_START_PROFILE)
+
+; A front end can explicitly request the Translator on a cold background start.
+; This keeps the control panel hidden while still giving the game its overlay.
+if (CP_START_TRANSLATOR || Integer(IniRead(iniPath, "cfg", "openTranslatorOnLaunch", 0))) {
     SetTimer(LaunchOverlay, -100)
 }
 if (Integer(IniRead(iniPath, "cfg", "openExplainerOnLaunch", 0))) {
@@ -6181,9 +8055,6 @@ Repaint(){
         try edFSize_EW.Value := fontSize_EW
         try udFSize_EW.Value := fontSize_EW
         try chkFontBold_EW.Value := fontBold_EW
-
-                ; Profile row: use last Explainer profile from control.ini
-        try ddlProf_EW.Text := IniRead(iniPath, "profiles", "explainer_last", "")
     }
 
     ToggleModelControls()
@@ -6773,8 +8644,86 @@ CPControllerColorActivate(hueSlider, saturationSlider, brightnessSlider, applyBu
         SendMessage(0x00F5, 0, 0, cancelButton.Hwnd)
 }
 
+CPControllerColorSliderRepeatActive(targetHwnd, direction) {
+    global CPControllerColorDialogState
+    if (direction != "Left" && direction != "Right")
+        return false
+    state := CPControllerColorDialogState
+    if !(state.Has("active") && state["active"]
+     && state.Has("hwnd") && state["hwnd"] = targetHwnd)
+        return false
+
+    focusHwnd := DllCall("user32\GetFocus", "ptr")
+    for sliderKey in ["hue", "saturation", "brightness"] {
+        try {
+            if (focusHwnd = state[sliderKey].Hwnd)
+                return true
+        }
+    }
+    return false
+}
+
+CPControllerAcceleratedSliderRepeatActive(targetHwnd, direction) {
+    global ui, slTrans, slTrans_EW, eCapMax
+    cpAcceleratedFocusHwnd := DllCall("user32\GetFocus", "ptr")
+    ; Font size always advances in single-point steps, even while the D-pad is held.
+    if CPFontSizeAdjustActive()
+        return false
+    try {
+        if (targetHwnd = ui.Hwnd && CPMaxPngAdjustActive()
+         && cpAcceleratedFocusHwnd = eCapMax.Hwnd)
+            return true
+    }
+    if (direction != "Left" && direction != "Right")
+        return false
+
+    try {
+        if (targetHwnd = ui.Hwnd) {
+            for cpAcceleratedSliderCtrl in [slTrans, slTrans_EW] {
+                if (cpAcceleratedFocusHwnd = cpAcceleratedSliderCtrl.Hwnd)
+                    return true
+            }
+            return false
+        }
+    }
+    return CPControllerColorSliderRepeatActive(targetHwnd, direction)
+}
+
+CPShowDialogFocusCues(dialogHwnd) {
+    if !dialogHwnd
+        return
+    ; Direct controller focus changes do not make Windows reveal its native
+    ; slider/button focus rectangles the way a keyboard navigation message does.
+    try SendMessage(0x0127, 0x00030002, 0, dialogHwnd) ; WM_CHANGEUISTATE, UIS_CLEAR, HIDEFOCUS|HIDEACCEL
+    try DllCall("user32\RedrawWindow", "ptr", dialogHwnd, "ptr", 0, "ptr", 0
+        , "uint", 0x0001 | 0x0080 | 0x0100) ; INVALIDATE | ALLCHILDREN | UPDATENOW
+}
+
+CPControllerColorDispatch(command, targetHwnd) {
+    global CPControllerColorDialogState
+    state := CPControllerColorDialogState
+    if !(state.Has("active") && state["active"]
+     && state.Has("hwnd") && state["hwnd"] = targetHwnd)
+        return false
+
+    CPShowDialogFocusCues(targetHwnd)
+    try {
+        switch command {
+            case "Up", "Down", "Left", "Right":
+                CPControllerColorNavigate(command, state["hue"], state["saturation"]
+                    , state["brightness"], state["apply"], state["cancel"])
+            case "Activate":
+                CPControllerColorActivate(state["hue"], state["saturation"]
+                    , state["brightness"], state["apply"], state["cancel"])
+            case "Cancel":
+                SendMessage(0x00F5, 0, 0, state["cancel"].Hwnd) ; BM_CLICK
+        }
+    }
+    return true
+}
+
 CPControllerColorDialog(initHex, dialogTitle := "Adjust color") {
-    global ui
+    global ui, CPControllerColorDialogState
     hsv := CPColorHexToHSV(initHex)
     result := ""
     closed := false
@@ -6809,6 +8758,14 @@ CPControllerColorDialog(initHex, dialogTitle := "Adjust color") {
     brightnessSlider.OnEvent("Change", updatePreview)
     CPRegisterControllerColorGradients(hueSlider, saturationSlider, brightnessSlider)
     gradientSliderHwnds := [hueSlider.Hwnd, saturationSlider.Hwnd, brightnessSlider.Hwnd]
+    CPControllerColorDialogState := Map(
+        "active", true,
+        "hwnd", dlg.Hwnd,
+        "hue", hueSlider,
+        "saturation", saturationSlider,
+        "brightness", brightnessSlider,
+        "apply", applyButton,
+        "cancel", cancelButton)
 
     finish := (colorValue) => (result := colorValue, closed := true, dlg.Destroy())
     applyButton.OnEvent("Click", (*) => finish.Call(CPColorHSVToHex(
@@ -6834,9 +8791,12 @@ CPControllerColorDialog(initHex, dialogTitle := "Adjust color") {
         CPApplyOwnedDialogTheme(dlg)
         updatePreview.Call()
         hueSlider.Focus()
+        CPShowDialogFocusCues(dlg.Hwnd)
         while !closed
             Sleep(30)
     } finally {
+        CPControllerColorDialogState := Map("active", false)
+        CPControllerResetNavigation()
         CPUnregisterColorSwatch(previewHwnd)
         CPUnregisterControllerColorGradients(gradientSliderHwnds*)
         HotIfWinActive(dialogHotIf)
@@ -7000,7 +8960,9 @@ FontChanged(ctrl, *) {
 }
 
 FontSizeCommit(ctrl, *) {
-    global fontSize
+    global fontSize, CPFontSizeAdjustSyncing
+    if CPFontSizeAdjustSyncing
+        return
     txt := Trim(ctrl.Value)
     if (txt = "") {
         ctrl.Value := fontSize
@@ -7082,7 +9044,9 @@ FontChanged_EW(ctrl, *) {
 }
 
 FontSizeCommit_EW(ctrl, *) {
-    global fontSize_EW
+    global fontSize_EW, CPFontSizeAdjustSyncing
+    if CPFontSizeAdjustSyncing
+        return
     txt := Trim(ctrl.Value)
     if (txt = "") {
         ctrl.Value := fontSize_EW
@@ -7178,118 +9142,6 @@ StopExplainerBoundsWatcher() {
         return
     SetTimer SaveExplainerBoundsIfChanged, 0
     ew_bounds_watch_running := false
-}
-
-; =========================
-; Explainer profiles (save/load/delete)
-; =========================
-EW_ProfilePath(name) {
-    global profilesDir_EW
-    return profilesDir_EW "\" RegExReplace(Trim(name), "[^\w\-\. ]", "_") ".ini"
-}
-
-EW_SaveProfile(name) {
-    global boxBgHex_EW,bdrOutHex_EW,bdrInHex_EW,txtHex_EW
-    global fontName_EW,fontSize_EW,fontBold_EW,bdrOutW_EW,bdrInW_EW,overlayTrans_EW
-    global ewX,ewY,ewW,ewH
-
-    p := EW_ProfilePath(name)
-    SyncUnifiedWindowAppearance()
-    try {
-        ; theme
-        IniWrite(overlayTrans_EW, p, "cfg_explainer", "overlayTrans")
-        IniWrite(boxBgHex_EW,     p, "cfg_explainer", "boxBg")
-        IniWrite(boxBgHex_EW,     p, "cfg_explainer", "bdrOut")
-        IniWrite(boxBgHex_EW,     p, "cfg_explainer", "bdrIn")
-        IniWrite(txtHex_EW,       p, "cfg_explainer", "txtColor")
-        IniWrite(fontName_EW,     p, "cfg_explainer", "fontName")
-        IniWrite(fontSize_EW,     p, "cfg_explainer", "fontSize")
-        IniWrite(fontBold_EW,     p, "cfg_explainer", "fontBold")
-        IniWrite(0,                p, "cfg_explainer", "bdrOutW")
-        IniWrite(0,                p, "cfg_explainer", "bdrInW")
-
-        ; bounds (optional; only if known)
-        if (ewX != "")
-            IniWrite(ewX, p, "explainer_bounds", "x")
-        if (ewY != "")
-            IniWrite(ewY, p, "explainer_bounds", "y")
-        if (ewW != "")
-            IniWrite(ewW, p, "explainer_bounds", "w")
-        if (ewH != "")
-            IniWrite(ewH, p, "explainer_bounds", "h")
-    } Catch as ex {
-        MsgBox "Failed to save profile:`n" e.Message
-    }
-    DbgCP("EW_SaveProfile -> " p)
-}
-
-EW_LoadProfile(name) {
-    global boxBgHex_EW,bdrOutHex_EW,bdrInHex_EW,txtHex_EW
-    global fontName_EW,fontSize_EW,fontBold_EW,bdrOutW_EW,bdrInW_EW,overlayTrans_EW
-    global ewX,ewY,ewW,ewH
-    global ui, slTrans_EW, lblTransPct_EW
-    global rectBg_EW,rectTxt_EW
-    global ddlFont_EW, edFSize_EW, udFSize_EW, chkFontBold_EW
-    global iniPath, ddlProf_EW
-
-    p := EW_ProfilePath(name)
-    if !FileExist(p) {
-        MsgBox "Profile not found: " p
-        return
-    }
-    ; remember last used Explainer profile in control.ini
-    try IniWrite(name, iniPath, "profiles", "explainer_last")
-    try ddlProf_EW.Text := name
-
-    overlayTrans_EW := Integer(IniRead(p, "cfg_explainer", "overlayTrans", overlayTrans_EW))
-    boxBgHex_EW     := StrUpper(IniRead(p, "cfg_explainer", "boxBg",    boxBgHex_EW))
-    txtHex_EW       := StrUpper(IniRead(p, "cfg_explainer", "txtColor", txtHex_EW))
-    fontName_EW     := IniRead(p, "cfg_explainer", "fontName", fontName_EW)
-    fontSize_EW     := Integer(IniRead(p, "cfg_explainer", "fontSize",  fontSize_EW))
-    fontBold_EW     := Integer(IniRead(p, "cfg_explainer", "fontBold",  fontBold_EW)) ? 1 : 0
-    SyncUnifiedWindowAppearance()
-
-    ; bounds (may not exist in profile; keep current if empty)
-    _x := IniRead(p, "explainer_bounds", "x", "")
-    _y := IniRead(p, "explainer_bounds", "y", "")
-    _w := IniRead(p, "explainer_bounds", "w", "")
-    _h := IniRead(p, "explainer_bounds", "h", "")
-    if (_x != "" && _y != "" && _w != "" && _h != "") {
-        ewX := Integer(_x), ewY := Integer(_y), ewW := Integer(_w), ewH := Integer(_h)
-    }
-
-    ; reflect in UI
-    slTrans_EW.Value := overlayTrans_EW
-    try lblTransPct_EW.Value := Round(overlayTrans_EW / 255 * 100) . "%"
-    try rectBg_EW.Opt("Background" . boxBgHex_EW)
-    try rectTxt_EW.Opt("Background" . txtHex_EW)
-    try ddlFont_EW.Text := fontName_EW
-    try edFSize_EW.Value := fontSize_EW, udFSize_EW.Value := fontSize_EW
-    try chkFontBold_EW.Value := fontBold_EW
-    RefreshColorSwatches_EW()
-
-    SaveAll()
-    SendOverlayTheme()
-    ; and if window is open, also apply bounds immediately
-    ApplyExplainerBounds()
-    DbgCP("EW_LoadProfile <- " p)
-}
-
-EW_DeleteProfile(name) {
-    p := EW_ProfilePath(name)
-    if FileExist(p) {
-        try FileDelete(p)
-        DbgCP("EW_DeleteProfile x " p)
-    }
-}
-
-EW_ListProfiles() {
-    global profilesDir_EW
-    list := []
-    Loop Files profilesDir_EW "\*.ini", "F" {
-        list.Push( StrReplace(A_LoopFileName, ".ini") )
-    }
-    return list
 }
 
 ; ---- fonts ------------------------------------------------------
@@ -8007,222 +9859,11 @@ IniWriteRetry(value, path, section, key) {
     throw Error("IniWrite failed (sharing violation persisted): " path " [" section "/" key "]")
 }
 
-; ---- profiles (overlay theme) ---------------------------------
-ListProfiles() {
-    global profilesDir
-    out := []
-    Loop Files profilesDir "\*.ini" {
-        n := A_LoopFileName
-        n := RegExReplace(n, "\.ini$", "")
-        out.Push(n)
-    }
-    if out.Length {
-        txt := ""
-        for n in out
-            txt .= n "`n"
-        txt := RTrim(txt, "`n")
-        txt := Sort(txt)
-        out := []
-        for n in StrSplit(txt, "`n")
-            out.Push(n)
-    }
-    return out
-}
-
 ArrayIndexOf(arr, val) {
     for i, v in arr
         if (v = val)
             return i
     return 0
-}
-
-RefreshProfilesList(select := "") {
-    global ddlProf
-    profList := ListProfiles()
-    ddlProf.Delete()
-    if (profList.Length) {
-        ddlProf.Add(profList)
-        selIdx := select != "" ? ArrayIndexOf(profList, select) : 1
-        if (selIdx = 0)
-            selIdx := 1
-        ddlProf.Choose(selIdx)
-    } else {
-        ddlProf.Text := ""
-    }
-}
-
-GetOverlayStateForProfile() {
-    global overlayTrans, boxBgHex, bdrOutHex, bdrInHex, txtHex
-    global fontName, fontSize, fontBold
-    global bdrOutW, bdrInW
-    SyncUnifiedWindowAppearance()
-    return Map(
-        "overlayTrans", overlayTrans,
-        "boxBg",  boxBgHex,
-        "bdrOut", boxBgHex,
-        "bdrIn",  boxBgHex,
-        "txt",    txtHex,
-        "font",   fontName,
-        "size",   fontSize,
-        "bold",   fontBold,
-        "outw",   0,
-        "inw",    0
-    )
-}
-
-ApplyOverlayState(st) {
-    global overlayTrans, boxBgHex, bdrOutHex, bdrInHex, txtHex
-    global fontName, fontSize, fontBold, bdrOutW, bdrInW
-    global slTrans, lblTransPct
-    global rectBg, rectTxt
-    global ddlFont, edFSize, chkFontBold
-
-    if st.Has("overlayTrans") {
-        overlayTrans := Integer(st["overlayTrans"])
-        slTrans.Value := overlayTrans
-        lblTransPct.Value := Round(overlayTrans / 255 * 100) . "%"
-        oldMode := A_TitleMatchMode
-        SetTitleMatchMode 3
-        WinSetTransparent(overlayTrans, "Translator")
-        SetTitleMatchMode oldMode
-    }
-    if st.Has("boxBg") {
-        boxBgHex := st["boxBg"], rectBg.Opt("Background" . boxBgHex)
-    }
-    if st.Has("txt") {
-        txtHex := st["txt"], rectTxt.Opt("Background" . txtHex)
-    }
-    if st.Has("font") {
-        fontName := st["font"]
-        try ddlFont.Text := fontName
-        catch {
-            availableFont := Trim(ddlFont.Text)
-            if (availableFont != "")
-                fontName := availableFont
-        }
-    }
-    if st.Has("size") {
-        fontSize := Integer(st["size"]), edFSize.Value := fontSize
-    }
-    if st.Has("bold") {
-        fontBold := Integer(st["bold"]) ? 1 : 0
-        chkFontBold.Value := fontBold
-    }
-    SyncUnifiedWindowAppearance()
-    RefreshColorSwatches()
-    SaveAll()
-    SendOverlayTheme()
-}
-
-SaveProfile(name) {
-    global profilesDir
-    st := GetOverlayStateForProfile()
-    path := profilesDir "\" name ".ini"
-    for k, v in st
-        IniWriteRetry(v, path, "overlay", k)
-
-    oldMode := A_TitleMatchMode
-    SetTitleMatchMode 3
-    WinGetPos &x, &y, &w, &h, "Translator"
-    if (x != "")
-    {
-        IniWriteRetry(x,   path, "overlay", "ovX")
-        IniWriteRetry(y,   path, "overlay", "ovY")
-        IniWriteRetry(w,   path, "overlay", "ovW")
-        IniWriteRetry(h,   path, "overlay", "ovH")
-        try {
-            dpi := GetWindowDPI(WinExist("Translator"))
-            IniWriteRetry(dpi, path, "overlay", "ovDPI")
-            DbgCP("SaveProfile '" name "' pos=(" x "," y "," w "," h ") dpi=" dpi)
-        } catch {
-            DbgCP("SaveProfile '" name "' pos=(" x "," y "," w "," h ") dpi=?")
-        }
-    }
-    SetTitleMatchMode oldMode
-}
-
-
-LoadProfile(name) {
-    global profilesDir, iniPath, ddlProf
-    path := profilesDir "\" name ".ini"
-    if !FileExist(path) {
-        MsgBox("Profile not found:`n" path, "Missing", 48)
-        return
-    }
-    ; remember last used Translation Window profile in control.ini
-    try IniWrite(name, iniPath, "profiles", "translator_last")
-    try ddlProf.Text := name
-    st := Map()
-    for k in ["overlayTrans","boxBg","txt","font","size","bold","ovX","ovY","ovW","ovH","ovDPI"] {
-        v := IniRead(path, "overlay", k, "")
-        if (v != "")
-            st[k] := v
-    }
-    ApplyOverlayState(st)
-
-    oldMode := A_TitleMatchMode
-    SetTitleMatchMode 3
-    if (st.Has("ovX") && st.Has("ovY") && st.Has("ovW") && st.Has("ovH")) {
-        x := Integer(st["ovX"])
-        y := Integer(st["ovY"])
-        w := Integer(st["ovW"])
-        h := Integer(st["ovH"])
-        DbgCP("LoadProfile '" name "' -> WinMove x=" x " y=" y " w=" w " h=" h " (savedDPI=" (st.Has("ovDPI")?st["ovDPI"]:"") ")")
-        WinMove x, y, w, h, "Translator"
-		try {
-            s := "action=save_bounds"
-            DbgCP("Sending save_bounds command to overlay.")
-            buf := Buffer(StrLen(s)*2 + 2, 0)
-            StrPut(s, buf, "UTF-16")
-            cds := Buffer(A_PtrSize*3, 0)
-            NumPut("UPtr", 0,        cds, 0)
-            NumPut("UPtr", buf.Size, cds, A_PtrSize)
-            NumPut("Ptr",  buf.Ptr,  cds, 2*A_PtrSize)
-            target := WinExist("Translator")
-            if (target)
-                DllCall("User32\SendMessageW", "Ptr", target, "UInt", 0x004A, "Ptr", 0, "Ptr", cds.Ptr)
-        }
-    }
-    SetTitleMatchMode oldMode
-}
-
-DeleteProfile(name) {
-    global profilesDir
-    path := profilesDir "\" name ".ini"
-    try FileDelete(path)
-    DbgCP("DeleteProfile '" name "'")
-}
-
-CreateProfile() {
-    global ddlProf, profilesDir
-    ib := InputBox("Enter a name for the new profile:", "Create profile", "w320 h140")
-    if (ib.Result = "Cancel")
-        return
-    name := Trim(ib.Value)
-    if (name = "") {
-        MsgBox("Please enter a non-empty name.", "Create profile", "OK Icon!")
-        ddlProf.Focus()
-        return
-    }
-    name := RegExReplace(name, '[\\/:*?"<>|]+', "_")
-    if RegExMatch(name, 'i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$')
-        name := "_" name
-
-    path := profilesDir "\" name ".ini"
-    if FileExist(path) {
-        if (MsgBox("Profile '" name "' already exists.`nOverwrite it?", "Create profile", "YesNo Icon!") != "Yes") {
-            ddlProf.Focus()
-            return
-        }
-    }
-    SaveProfile(name)
-    list := ListProfiles()
-    ddlProf.Delete()
-    if (list.Length)
-        ddlProf.Add(list)
-    ddlProf.Text := name
-    ddlProf.Focus()
-    try Toast("Saved profile: " name), DbgCP("CreateProfile done: " name)
 }
 
 ; ---------------------------------------------------------------

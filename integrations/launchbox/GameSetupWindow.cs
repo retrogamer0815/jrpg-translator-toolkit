@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Windows;
@@ -7,6 +8,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Markup;
 using System.Windows.Media;
+using System.Windows.Threading;
 using Microsoft.Win32;
 
 namespace JrpgTranslator.LaunchBox
@@ -19,21 +21,33 @@ namespace JrpgTranslator.LaunchBox
         private static readonly Brush PrimaryForeground = BrushFrom("#F3F4F6");
         private static readonly Brush MutedForeground = BrushFrom("#AEB3BC");
         private static readonly Brush ControlBorderBrush = BrushFrom("#686B72");
-        private static readonly Brush Accent = BrushFrom("#1683D8");
 
         private readonly PluginConfiguration _configuration;
         private readonly CheckBox _translatorEnabled;
         private readonly CheckBox _joyToKeyEnabled;
-        private readonly ComboBox _profile;
-        private readonly Button _refresh;
+        private readonly ComboBox _translatorProfile;
+        private readonly Button _refreshTranslatorProfiles;
+        private readonly ComboBox _joyToKeyProfile;
+        private readonly Button _refreshJoyToKeyProfiles;
         private readonly Button _browseTranslator;
         private readonly Button _browseJoyToKey;
         private readonly Button _browseProfiles;
         private readonly Button _save;
         private readonly Button _cancel;
-        private readonly TextBlock _profileStatus;
+        private readonly TextBlock _translatorProfileStatus;
+        private readonly TextBlock _joyToKeyProfileStatus;
         private readonly TextBlock _readiness;
-        private readonly List<Control> _focusOrder;
+        private readonly List<Control[]> _focusRows;
+        private readonly DispatcherTimer _controllerTimer;
+        private readonly bool _nativeControllerNavigationEnabled;
+        private readonly Dictionary<ControllerNavigationCommand, long> _keyboardMirrorGraceUntil = new();
+        private readonly Dictionary<ControllerNavigationCommand, long> _lastNativeNavigationAt = new();
+        private ControllerNavigationState _controllerPreviousState;
+        private ControllerNavigationCommand? _heldControllerDirection;
+        private long _nextControllerRepeatAt;
+        private bool _controllerBaselineReady;
+        private ComboBox? _guardedControllerProfile;
+        private long _guardedControllerProfileUntil;
 
         public GameConfiguration Result { get; private set; }
 
@@ -41,12 +55,13 @@ namespace JrpgTranslator.LaunchBox
         {
             _configuration = configuration;
             Result = game;
+            _nativeControllerNavigationEnabled = IsBigBoxHost();
 
             Title = "JRPG Translator Setup";
             Width = 760;
-            Height = 590;
+            Height = 780;
             MinWidth = 680;
-            MinHeight = 540;
+            MinHeight = 690;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             ResizeMode = ResizeMode.CanResize;
             ShowInTaskbar = false;
@@ -97,56 +112,41 @@ namespace JrpgTranslator.LaunchBox
 
             _translatorEnabled = MakeCheckBox("Use JRPG Translator with this game", game.TranslatorEnabled);
             _translatorEnabled.Margin = new Thickness(18, 17, 18, 10);
+            _translatorEnabled.Checked += (_, _) => UpdateTranslatorControls();
+            _translatorEnabled.Unchecked += (_, _) => UpdateTranslatorControls();
             options.Children.Add(_translatorEnabled);
 
-            _joyToKeyEnabled = MakeCheckBox("Switch JoyToKey profile for this game", game.JoyToKeyEnabled);
-            _joyToKeyEnabled.Margin = new Thickness(18, 10, 18, 14);
-            _joyToKeyEnabled.Checked += (_, _) => UpdateJoyToKeyControls();
-            _joyToKeyEnabled.Unchecked += (_, _) => UpdateJoyToKeyControls();
-            options.Children.Add(_joyToKeyEnabled);
+            Grid translatorProfileRow = MakeProfileRow(out _translatorProfile, out _refreshTranslatorProfiles);
+            _translatorProfile.DropDownClosed += HandleProfileDropDownClosed;
+            _refreshTranslatorProfiles.Click += (_, _) => RefreshTranslatorProfiles(_translatorProfile.Text);
+            options.Children.Add(translatorProfileRow);
 
-            Grid profileRow = new Grid { Margin = new Thickness(54, 0, 18, 10) };
-            profileRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            profileRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            profileRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            options.Children.Add(profileRow);
-
-            TextBlock profileLabel = new TextBlock
-            {
-                Text = "Profile:",
-                Foreground = PrimaryForeground,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 14, 0)
-            };
-            profileRow.Children.Add(profileLabel);
-
-            _profile = new ComboBox
-            {
-                MinHeight = 40,
-                Background = ControlBackground,
-                Foreground = PrimaryForeground,
-                BorderBrush = ControlBorderBrush,
-                BorderThickness = new Thickness(1),
-                Padding = new Thickness(10, 5, 10, 5),
-                VerticalContentAlignment = VerticalAlignment.Center,
-                Style = MakeProfileComboBoxStyle()
-            };
-            Grid.SetColumn(_profile, 1);
-            profileRow.Children.Add(_profile);
-
-            _refresh = MakeButton("Refresh", 116);
-            _refresh.Margin = new Thickness(12, 0, 0, 0);
-            _refresh.Click += (_, _) => RefreshProfiles(_profile.Text);
-            Grid.SetColumn(_refresh, 2);
-            profileRow.Children.Add(_refresh);
-
-            _profileStatus = new TextBlock
+            _translatorProfileStatus = new TextBlock
             {
                 Foreground = MutedForeground,
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(54, 0, 18, 12)
             };
-            options.Children.Add(_profileStatus);
+            options.Children.Add(_translatorProfileStatus);
+
+            _joyToKeyEnabled = MakeCheckBox("Use JoyToKey with this game", game.JoyToKeyEnabled);
+            _joyToKeyEnabled.Margin = new Thickness(18, 10, 18, 14);
+            _joyToKeyEnabled.Checked += (_, _) => UpdateJoyToKeyControls();
+            _joyToKeyEnabled.Unchecked += (_, _) => UpdateJoyToKeyControls();
+            options.Children.Add(_joyToKeyEnabled);
+
+            Grid joyToKeyProfileRow = MakeProfileRow(out _joyToKeyProfile, out _refreshJoyToKeyProfiles);
+            _joyToKeyProfile.DropDownClosed += HandleProfileDropDownClosed;
+            _refreshJoyToKeyProfiles.Click += (_, _) => RefreshJoyToKeyProfiles(_joyToKeyProfile.Text);
+            options.Children.Add(joyToKeyProfileRow);
+
+            _joyToKeyProfileStatus = new TextBlock
+            {
+                Foreground = MutedForeground,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(54, 0, 18, 12)
+            };
+            options.Children.Add(_joyToKeyProfileStatus);
 
             TextBlock locationHeading = new TextBlock
             {
@@ -172,7 +172,7 @@ namespace JrpgTranslator.LaunchBox
             _browseJoyToKey.Click += BrowseJoyToKeyClicked;
             locationButtons.Children.Add(_browseJoyToKey);
 
-            _browseProfiles = MakeButton("Profiles Folder...", 162);
+            _browseProfiles = MakeButton("JoyToKey Profiles...", 178);
             _browseProfiles.Margin = new Thickness(10, 0, 0, 0);
             _browseProfiles.Click += BrowseProfilesClicked;
             locationButtons.Children.Add(_browseProfiles);
@@ -218,20 +218,24 @@ namespace JrpgTranslator.LaunchBox
             _cancel.Click += (_, _) => { DialogResult = false; };
             buttons.Children.Add(_cancel);
 
-            _focusOrder = new List<Control>
+            _focusRows = new List<Control[]>
             {
-                _translatorEnabled,
-                _joyToKeyEnabled,
-                _profile,
-                _refresh,
-                _browseTranslator,
-                _browseJoyToKey,
-                _browseProfiles,
-                _save,
-                _cancel
+                new Control[] { _translatorEnabled },
+                new Control[] { _translatorProfile, _refreshTranslatorProfiles },
+                new Control[] { _joyToKeyEnabled },
+                new Control[] { _joyToKeyProfile, _refreshJoyToKeyProfiles },
+                new Control[] { _browseTranslator, _browseJoyToKey, _browseProfiles },
+                new Control[] { _save, _cancel }
             };
 
+            _controllerTimer = new DispatcherTimer(DispatcherPriority.Input)
+            {
+                Interval = TimeSpan.FromMilliseconds(20)
+            };
+            _controllerTimer.Tick += HandleControllerTick;
+
             PreviewKeyDown += HandlePreviewKeyDown;
+            PreviewKeyUp += HandlePreviewKeyUp;
             Loaded += (_, _) =>
             {
                 // LaunchBox can keep its busy cursor active while a synchronous
@@ -240,23 +244,45 @@ namespace JrpgTranslator.LaunchBox
                 Cursor = Cursors.Arrow;
                 ForceCursor = true;
                 _translatorEnabled.Focus();
+                _controllerTimer.Start();
             };
+            Activated += (_, _) => ResetControllerNavigation();
+            Deactivated += (_, _) => ResetControllerNavigation();
+            Closed += (_, _) => _controllerTimer.Stop();
 
-            RefreshProfiles(game.JoyToKeyProfile);
+            RefreshTranslatorProfiles(game.TranslatorProfile);
+            RefreshJoyToKeyProfiles(game.JoyToKeyProfile);
+            UpdateTranslatorControls();
             UpdateJoyToKeyControls();
         }
 
-        private void RefreshProfiles(string preferredProfile)
+        private void RefreshTranslatorProfiles(string preferredProfile)
         {
-            IReadOnlyList<string> profiles = JoyToKeyProfileDiscovery.GetProfiles(
-                _configuration.JoyToKeyProfilesDirectory);
-            _profile.ItemsSource = profiles;
+            IReadOnlyList<string> profiles = TranslatorProfileDiscovery.GetProfiles(_configuration);
+            _translatorProfile.ItemsSource = profiles;
 
             string? selected = profiles.FirstOrDefault(
                 value => string.Equals(value, preferredProfile, StringComparison.OrdinalIgnoreCase));
-            _profile.SelectedItem = selected ?? profiles.FirstOrDefault();
+            _translatorProfile.SelectedItem = selected;
 
-            _profileStatus.Text = profiles.Count == 0
+            string directory = TranslatorProfileDiscovery.GetProfilesDirectory(_configuration);
+            _translatorProfileStatus.Text = profiles.Count == 0
+                ? "No Profiles were found in " + DisplayPath(directory)
+                : profiles.Count + (profiles.Count == 1 ? " Profile" : " Profiles")
+                    + " found in " + DisplayPath(directory);
+        }
+
+        private void RefreshJoyToKeyProfiles(string preferredProfile)
+        {
+            IReadOnlyList<string> profiles = JoyToKeyProfileDiscovery.GetProfiles(
+                _configuration.JoyToKeyProfilesDirectory);
+            _joyToKeyProfile.ItemsSource = profiles;
+
+            string? selected = profiles.FirstOrDefault(
+                value => string.Equals(value, preferredProfile, StringComparison.OrdinalIgnoreCase));
+            _joyToKeyProfile.SelectedItem = selected ?? profiles.FirstOrDefault();
+
+            _joyToKeyProfileStatus.Text = profiles.Count == 0
                 ? "No .cfg profiles were found in " + DisplayPath(_configuration.JoyToKeyProfilesDirectory)
                 : profiles.Count + (profiles.Count == 1 ? " profile" : " profiles")
                     + " found in " + DisplayPath(_configuration.JoyToKeyProfilesDirectory);
@@ -278,30 +304,53 @@ namespace JrpgTranslator.LaunchBox
         private void UpdateJoyToKeyControls()
         {
             bool enabled = _joyToKeyEnabled.IsChecked == true;
-            _profile.IsEnabled = enabled;
-            _refresh.IsEnabled = enabled;
+            _joyToKeyProfile.IsEnabled = enabled;
+            _refreshJoyToKeyProfiles.IsEnabled = enabled;
+        }
+
+        private void UpdateTranslatorControls()
+        {
+            bool enabled = _translatorEnabled.IsChecked == true;
+            _translatorProfile.IsEnabled = enabled;
+            _refreshTranslatorProfiles.IsEnabled = enabled;
+
+            if (enabled && _translatorProfile.SelectedItem == null && _translatorProfile.Items.Count > 0)
+            {
+                _translatorProfile.SelectedIndex = 0;
+            }
         }
 
         private void BrowseTranslatorClicked(object sender, RoutedEventArgs e)
         {
             string current = PluginPaths.ResolveTranslatorExecutable(_configuration);
-            string? selected = BrowseForExecutable(
-                "Select JRPG Translator.exe",
-                current);
+            string? selected = _nativeControllerNavigationEnabled
+                ? BigBoxPathBrowserWindow.BrowseExecutable(
+                    this,
+                    "Select JRPG Translator.exe",
+                    current)
+                : BrowseForExecutable(
+                    "Select JRPG Translator.exe",
+                    current);
             if (string.IsNullOrWhiteSpace(selected))
             {
                 return;
             }
 
             _configuration.TranslatorExecutable = MakeLaunchBoxRelative(selected);
+            RefreshTranslatorProfiles(_translatorProfile.Text);
             UpdatePathStatus();
         }
 
         private void BrowseJoyToKeyClicked(object sender, RoutedEventArgs e)
         {
-            string? selected = BrowseForExecutable(
-                "Select JoyToKey.exe",
-                _configuration.JoyToKeyExecutable);
+            string? selected = _nativeControllerNavigationEnabled
+                ? BigBoxPathBrowserWindow.BrowseExecutable(
+                    this,
+                    "Select JoyToKey.exe",
+                    _configuration.JoyToKeyExecutable)
+                : BrowseForExecutable(
+                    "Select JoyToKey.exe",
+                    _configuration.JoyToKeyExecutable);
             if (string.IsNullOrWhiteSpace(selected))
             {
                 return;
@@ -313,6 +362,23 @@ namespace JrpgTranslator.LaunchBox
 
         private void BrowseProfilesClicked(object sender, RoutedEventArgs e)
         {
+            if (_nativeControllerNavigationEnabled)
+            {
+                string? selected = BigBoxPathBrowserWindow.BrowseFolder(
+                    this,
+                    "Select the JoyToKey profiles folder",
+                    _configuration.JoyToKeyProfilesDirectory);
+                if (string.IsNullOrWhiteSpace(selected))
+                {
+                    return;
+                }
+
+                _configuration.JoyToKeyProfilesDirectory = selected;
+                RefreshJoyToKeyProfiles(_joyToKeyProfile.Text);
+                UpdatePathStatus();
+                return;
+            }
+
             OpenFolderDialog dialog = new OpenFolderDialog
             {
                 Title = "Select the JoyToKey profiles folder",
@@ -325,17 +391,22 @@ namespace JrpgTranslator.LaunchBox
             }
 
             Mouse.OverrideCursor = null;
-            if (dialog.ShowDialog(this) != true || string.IsNullOrWhiteSpace(dialog.FolderName))
+            bool? accepted;
+            using (new XInputDialogCancelScope(this))
+            {
+                accepted = dialog.ShowDialog(this);
+            }
+            if (accepted != true || string.IsNullOrWhiteSpace(dialog.FolderName))
             {
                 return;
             }
 
             _configuration.JoyToKeyProfilesDirectory = dialog.FolderName;
-            RefreshProfiles(_profile.Text);
+            RefreshJoyToKeyProfiles(_joyToKeyProfile.Text);
             UpdatePathStatus();
         }
 
-        private static string? BrowseForExecutable(string title, string currentPath)
+        private string? BrowseForExecutable(string title, string currentPath)
         {
             OpenFileDialog dialog = new OpenFileDialog
             {
@@ -360,7 +431,12 @@ namespace JrpgTranslator.LaunchBox
             }
 
             Mouse.OverrideCursor = null;
-            return dialog.ShowDialog() == true ? dialog.FileName : null;
+            bool? accepted;
+            using (new XInputDialogCancelScope(this))
+            {
+                accepted = dialog.ShowDialog(this);
+            }
+            return accepted == true ? dialog.FileName : null;
         }
 
         private static string MakeLaunchBoxRelative(string selectedPath)
@@ -384,7 +460,21 @@ namespace JrpgTranslator.LaunchBox
 
         private void SaveClicked(object sender, RoutedEventArgs e)
         {
-            if (_joyToKeyEnabled.IsChecked == true && _profile.SelectedItem == null)
+            if (_translatorEnabled.IsChecked == true
+                && _translatorProfile.Items.Count > 0
+                && _translatorProfile.SelectedItem == null)
+            {
+                MessageBox.Show(
+                    this,
+                    "Select a Profile, or turn off JRPG Translator for this game.",
+                    "JRPG Translator Setup",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                _translatorProfile.Focus();
+                return;
+            }
+
+            if (_joyToKeyEnabled.IsChecked == true && _joyToKeyProfile.SelectedItem == null)
             {
                 MessageBox.Show(
                     this,
@@ -392,23 +482,33 @@ namespace JrpgTranslator.LaunchBox
                     "JRPG Translator Setup",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
-                _profile.Focus();
+                _joyToKeyProfile.Focus();
                 return;
             }
 
             Result.TranslatorEnabled = _translatorEnabled.IsChecked == true;
+            Result.TranslatorProfile = _translatorProfile.SelectedItem as string ?? string.Empty;
             Result.JoyToKeyEnabled = _joyToKeyEnabled.IsChecked == true;
-            Result.JoyToKeyProfile = _profile.SelectedItem as string ?? string.Empty;
+            Result.JoyToKeyProfile = _joyToKeyProfile.SelectedItem as string ?? string.Empty;
             DialogResult = true;
         }
 
         private void HandlePreviewKeyDown(object sender, KeyEventArgs e)
         {
-            if (_profile.IsKeyboardFocusWithin && _profile.IsDropDownOpen)
+            ControllerNavigationCommand? mirroredCommand = ControllerCommandForKey(e.Key);
+            if (mirroredCommand.HasValue
+                && IsMirroredControllerKey(mirroredCommand.Value))
+            {
+                e.Handled = true;
+                return;
+            }
+
+            ComboBox? openProfile = GetOpenProfile();
+            if (openProfile != null)
             {
                 if (e.Key == Key.Enter || e.Key == Key.Escape)
                 {
-                    _profile.IsDropDownOpen = false;
+                    CloseProfileDropDown(openProfile);
                     e.Handled = true;
                 }
                 return;
@@ -416,36 +516,15 @@ namespace JrpgTranslator.LaunchBox
 
             if (e.Key == Key.Up || e.Key == Key.Down)
             {
-                MoveFocus(e.Key == Key.Down ? 1 : -1);
+                MoveFocusVertical(e.Key == Key.Down ? 1 : -1);
                 e.Handled = true;
                 return;
             }
 
             if (e.Key == Key.Left || e.Key == Key.Right)
             {
-                if (_save.IsKeyboardFocused || _cancel.IsKeyboardFocused)
-                {
-                    (_save.IsKeyboardFocused ? _cancel : _save).Focus();
-                    e.Handled = true;
-                }
-                else if (_browseTranslator.IsKeyboardFocused
-                    || _browseJoyToKey.IsKeyboardFocused
-                    || _browseProfiles.IsKeyboardFocused)
-                {
-                    Control[] locationControls =
-                    {
-                        _browseTranslator,
-                        _browseJoyToKey,
-                        _browseProfiles
-                    };
-                    int current = Array.FindIndex(
-                        locationControls,
-                        control => control.IsKeyboardFocused);
-                    int direction = e.Key == Key.Right ? 1 : -1;
-                    int next = (current + direction + locationControls.Length) % locationControls.Length;
-                    locationControls[next].Focus();
-                    e.Handled = true;
-                }
+                MoveFocusHorizontal(e.Key == Key.Right ? 1 : -1);
+                e.Handled = true;
                 return;
             }
 
@@ -454,71 +533,456 @@ namespace JrpgTranslator.LaunchBox
                 return;
             }
 
-            if (_translatorEnabled.IsKeyboardFocused)
+            e.Handled = ActivateFocusedControl();
+        }
+
+        private void HandlePreviewKeyUp(object sender, KeyEventArgs e)
+        {
+            ControllerNavigationCommand? mirroredCommand = ControllerCommandForKey(e.Key);
+            if (mirroredCommand.HasValue
+                && IsMirroredControllerKey(mirroredCommand.Value))
             {
-                _translatorEnabled.IsChecked = _translatorEnabled.IsChecked != true;
-                e.Handled = true;
-            }
-            else if (_joyToKeyEnabled.IsKeyboardFocused)
-            {
-                _joyToKeyEnabled.IsChecked = _joyToKeyEnabled.IsChecked != true;
-                e.Handled = true;
-            }
-            else if (_profile.IsKeyboardFocusWithin)
-            {
-                _profile.IsDropDownOpen = true;
-                e.Handled = true;
-            }
-            else if (_refresh.IsKeyboardFocused)
-            {
-                _refresh.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                e.Handled = true;
-            }
-            else if (_browseTranslator.IsKeyboardFocused)
-            {
-                _browseTranslator.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                e.Handled = true;
-            }
-            else if (_browseJoyToKey.IsKeyboardFocused)
-            {
-                _browseJoyToKey.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                e.Handled = true;
-            }
-            else if (_browseProfiles.IsKeyboardFocused)
-            {
-                _browseProfiles.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                e.Handled = true;
-            }
-            else if (_save.IsKeyboardFocused)
-            {
-                _save.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                e.Handled = true;
-            }
-            else if (_cancel.IsKeyboardFocused)
-            {
-                _cancel.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                // LaunchBox/Big Box or a controller mapper can emit a matching
+                // key-up after the native XInput action. Some WPF controls act
+                // on key release, so consume both halves of the mirrored press.
                 e.Handled = true;
             }
         }
 
-        private void MoveFocus(int direction)
+        private static ControllerNavigationCommand? ControllerCommandForKey(Key key)
         {
-            int current = _focusOrder.FindIndex(control => control.IsKeyboardFocusWithin);
-            if (current < 0)
+            return key switch
             {
-                current = 0;
+                Key.Up => ControllerNavigationCommand.Up,
+                Key.Down => ControllerNavigationCommand.Down,
+                Key.Left => ControllerNavigationCommand.Left,
+                Key.Right => ControllerNavigationCommand.Right,
+                Key.Enter => ControllerNavigationCommand.Activate,
+                Key.Space => ControllerNavigationCommand.Activate,
+                Key.Escape => ControllerNavigationCommand.Cancel,
+                _ => null
+            };
+        }
+
+        private bool IsMirroredControllerKey(ControllerNavigationCommand command)
+        {
+            const long releaseGraceMilliseconds = 180;
+            const long nativeActionGraceMilliseconds = 650;
+            long now = Environment.TickCount64;
+            if (_lastNativeNavigationAt.TryGetValue(command, out long nativeActionAt)
+                && now - nativeActionAt <= nativeActionGraceMilliseconds)
+            {
+                return true;
             }
 
-            for (int offset = 1; offset <= _focusOrder.Count; offset++)
+            if (XInputController.TryReadNavigationState(out ControllerNavigationState state)
+                && state.IsPressed(command))
             {
-                int next = (current + (offset * direction) + _focusOrder.Count) % _focusOrder.Count;
-                Control candidate = _focusOrder[next];
-                if (candidate.IsEnabled && candidate.Visibility == Visibility.Visible)
+                _keyboardMirrorGraceUntil[command] = now + releaseGraceMilliseconds;
+                return true;
+            }
+
+            return _keyboardMirrorGraceUntil.TryGetValue(command, out long graceUntil)
+                && now <= graceUntil;
+        }
+
+        private void HandleControllerTick(object? sender, EventArgs e)
+        {
+            if (!IsActive || !XInputController.TryReadNavigationState(out ControllerNavigationState state))
+            {
+                ResetControllerNavigation();
+                return;
+            }
+
+            if (!_nativeControllerNavigationEnabled)
+            {
+                // LaunchBox is mouse-oriented. Observe XInput only so controller
+                // buttons mirrored as keyboard input do not activate this dialog.
+                RememberControllerMirrorState(state);
+                _controllerPreviousState = state;
+                _controllerBaselineReady = true;
+                _heldControllerDirection = null;
+                _nextControllerRepeatAt = 0;
+                return;
+            }
+
+            if (!_controllerBaselineReady)
+            {
+                _controllerPreviousState = state;
+                _controllerBaselineReady = true;
+                return;
+            }
+
+            ControllerNavigationCommand[] directions =
+            {
+                ControllerNavigationCommand.Up,
+                ControllerNavigationCommand.Down,
+                ControllerNavigationCommand.Left,
+                ControllerNavigationCommand.Right
+            };
+            ControllerNavigationCommand? newDirection = directions.FirstOrDefault(
+                direction => state.IsPressed(direction) && !_controllerPreviousState.IsPressed(direction));
+            bool hasNewDirection = newDirection.HasValue
+                && state.IsPressed(newDirection.Value)
+                && !_controllerPreviousState.IsPressed(newDirection.Value);
+            long now = Environment.TickCount64;
+
+            if (hasNewDirection)
+            {
+                DispatchControllerNavigation(newDirection!.Value);
+                _heldControllerDirection = newDirection.Value;
+                _nextControllerRepeatAt = now + 340;
+            }
+            else if (_heldControllerDirection.HasValue
+                && state.IsPressed(_heldControllerDirection.Value))
+            {
+                if (now >= _nextControllerRepeatAt)
                 {
+                    DispatchControllerNavigation(_heldControllerDirection.Value);
+                    _nextControllerRepeatAt = now + 90;
+                }
+            }
+            else
+            {
+                _heldControllerDirection = null;
+                _nextControllerRepeatAt = 0;
+            }
+
+            if (state.Activate
+                && !_controllerPreviousState.Activate)
+            {
+                DispatchControllerNavigation(ControllerNavigationCommand.Activate);
+            }
+            if (state.Cancel && !_controllerPreviousState.Cancel)
+            {
+                DispatchControllerNavigation(ControllerNavigationCommand.Cancel);
+            }
+
+            _controllerPreviousState = state;
+        }
+
+        private void RememberControllerMirrorState(ControllerNavigationState state)
+        {
+            long graceUntil = Environment.TickCount64 + 300;
+            foreach (ControllerNavigationCommand command in Enum.GetValues<ControllerNavigationCommand>())
+            {
+                if (state.IsPressed(command))
+                {
+                    _keyboardMirrorGraceUntil[command] = graceUntil;
+                }
+            }
+        }
+
+        private static bool IsBigBoxHost()
+        {
+            try
+            {
+                return string.Equals(
+                    Process.GetCurrentProcess().ProcessName,
+                    "BigBox",
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void ResetControllerNavigation()
+        {
+            _controllerPreviousState = default;
+            _heldControllerDirection = null;
+            _nextControllerRepeatAt = 0;
+            _controllerBaselineReady = false;
+        }
+
+        private ComboBox? GetOpenProfile()
+        {
+            return new[] { _translatorProfile, _joyToKeyProfile }
+                .FirstOrDefault(profile => profile.IsDropDownOpen);
+        }
+
+        private void OpenProfileDropDown(ComboBox profile)
+        {
+            // A ComboBox popup lives in a separate WPF focus tree. LaunchBox
+            // can also translate the same controller A press into a host-level
+            // activation. Keep the dropdown open across that duplicate event.
+            _guardedControllerProfile = profile;
+            _guardedControllerProfileUntil = Environment.TickCount64 + 500;
+            profile.IsDropDownOpen = true;
+        }
+
+        private void CloseProfileDropDown(ComboBox profile)
+        {
+            if (ReferenceEquals(_guardedControllerProfile, profile))
+            {
+                _guardedControllerProfile = null;
+                _guardedControllerProfileUntil = 0;
+            }
+            profile.IsDropDownOpen = false;
+        }
+
+        private void HandleProfileDropDownClosed(object? sender, EventArgs e)
+        {
+            if (sender is not ComboBox profile
+                || !ReferenceEquals(profile, _guardedControllerProfile))
+            {
+                return;
+            }
+
+            if (Environment.TickCount64 > _guardedControllerProfileUntil)
+            {
+                _guardedControllerProfile = null;
+                _guardedControllerProfileUntil = 0;
+                return;
+            }
+
+            // Reopen after the current routed input finishes. This prevents a
+            // duplicate activation from producing a visible open/close flicker.
+            Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
+            {
+                if (ReferenceEquals(profile, _guardedControllerProfile)
+                    && Environment.TickCount64 <= _guardedControllerProfileUntil)
+                {
+                    profile.IsDropDownOpen = true;
+                }
+            }));
+        }
+
+        private void DispatchControllerNavigation(ControllerNavigationCommand command)
+        {
+            _lastNativeNavigationAt[command] = Environment.TickCount64;
+
+            ComboBox? openProfile = GetOpenProfile();
+            if (openProfile != null)
+            {
+                switch (command)
+                {
+                    case ControllerNavigationCommand.Up:
+                        MoveOpenProfileSelection(openProfile, -1);
+                        break;
+                    case ControllerNavigationCommand.Down:
+                        MoveOpenProfileSelection(openProfile, 1);
+                        break;
+                    case ControllerNavigationCommand.Activate:
+                    case ControllerNavigationCommand.Cancel:
+                        CloseProfileDropDown(openProfile);
+                        break;
+                }
+                return;
+            }
+
+            switch (command)
+            {
+                case ControllerNavigationCommand.Up:
+                    MoveFocusVertical(-1);
+                    break;
+                case ControllerNavigationCommand.Down:
+                    MoveFocusVertical(1);
+                    break;
+                case ControllerNavigationCommand.Left:
+                    MoveFocusHorizontal(-1);
+                    break;
+                case ControllerNavigationCommand.Right:
+                    MoveFocusHorizontal(1);
+                    break;
+                case ControllerNavigationCommand.Activate:
+                    ActivateFocusedControl();
+                    break;
+                case ControllerNavigationCommand.Cancel:
+                    _cancel.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    break;
+            }
+        }
+
+        private static void MoveOpenProfileSelection(ComboBox profile, int direction)
+        {
+            if (profile.Items.Count == 0)
+            {
+                return;
+            }
+
+            int current = profile.SelectedIndex < 0 ? 0 : profile.SelectedIndex;
+            profile.SelectedIndex = Math.Clamp(current + direction, 0, profile.Items.Count - 1);
+        }
+
+        private bool ActivateFocusedControl()
+        {
+            if (_translatorEnabled.IsKeyboardFocused)
+            {
+                _translatorEnabled.IsChecked = _translatorEnabled.IsChecked != true;
+                return true;
+            }
+            else if (_translatorProfile.IsKeyboardFocusWithin)
+            {
+                OpenProfileDropDown(_translatorProfile);
+                return true;
+            }
+            else if (_refreshTranslatorProfiles.IsKeyboardFocused)
+            {
+                _refreshTranslatorProfiles.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                return true;
+            }
+            else if (_joyToKeyEnabled.IsKeyboardFocused)
+            {
+                _joyToKeyEnabled.IsChecked = _joyToKeyEnabled.IsChecked != true;
+                return true;
+            }
+            else if (_joyToKeyProfile.IsKeyboardFocusWithin)
+            {
+                OpenProfileDropDown(_joyToKeyProfile);
+                return true;
+            }
+            else if (_refreshJoyToKeyProfiles.IsKeyboardFocused)
+            {
+                _refreshJoyToKeyProfiles.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                return true;
+            }
+            else if (_browseTranslator.IsKeyboardFocused)
+            {
+                _browseTranslator.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                return true;
+            }
+            else if (_browseJoyToKey.IsKeyboardFocused)
+            {
+                _browseJoyToKey.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                return true;
+            }
+            else if (_browseProfiles.IsKeyboardFocused)
+            {
+                _browseProfiles.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                return true;
+            }
+            else if (_save.IsKeyboardFocused)
+            {
+                _save.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                return true;
+            }
+            else if (_cancel.IsKeyboardFocused)
+            {
+                _cancel.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                return true;
+            }
+            return false;
+        }
+
+        private void MoveFocusVertical(int direction)
+        {
+            Control? current = _focusRows
+                .SelectMany(row => row)
+                .FirstOrDefault(control => control.IsKeyboardFocusWithin);
+            if (current == null)
+            {
+                FocusFirstAvailableControl();
+                return;
+            }
+
+            int currentRow = _focusRows.FindIndex(row => row.Contains(current));
+            double currentCenter = GetHorizontalCenter(current);
+            for (int rowIndex = currentRow + direction;
+                rowIndex >= 0 && rowIndex < _focusRows.Count;
+                rowIndex += direction)
+            {
+                Control[] candidates = _focusRows[rowIndex]
+                    .Where(IsAvailableForNavigation)
+                    .ToArray();
+                if (candidates.Length > 0)
+                {
+                    Control candidate = candidates
+                        .OrderBy(control => Math.Abs(GetHorizontalCenter(control) - currentCenter))
+                        .First();
                     candidate.Focus();
                     return;
                 }
             }
+        }
+
+        private void MoveFocusHorizontal(int direction)
+        {
+            Control[]? currentRow = _focusRows.FirstOrDefault(
+                row => row.Any(control => control.IsKeyboardFocusWithin));
+            if (currentRow == null)
+            {
+                FocusFirstAvailableControl();
+                return;
+            }
+
+            Control[] candidates = currentRow
+                .Where(IsAvailableForNavigation)
+                .ToArray();
+            int current = Array.FindIndex(
+                candidates,
+                control => control.IsKeyboardFocusWithin);
+            int next = current + direction;
+            if (current >= 0 && next >= 0 && next < candidates.Length)
+            {
+                candidates[next].Focus();
+            }
+        }
+
+        private void FocusFirstAvailableControl()
+        {
+            Control? first = _focusRows
+                .SelectMany(row => row)
+                .FirstOrDefault(IsAvailableForNavigation);
+            first?.Focus();
+        }
+
+        private static bool IsAvailableForNavigation(Control control)
+        {
+            return control.IsEnabled
+                && control.Visibility == Visibility.Visible
+                && control.Focusable;
+        }
+
+        private double GetHorizontalCenter(Control control)
+        {
+            try
+            {
+                Point origin = control.TranslatePoint(new Point(0, 0), this);
+                return origin.X + (control.ActualWidth / 2.0);
+            }
+            catch (InvalidOperationException)
+            {
+                return 0;
+            }
+        }
+
+        private static Grid MakeProfileRow(out ComboBox profile, out Button refresh)
+        {
+            Grid row = new Grid { Margin = new Thickness(54, 0, 18, 10) };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            TextBlock label = new TextBlock
+            {
+                Text = "Profile:",
+                Foreground = PrimaryForeground,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 14, 0)
+            };
+            row.Children.Add(label);
+
+            profile = new ComboBox
+            {
+                MinHeight = 40,
+                Background = ControlBackground,
+                Foreground = PrimaryForeground,
+                BorderBrush = ControlBorderBrush,
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(10, 5, 10, 5),
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Style = MakeProfileComboBoxStyle()
+            };
+            Grid.SetColumn(profile, 1);
+            row.Children.Add(profile);
+
+            refresh = MakeButton("Refresh", 116);
+            refresh.Margin = new Thickness(12, 0, 0, 0);
+            Grid.SetColumn(refresh, 2);
+            row.Children.Add(refresh);
+            return row;
         }
 
         private static CheckBox MakeCheckBox(string text, bool isChecked)
@@ -530,7 +994,7 @@ namespace JrpgTranslator.LaunchBox
                 Foreground = PrimaryForeground,
                 FontSize = 19,
                 VerticalContentAlignment = VerticalAlignment.Center,
-                FocusVisualStyle = MakeFocusStyle()
+                Style = MakeCheckBoxStyle()
             };
         }
 
@@ -547,7 +1011,7 @@ namespace JrpgTranslator.LaunchBox
                 BorderBrush = ControlBorderBrush,
                 BorderThickness = new Thickness(1),
                 FontSize = 18,
-                FocusVisualStyle = MakeFocusStyle()
+                Style = MakeButtonStyle()
             };
             return button;
         }
@@ -674,17 +1138,119 @@ namespace JrpgTranslator.LaunchBox
             return (Style)XamlReader.Parse(xaml);
         }
 
-        private static Style MakeFocusStyle()
+        private static Style MakeButtonStyle()
         {
-            Style style = new Style(typeof(Control));
-            ControlTemplate template = new ControlTemplate(typeof(Control));
-            FrameworkElementFactory border = new FrameworkElementFactory(typeof(Border));
-            border.SetValue(Border.BorderBrushProperty, Accent);
-            border.SetValue(Border.BorderThicknessProperty, new Thickness(2));
-            border.SetValue(Border.MarginProperty, new Thickness(-3));
-            template.VisualTree = border;
-            style.Setters.Add(new Setter(Control.TemplateProperty, template));
-            return style;
+            const string xaml = @"
+<Style xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation""
+       xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml""
+       TargetType=""{x:Type Button}"">
+  <Setter Property=""Background"" Value=""#333438"" />
+  <Setter Property=""Foreground"" Value=""#F3F4F6"" />
+  <Setter Property=""BorderBrush"" Value=""#686B72"" />
+  <Setter Property=""BorderThickness"" Value=""1"" />
+  <Setter Property=""Template"">
+    <Setter.Value>
+      <ControlTemplate TargetType=""{x:Type Button}"">
+        <Border x:Name=""ButtonBorder""
+                Background=""{TemplateBinding Background}""
+                BorderBrush=""{TemplateBinding BorderBrush}""
+                BorderThickness=""{TemplateBinding BorderThickness}""
+                Padding=""{TemplateBinding Padding}""
+                SnapsToDevicePixels=""True"">
+          <ContentPresenter HorizontalAlignment=""Center""
+                            VerticalAlignment=""Center""
+                            RecognizesAccessKey=""True"" />
+        </Border>
+        <ControlTemplate.Triggers>
+          <Trigger Property=""IsMouseOver"" Value=""True"">
+            <Setter TargetName=""ButtonBorder"" Property=""Background"" Value=""#3D3F44"" />
+            <Setter TargetName=""ButtonBorder"" Property=""BorderBrush"" Value=""#8A8E96"" />
+          </Trigger>
+          <Trigger Property=""IsKeyboardFocused"" Value=""True"">
+            <Setter TargetName=""ButtonBorder"" Property=""Background"" Value=""#234A68"" />
+            <Setter TargetName=""ButtonBorder"" Property=""BorderBrush"" Value=""#4FB3FF"" />
+            <Setter TargetName=""ButtonBorder"" Property=""BorderThickness"" Value=""2"" />
+          </Trigger>
+          <Trigger Property=""IsPressed"" Value=""True"">
+            <Setter TargetName=""ButtonBorder"" Property=""Background"" Value=""#126CB2"" />
+          </Trigger>
+          <Trigger Property=""IsEnabled"" Value=""False"">
+            <Setter TargetName=""ButtonBorder"" Property=""Opacity"" Value=""0.48"" />
+          </Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate>
+    </Setter.Value>
+  </Setter>
+</Style>";
+
+            return (Style)XamlReader.Parse(xaml);
+        }
+
+        private static Style MakeCheckBoxStyle()
+        {
+            const string xaml = @"
+<Style xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation""
+       xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml""
+       TargetType=""{x:Type CheckBox}"">
+  <Setter Property=""Foreground"" Value=""#F3F4F6"" />
+  <Setter Property=""Template"">
+    <Setter.Value>
+      <ControlTemplate TargetType=""{x:Type CheckBox}"">
+        <Border x:Name=""FocusBorder""
+                Background=""Transparent""
+                BorderBrush=""Transparent""
+                BorderThickness=""2""
+                Padding=""6,4""
+                SnapsToDevicePixels=""True"">
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width=""Auto"" />
+              <ColumnDefinition Width=""*"" />
+            </Grid.ColumnDefinitions>
+            <Border x:Name=""CheckBoxBorder""
+                    Width=""18""
+                    Height=""18""
+                    Background=""#333438""
+                    BorderBrush=""#858991""
+                    BorderThickness=""1""
+                    VerticalAlignment=""Center"">
+              <Path x:Name=""CheckMark""
+                    Data=""M 3 8 L 7 12 L 15 3""
+                    Stroke=""#FFFFFF""
+                    StrokeThickness=""2""
+                    StrokeStartLineCap=""Round""
+                    StrokeEndLineCap=""Round""
+                    Visibility=""Collapsed"" />
+            </Border>
+            <ContentPresenter Grid.Column=""1""
+                              Margin=""10,0,0,0""
+                              VerticalAlignment=""Center""
+                              RecognizesAccessKey=""True"" />
+          </Grid>
+        </Border>
+        <ControlTemplate.Triggers>
+          <Trigger Property=""IsChecked"" Value=""True"">
+            <Setter TargetName=""CheckBoxBorder"" Property=""Background"" Value=""#1683D8"" />
+            <Setter TargetName=""CheckBoxBorder"" Property=""BorderBrush"" Value=""#4FB3FF"" />
+            <Setter TargetName=""CheckMark"" Property=""Visibility"" Value=""Visible"" />
+          </Trigger>
+          <Trigger Property=""IsMouseOver"" Value=""True"">
+            <Setter TargetName=""FocusBorder"" Property=""Background"" Value=""#303238"" />
+          </Trigger>
+          <Trigger Property=""IsKeyboardFocused"" Value=""True"">
+            <Setter TargetName=""FocusBorder"" Property=""Background"" Value=""#233748"" />
+            <Setter TargetName=""FocusBorder"" Property=""BorderBrush"" Value=""#4FB3FF"" />
+          </Trigger>
+          <Trigger Property=""IsEnabled"" Value=""False"">
+            <Setter TargetName=""FocusBorder"" Property=""Opacity"" Value=""0.48"" />
+          </Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate>
+    </Setter.Value>
+  </Setter>
+</Style>";
+
+            return (Style)XamlReader.Parse(xaml);
         }
 
         private static SolidColorBrush BrushFrom(string value)

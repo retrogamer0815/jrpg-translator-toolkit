@@ -7,13 +7,18 @@ Current behavior:
 
 - Adds `JRPG Translator Setup...` to a game's LaunchBox context menu and Big Box details menu.
 - Stores whether JRPG Translator should be used for that game.
+- Detects the unified Profiles saved by JRPG Translator and stores an optional
+  Profile selection for each game.
 - Detects JoyToKey `.cfg` profiles and stores an optional per-game profile.
 - Lets users browse for the JRPG Translator executable, JoyToKey executable,
   and JoyToKey profiles folder from the per-game setup window.
 - Stores LaunchBox-local paths relatively so a portable LaunchBox installation
   can be moved without editing the plugin configuration.
 - Supports arrow, Enter, Space, and Escape navigation.
-- Starts JRPG Translator in background mode before configured games.
+- Starts JRPG Translator in background mode and applies the selected Profile
+  before its startup overlays open.
+- Applies the selected Profile to an already-running JRPG Translator without
+  restarting it, and leaves that pre-existing instance open after the game.
 - Starts JoyToKey or switches an existing instance to the configured profile.
 - Closes only program instances started by the plugin after the game exits.
 - Restores the previous JoyToKey profile when JoyToKey was already running.

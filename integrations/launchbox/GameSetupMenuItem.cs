@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.IO;
 using System.Windows;
 using Unbroken.LaunchBox.Plugins;
 using Unbroken.LaunchBox.Plugins.Data;
@@ -8,11 +9,45 @@ namespace JrpgTranslator.LaunchBox
 {
     public sealed class GameSetupMenuItem : IGameMenuItemPlugin
     {
+        private static readonly object MenuIconLock = new object();
+        private static Stream? _menuIconStream;
+        private static Image? _menuIcon;
+
         public bool SupportsMultipleGames { get { return false; } }
         public string Caption { get { return "JRPG Translator Setup..."; } }
-        public Image IconImage { get { return null!; } }
+        public Image IconImage { get { return LoadMenuIcon(); } }
         public bool ShowInLaunchBox { get { return true; } }
         public bool ShowInBigBox { get { return true; } }
+
+        private static Image LoadMenuIcon()
+        {
+            lock (MenuIconLock)
+            {
+                if (_menuIcon != null)
+                {
+                    return _menuIcon;
+                }
+
+                try
+                {
+                    _menuIconStream = typeof(GameSetupMenuItem).Assembly.GetManifestResourceStream(
+                        "JrpgTranslator.LaunchBox.Assets.menu-icon.png");
+                    if (_menuIconStream == null)
+                    {
+                        return null!;
+                    }
+
+                    _menuIcon = Image.FromStream(_menuIconStream);
+                    return _menuIcon;
+                }
+                catch
+                {
+                    _menuIconStream?.Dispose();
+                    _menuIconStream = null;
+                    return null!;
+                }
+            }
+        }
 
         public bool GetIsValidForGame(IGame selectedGame)
         {

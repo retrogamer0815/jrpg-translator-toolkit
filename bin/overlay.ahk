@@ -581,13 +581,18 @@ DbgMonitors() {
     return Trim(info)
 }
 
-EnsureBoundsOnScreen(bounds) {
+EnsureBoundsOnScreen(bounds, dpi := 96) {
     local isVisible := false
     local visibleMargin := 64
+    ; Saved overlay X/Y are physical screen coordinates, while W/H are the
+    ; client dimensions accepted by Gui.Show (DIPs). Convert only for the
+    ; monitor-intersection test; keep the stored values unchanged.
+    local physicalW := Max(Round(bounds["w"] * Max(dpi, 96) / 96), visibleMargin)
+    local physicalH := Max(Round(bounds["h"] * Max(dpi, 96) / 96), visibleMargin)
     Loop MonitorGetCount() {
         MonitorGetWorkArea(A_Index, &monL, &monT, &monR, &monB)
-        if (bounds["x"] < monR - visibleMargin && bounds["x"] + bounds["w"] > monL + visibleMargin
-         && bounds["y"] < monB - visibleMargin && bounds["y"] + bounds["h"] > monT + visibleMargin) {
+        if (bounds["x"] < monR - visibleMargin && bounds["x"] + physicalW > monL + visibleMargin
+         && bounds["y"] < monB - visibleMargin && bounds["y"] + physicalH > monT + visibleMargin) {
             isVisible := true
             break
         }
@@ -791,12 +796,12 @@ global Cap_MaxKB   := Integer(IniRead(ControlIni, "capture", "maxKB", 1400))    
 ; Parsed rect cache
 global Cap_Rect := Map("x", 0, "y", 0, "w", 0, "h", 0)
 if (Cap_RectStr != "") {
-    parts := StrSplit(Cap_RectStr, ",")
-    if (parts.Length = 4) {
-        Cap_Rect["x"] := Integer(parts[1])
-        Cap_Rect["y"] := Integer(parts[2])
-        Cap_Rect["w"] := Integer(parts[3])
-        Cap_Rect["h"] := Integer(parts[4])
+    initialRectParts := StrSplit(Cap_RectStr, ",")
+    if (initialRectParts.Length = 4) {
+        Cap_Rect["x"] := Integer(initialRectParts[1])
+        Cap_Rect["y"] := Integer(initialRectParts[2])
+        Cap_Rect["w"] := Integer(initialRectParts[3])
+        Cap_Rect["h"] := Integer(initialRectParts[4])
     }
 }
 
@@ -805,6 +810,573 @@ global __GDI_Ready := false
 global __Sel_Active := false
 global __Sel_Gui := 0
 global __Sel_Kind := ""        ; "region" | "window"
+global __CapPickState := Map("active", false)
+global __CapPickHotkeysBound := false
+global __CapPickFlagPath := A_Temp "\JRPG_Overlay\controller_adjust.active"
+global __WindowHighlightGui := 0
+
+CapPickFlag(enable) {
+    global __CapPickFlagPath
+    flagDir := A_Temp "\JRPG_Overlay"
+    if enable {
+        try {
+            if !DirExist(flagDir)
+                DirCreate(flagDir)
+            if FileExist(__CapPickFlagPath)
+                FileDelete(__CapPickFlagPath)
+            FileAppend(ProcessExist(), __CapPickFlagPath, "UTF-8")
+        }
+    } else if FileExist(__CapPickFlagPath) {
+        ownerPid := 0
+        try ownerPid := Integer(Trim(FileRead(__CapPickFlagPath, "UTF-8")))
+        if (!ownerPid || ownerPid = ProcessExist()) {
+            try FileDelete(__CapPickFlagPath)
+        }
+    }
+}
+
+CapPickHotIf(*) {
+    global __CapPickState
+    return __CapPickState.Has("active") && __CapPickState["active"]
+}
+
+CapPickConsume(*) {
+}
+
+CapPickRegisterHotkeys() {
+    global __CapPickHotkeysBound
+    if __CapPickHotkeysBound
+        return
+
+    HotIf(CapPickHotIf)
+    try Hotkey("$Enter", CapPickConfirm, "On")
+    try Hotkey("$NumpadEnter", CapPickConfirm, "On")
+    try Hotkey("$Escape", CapPickCancel, "On")
+    try Hotkey("*$Left", CapPickArrow.Bind(-18, 0), "On")
+    try Hotkey("*$Right", CapPickArrow.Bind(18, 0), "On")
+    try Hotkey("*$Up", CapPickArrow.Bind(0, -18), "On")
+    try Hotkey("*$Down", CapPickArrow.Bind(0, 18), "On")
+    ; Observe picker clicks without ever suppressing them system-wide.
+    try Hotkey("~LButton", PickWindowClick, "On")
+    try Hotkey("WheelUp", CapPickConsume, "On")
+    try Hotkey("WheelDown", CapPickConsume, "On")
+    HotIf()
+    __CapPickHotkeysBound := true
+}
+
+CapPickModifierKey(hotkeyText) {
+    keyName := RegExReplace(Trim(hotkeyText), "i)\s+up$")
+    if InStr(keyName, " & ") {
+        keyParts := StrSplit(keyName, " & ")
+        keyName := Trim(keyParts[keyParts.Length])
+    }
+    return RegExReplace(keyName, "^[~*$<>!^+#]+")
+}
+
+CapPickResizeModifierHeld() {
+    global __CapPickState
+    if !(__CapPickState.Has("resizeModifierKey") && __CapPickState["resizeModifierKey"] != "")
+        return false
+    isPressed := false
+    try isPressed := GetKeyState(__CapPickState["resizeModifierKey"], "P")
+    return !!isPressed
+}
+
+CapPickArrow(deltaX, deltaY, *) {
+    global __CapPickState
+    state := __CapPickState
+    if !(state.Has("active") && state["active"])
+        return
+
+    if (state["kind"] = "window") {
+        CapPickCycleWindow((deltaX < 0 || deltaY < 0) ? -1 : 1)
+        return
+    }
+
+    if CapPickResizeModifierHeld()
+        CapPickApplyRegionRect(state["x"], state["y"], state["w"] + deltaX, state["h"] + deltaY)
+    else
+        CapPickApplyRegionRect(state["x"] + deltaX, state["y"] + deltaY, state["w"], state["h"])
+}
+
+CapPickConfirm(*) {
+    global __CapPickState
+    state := __CapPickState
+    if !(state.Has("active") && state["active"])
+        return
+    if (A_TickCount < state["acceptAfter"])
+        return
+    if (state["kind"] = "region")
+        FinishRegionPickRect(state["x"], state["y"], state["w"], state["h"])
+    else
+        FinishWindowCandidate()
+}
+
+CapPickCancel(*) {
+    global __CapPickState
+    if !(__CapPickState.Has("active") && __CapPickState["active"])
+        return
+    CancelCapturePick()
+}
+
+CapPickXInputLibrary() {
+    static initialized := false, library := ""
+    if initialized
+        return library
+    initialized := true
+    for dllName in ["XInput1_4.dll", "XInput1_3.dll", "XInput9_1_0.dll"] {
+        module := 0
+        try module := DllCall("kernel32\LoadLibraryW", "str", dllName, "ptr")
+        if module {
+            library := dllName
+            break
+        }
+    }
+    return library
+}
+
+CapPickNormalizeXInputAxis(value) {
+    return (value >= 0) ? value / 32767.0 : value / 32768.0
+}
+
+CapPickXInputGetState(userIndex) {
+    library := CapPickXInputLibrary()
+    if (library = "")
+        return false
+    stateBuffer := Buffer(16, 0)
+    result := 1
+    try result := DllCall(library "\XInputGetState"
+        , "uint", userIndex, "ptr", stateBuffer.Ptr, "uint")
+    if (result != 0)
+        return false
+    return Map(
+        "packet", NumGet(stateBuffer, 0, "uint"),
+        "buttons", NumGet(stateBuffer, 4, "ushort"),
+        "leftX", CapPickNormalizeXInputAxis(NumGet(stateBuffer, 8, "short")),
+        "leftY", CapPickNormalizeXInputAxis(NumGet(stateBuffer, 10, "short")),
+        "rightX", CapPickNormalizeXInputAxis(NumGet(stateBuffer, 12, "short")),
+        "rightY", CapPickNormalizeXInputAxis(NumGet(stateBuffer, 14, "short"))
+    )
+}
+
+CapPickJoystickAxis(controllerId, axisName) {
+    value := ""
+    try value := GetKeyState(controllerId "Joy" axisName)
+    if (value = "")
+        return ""
+    return value + 0.0
+}
+
+CapPickControllerRightAxes(controllerName) {
+    lowerName := StrLower(controllerName)
+    if (InStr(lowerName, "dualsense")
+     || InStr(lowerName, "dualshock")
+     || InStr(lowerName, "wireless controller"))
+        return ["Z", "R"]
+    return ["R", "U"]
+}
+
+CapPickScanControllers() {
+    controllers := []
+    Loop 4 {
+        userIndex := A_Index - 1
+        xinputState := CapPickXInputGetState(userIndex)
+        if IsObject(xinputState) {
+            controllers.Push(Map(
+                "type", "xinput", "id", userIndex,
+                "name", "XInput controller " A_Index,
+                "baseline", xinputState
+            ))
+        }
+    }
+
+    Loop 16 {
+        controllerId := A_Index
+        controllerName := ""
+        try controllerName := Trim(GetKeyState(controllerId "JoyName"))
+        if (controllerName = "")
+            continue
+        rightAxes := CapPickControllerRightAxes(controllerName)
+        baseline := Map()
+        for axisName in ["X", "Y", "Z", "R", "U", "V"] {
+            value := CapPickJoystickAxis(controllerId, axisName)
+            baseline[axisName] := (value = "") ? 50.0 : value
+        }
+        controllers.Push(Map(
+            "type", "legacy", "id", controllerId, "name", controllerName,
+            "rightX", rightAxes[1], "rightY", rightAxes[2], "baseline", baseline
+        ))
+    }
+    return controllers
+}
+
+CapPickAxis(controller, axisName) {
+    value := CapPickJoystickAxis(controller["id"], axisName)
+    if (value = "")
+        return 0.0
+    centered := (value - controller["baseline"][axisName]) / 50.0
+    return Max(-1.0, Min(1.0, centered))
+}
+
+CapPickReadAxes(controller) {
+    if (controller["type"] = "xinput") {
+        current := CapPickXInputGetState(controller["id"])
+        if !IsObject(current)
+            return false
+        baseline := controller["baseline"]
+        return Map(
+            "moveX", Max(-1.0, Min(1.0, current["leftX"] - baseline["leftX"])),
+            "moveY", Max(-1.0, Min(1.0, baseline["leftY"] - current["leftY"])),
+            "sizeX", Max(-1.0, Min(1.0, current["rightX"] - baseline["rightX"])),
+            "sizeY", Max(-1.0, Min(1.0, baseline["rightY"] - current["rightY"])),
+            "buttons", current["buttons"]
+        )
+    }
+    return Map(
+        "moveX", CapPickAxis(controller, "X"),
+        "moveY", CapPickAxis(controller, "Y"),
+        "sizeX", CapPickAxis(controller, controller["rightX"]),
+        "sizeY", CapPickAxis(controller, controller["rightY"])
+    )
+}
+
+CapPickDetectController() {
+    global __CapPickState
+    state := __CapPickState
+    bestXInputController := 0, bestXInputScore := 0.0
+    bestLegacyController := 0, bestLegacyScore := 0.0
+    for controller in state["controllers"] {
+        axes := CapPickReadAxes(controller)
+        if !IsObject(axes)
+            continue
+        score := Max(Abs(axes["moveX"]), Abs(axes["moveY"])
+            , Abs(axes["sizeX"]), Abs(axes["sizeY"]))
+        if (controller["type"] = "xinput") {
+            if (score > bestXInputScore) {
+                bestXInputScore := score
+                bestXInputController := controller
+            }
+        } else if (score > bestLegacyScore) {
+            bestLegacyScore := score
+            bestLegacyController := controller
+        }
+    }
+
+    ; Xbox-compatible pads are commonly exposed through both XInput and the
+    ; legacy joystick API. Prefer XInput whenever it reports deliberate input,
+    ; because the duplicate legacy device can assign the right stick to a
+    ; different axis pair.
+    if (IsObject(bestXInputController) && bestXInputScore >= 0.15) {
+        bestController := bestXInputController
+        bestScore := bestXInputScore
+    } else {
+        bestController := bestLegacyController
+        bestScore := bestLegacyScore
+    }
+    if (!IsObject(bestController) || bestScore < 0.15)
+        return false
+    state["controller"] := bestController
+    controllerKey := CapPickControllerKey(bestController)
+    initialButtons := (state.Has("controllerButtonStates")
+        && state["controllerButtonStates"].Has(controllerKey))
+        ? state["controllerButtonStates"][controllerKey]
+        : CapPickReadControllerButtons(bestController)
+    state["confirmWasDown"] := IsObject(initialButtons) ? initialButtons["confirm"] : false
+    state["cancelWasDown"] := IsObject(initialButtons) ? initialButtons["cancel"] : false
+    CapPickUpdateHud(true)
+    return true
+}
+
+CapPickVelocity(axisValue, maximumSpeed := 620.0) {
+    magnitude := Abs(axisValue), deadZone := 0.16
+    if (magnitude <= deadZone)
+        return 0.0
+    normalized := (magnitude - deadZone) / (1.0 - deadZone)
+    speed := 12.0 + (maximumSpeed - 12.0) * normalized * normalized
+    precisionPoint := 0.15
+    halfTiltPoint := (0.5 - deadZone) / (1.0 - deadZone)
+    if (normalized <= precisionPoint)
+        boostFactor := 1.0
+    else if (normalized <= halfTiltPoint)
+        boostFactor := 1.0 + 1.25 * (normalized - precisionPoint) / (halfTiltPoint - precisionPoint)
+    else
+        boostFactor := 2.25 + 0.75 * (normalized - halfTiltPoint) / (1.0 - halfTiltPoint)
+    speed *= boostFactor
+    return (axisValue < 0) ? -speed : speed
+}
+
+CapPickWholePixels(stateKey, amount) {
+    global __CapPickState
+    total := __CapPickState[stateKey] + amount
+    whole := (total >= 0) ? Floor(total) : Ceil(total)
+    __CapPickState[stateKey] := total - whole
+    return whole
+}
+
+CapPickSignalCompletion(status := "done") {
+    global ControlIni
+    IniWrite(A_TickCount "_" Random(1000, 9999), ControlIni, "capture", "pickSeq")
+    IniWrite(status, ControlIni, "capture", "pickStatus")
+}
+
+CapPickCreateHud() {
+    global __CapPickState
+    state := __CapPickState
+    hud := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale +E0x20 +E0x08000000")
+    hud.BackColor := "111820"
+    hud.SetFont("s11 cFFFFFF", "Segoe UI")
+    MonitorGetWorkArea(MonitorGetPrimary(), &workLeft, &workTop, &workRight, &workBottom)
+    hudTextWidth := Max(360, Min(1120, workRight - workLeft - 40))
+    ; Window titles can wrap onto a fifth line beneath the three instruction
+    ; lines, especially at larger display scaling. Reserve that line fully.
+    hudTextHeight := (state["kind"] = "window") ? 240 : 148
+    state["hudText"] := hud.Add("Text", "xm ym w" hudTextWidth " h" hudTextHeight " Center", "")
+    hud.Show("NA AutoSize")
+    WinSetTransparent(232, hud.Hwnd)
+    state["hud"] := hud
+    CapPickUpdateHud(true)
+}
+
+CapPickPositionHud() {
+    global __CapPickState
+    state := __CapPickState
+    if !(state.Has("active") && state["active"]
+      && state.Has("hud") && IsObject(state["hud"]))
+        return
+    try state["hud"].GetPos(,, &hudW, &hudH)
+    catch
+        return
+    MonitorGetWorkArea(MonitorGetPrimary(), &workLeft, &workTop, &workRight, &workBottom)
+    hudX := Round(workLeft + (workRight - workLeft - hudW) / 2)
+    hudY := workTop + 14
+    ; Show rather than only Move so this HUD returns above the translucent
+    ; selection highlight each time that highlight is redrawn.
+    try state["hud"].Show("NA x" hudX " y" hudY)
+}
+
+CapPickUpdateHud(force := false) {
+    global __CapPickState
+    state := __CapPickState
+    if !(state.Has("active") && state["active"]
+      && state.Has("hudText") && IsObject(state["hudText"]))
+        return
+    now := A_TickCount
+    if (!force && state.Has("lastHudTick") && now - state["lastHudTick"] < 80)
+        return
+    state["lastHudTick"] := now
+
+    controllerLine := "Move either analog stick to select a controller"
+    if (state.Has("controller") && IsObject(state["controller"]))
+        controllerLine := state["controller"]["name"]
+    if (state["kind"] = "region") {
+        regionW := state.Has("w") ? state["w"] : 0
+        regionH := state.Has("h") ? state["h"] : 0
+        detail := "Left stick or arrows: move | Right stick or hold Screenshot + Translate + arrows: resize"
+            . "`nEnter / controller A saves | Esc / controller B cancels | " regionW " x " regionH
+        try state["hudText"].Text := "Select capture region | " controllerLine "`n" detail
+    } else {
+        label := state.Has("currentCandidate") && IsObject(state["currentCandidate"])
+            ? state["currentCandidate"]["label"] : "No window selected"
+        if (StrLen(label) > 80)
+            label := SubStr(label, 1, 77) "..."
+        try state["hudText"].Text := "Select capture window | " controllerLine
+            . "`nLeft/right/up/down cycles windows | Move the mouse to select by pointing"
+            . "`nEnter / controller A saves | Esc / controller B cancels"
+            . "`nSelected window: " label
+    }
+    CapPickPositionHud()
+}
+
+CapPickStartState(kind) {
+    global __CapPickState, ControlIni
+    state := __CapPickState
+    state.Clear()
+    state["active"] := true
+    state["kind"] := kind
+    state["controllers"] := CapPickScanControllers()
+    CapPickInitializeButtonStates()
+    state["lastScanTick"] := A_TickCount
+    state["lastTick"] := A_TickCount
+    state["acceptAfter"] := A_TickCount + 400
+    state["lastHudTick"] := 0
+    state["fractionX"] := 0.0, state["fractionY"] := 0.0
+    state["fractionW"] := 0.0, state["fractionH"] := 0.0
+    state["confirmWasDown"] := false, state["cancelWasDown"] := false
+    state["windowAxisArmed"] := true, state["windowAxisRepeatAt"] := 0
+    screenshotHotkey := Trim(IniRead(ControlIni, "hotkeys", "screenshot_translate", "^+t"))
+    state["resizeModifierKey"] := CapPickModifierKey(screenshotHotkey)
+    CapPickFlag(true)
+    CapPickRegisterHotkeys()
+    CapPickCreateHud()
+    SetTimer(CapPickTick, 20)
+}
+
+CapPickEndSession(signalStatus := "") {
+    global __CapPickState
+    SetTimer(CapPickTick, 0)
+    try SetTimer(CapPickFailSafe, 0)
+    CancelAnyPick()
+    CapPickFlag(false)
+    if (signalStatus != "")
+        CapPickSignalCompletion(signalStatus)
+    EndPickHide()
+}
+
+CancelCapturePick() {
+    CapPickEndSession("canceled")
+    ToolTip("Capture selection canceled")
+    SetTimer(() => ToolTip(""), -800)
+}
+
+CapPickReadControllerButtons(controller) {
+    if (controller["type"] = "xinput") {
+        current := CapPickXInputGetState(controller["id"])
+        if !IsObject(current)
+            return false
+        buttons := current["buttons"]
+        return Map("confirm", !!(buttons & 0x1000), "cancel", !!(buttons & 0x2000))
+    }
+
+    controllerName := controller["name"]
+    isPlayStationController := RegExMatch(controllerName
+        , "i)(DualSense|DualShock|Wireless Controller|PlayStation)")
+    confirmButtonIndex := isPlayStationController ? 2 : 1
+    cancelButtonIndex := isPlayStationController ? 3 : 2
+    confirmDown := false, cancelDown := false
+    try confirmDown := GetKeyState(controller["id"] "Joy" confirmButtonIndex)
+    try cancelDown := GetKeyState(controller["id"] "Joy" cancelButtonIndex)
+    return Map("confirm", !!confirmDown, "cancel", !!cancelDown)
+}
+
+CapPickReadConfirmCancel(controller, axes) {
+    return CapPickReadControllerButtons(controller)
+}
+
+CapPickControllerKey(controller) {
+    return controller["type"] ":" controller["id"]
+}
+
+CapPickInitializeButtonStates() {
+    global __CapPickState
+    state := __CapPickState
+    buttonStates := Map()
+    for candidateController in state["controllers"] {
+        candidateButtons := CapPickReadControllerButtons(candidateController)
+        if IsObject(candidateButtons)
+            buttonStates[CapPickControllerKey(candidateController)] := candidateButtons
+    }
+    state["controllerButtonStates"] := buttonStates
+}
+
+CapPickHandlePendingControllerButtons() {
+    global __CapPickState
+    state := __CapPickState
+    if !(state.Has("controllerButtonStates") && IsObject(state["controllerButtonStates"]))
+        state["controllerButtonStates"] := Map()
+    buttonStates := state["controllerButtonStates"]
+
+    for candidateController in state["controllers"] {
+        candidateKey := CapPickControllerKey(candidateController)
+        currentButtons := CapPickReadControllerButtons(candidateController)
+        if !IsObject(currentButtons)
+            continue
+        if !buttonStates.Has(candidateKey) {
+            buttonStates[candidateKey] := currentButtons
+            continue
+        }
+
+        previousButtons := buttonStates[candidateKey]
+        buttonStates[candidateKey] := currentButtons
+        if (currentButtons["cancel"] && !previousButtons["cancel"]) {
+            CapPickCancel()
+            return true
+        }
+        if (A_TickCount >= state["acceptAfter"]
+            && currentButtons["confirm"] && !previousButtons["confirm"]) {
+            CapPickConfirm()
+            return true
+        }
+    }
+    return false
+}
+
+CapPickTick(*) {
+    global __CapPickState
+    state := __CapPickState
+    if !(state.Has("active") && state["active"])
+        return
+
+    now := A_TickCount
+    deltaSeconds := Min(0.05, Max(0.001, (now - state["lastTick"]) / 1000.0))
+    state["lastTick"] := now
+    if !(state.Has("controller") && IsObject(state["controller"])) {
+        if (now - state["lastScanTick"] >= 1000) {
+            state["controllers"] := CapPickScanControllers()
+            state["lastScanTick"] := now
+        }
+        if CapPickHandlePendingControllerButtons()
+            return
+        CapPickDetectController()
+        CapPickUpdateHud()
+        return
+    }
+
+    controller := state["controller"]
+    axes := CapPickReadAxes(controller)
+    if !IsObject(axes) {
+        state.Delete("controller")
+        state["controllers"] := CapPickScanControllers()
+        state["lastScanTick"] := now
+        CapPickUpdateHud(true)
+        return
+    }
+
+    buttons := CapPickReadConfirmCancel(controller, axes)
+    if (buttons["confirm"] && !state["confirmWasDown"] && now >= state["acceptAfter"]) {
+        state["confirmWasDown"] := true
+        CapPickConfirm()
+        return
+    }
+    if (buttons["cancel"] && !state["cancelWasDown"] && now >= state["acceptAfter"]) {
+        state["cancelWasDown"] := true
+        CapPickCancel()
+        return
+    }
+    state["confirmWasDown"] := buttons["confirm"]
+    state["cancelWasDown"] := buttons["cancel"]
+
+    if (state["kind"] = "window") {
+        axis := (Abs(axes["moveX"]) >= Abs(axes["moveY"])) ? axes["moveX"] : axes["moveY"]
+        magnitude := Abs(axis)
+        if (magnitude <= 0.30) {
+            state["windowAxisArmed"] := true
+            state["windowAxisRepeatAt"] := 0
+        } else if (magnitude >= 0.65) {
+            direction := (axis < 0) ? -1 : 1
+            if state["windowAxisArmed"] {
+                CapPickCycleWindow(direction)
+                state["windowAxisArmed"] := false
+                state["windowAxisRepeatAt"] := now + 420
+            } else if (state["windowAxisRepeatAt"] && now >= state["windowAxisRepeatAt"]) {
+                CapPickCycleWindow(direction)
+                state["windowAxisRepeatAt"] := now + 180
+            }
+        }
+        return
+    }
+
+    moveX := CapPickVelocity(axes["moveX"], 620.0)
+    moveY := CapPickVelocity(axes["moveY"], 620.0)
+    sizeX := CapPickVelocity(axes["sizeX"], 520.0)
+    sizeY := CapPickVelocity(axes["sizeY"], 520.0)
+    deltaX := CapPickWholePixels("fractionX", moveX * deltaSeconds)
+    deltaY := CapPickWholePixels("fractionY", moveY * deltaSeconds)
+    deltaW := CapPickWholePixels("fractionW", sizeX * deltaSeconds)
+    deltaH := CapPickWholePixels("fractionH", sizeY * deltaSeconds)
+    if (deltaX || deltaY || deltaW || deltaH)
+        CapPickApplyRegionRect(state["x"] + deltaX, state["y"] + deltaY
+            , state["w"] + deltaW, state["h"] + deltaH)
+}
 
 InitGDIPlus() {
     global __GDI_Ready
@@ -945,40 +1517,57 @@ SaveBitmapPngUnderKB(hbmp, fullW, fullH, outPath, targetKB := 1400) {
 
 ; --- Selection UIs ------------------------------------------------------------
 
-; --- Cancel any in-flight region/window pick: unhook, stop timers, hide bands ---
+; --- Cancel any in-flight region/window pick: unhook, stop timers, hide visuals ---
 CancelAnyPick() {
     global __Sel_Active, __SelDragging, __SelTimerRunning
-    global __Sel_Gui, __SelBand, __HoverBorderHwnd
+    global __Sel_Gui, __SelBand, __HoverBorderHwnd, __WindowHighlightGui
+    global __CapPickState
 
-    ; Stop timers (rubber-band + window hover)
-    try SetTimer(DrawBand, 0)
-    try SetTimer(PulseHover, 0)
-    __SelTimerRunning := false
-
-    ; Unregister both modes’ mouse hooks
-    ;   0x0201 = WM_LBUTTONDOWN, 0x0202 = WM_LBUTTONUP
-    try OnMessage(0x0201, Region_LButtonDown, 0)
-    try OnMessage(0x0202, Region_LButtonUp,   0)
-    try OnMessage(0x0201, PickWindowClick,    0)
-    try Hotkey("LButton", PickWindowClick, "Off")
-
-    ; Hide/remove any visual pick UI that might be left
-    if IsSet(__HoverBorderHwnd) && __HoverBorderHwnd {
-        try WinHide "ahk_id " __HoverBorderHwnd
-        __HoverBorderHwnd := 0
-    }
-    if IsSet(__SelBand) && __SelBand {
-        try __SelBand.Destroy()
-        __SelBand := 0
-    }
-    if IsSet(__Sel_Gui) && __Sel_Gui {
-        try __Sel_Gui.Destroy()
-        __Sel_Gui := 0
-    }
-
-    ; Reset flags
+    ; Invalidate the session before stopping timers or destroying controls. A
+    ; queued timer/hotkey callback can then see that the picker is over and exit.
     __Sel_Active := false
     __SelDragging := false
+    __CapPickState["active"] := false
+
+    try SetTimer(DrawBand, 0)
+    try SetTimer(PulseHover, 0)
+    try SetTimer(CapPickTick, 0)
+    try SetTimer(CapPickFailSafe, 0)
+    __SelTimerRunning := false
+
+    try OnMessage(0x0201, Region_LButtonDown, 0)
+    try OnMessage(0x0202, Region_LButtonUp, 0)
+    try OnMessage(0x0201, PickWindowClick, 0)
+
+    hoverBorderHwnd := IsSet(__HoverBorderHwnd) ? __HoverBorderHwnd : 0
+    __HoverBorderHwnd := 0
+    if hoverBorderHwnd {
+        try WinHide "ahk_id " hoverBorderHwnd
+    }
+    windowHighlightGui := __WindowHighlightGui
+    __WindowHighlightGui := 0
+    if IsObject(windowHighlightGui) {
+        try windowHighlightGui.Destroy()
+    }
+    selectionBand := IsSet(__SelBand) ? __SelBand : 0
+    __SelBand := 0
+    if IsObject(selectionBand) {
+        try selectionBand.Destroy()
+    }
+    selectionGui := IsSet(__Sel_Gui) ? __Sel_Gui : 0
+    __Sel_Gui := 0
+    if IsObject(selectionGui) {
+        try selectionGui.Destroy()
+    }
+    pickerHud := (__CapPickState.Has("hud") && IsObject(__CapPickState["hud"]))
+        ? __CapPickState["hud"] : 0
+    if __CapPickState.Has("hudText")
+        __CapPickState.Delete("hudText")
+    if __CapPickState.Has("hud")
+        __CapPickState.Delete("hud")
+    if IsObject(pickerHud) {
+        try pickerHud.Destroy()
+    }
 }
 
 ; Hide Translator/Explainer while user is picking, then restore
@@ -1001,8 +1590,16 @@ BeginPickHide() {
     }
     SetTitleMatchMode old
 
-    ; fail-safe: restore in 15s even if something goes wrong
-    SetTimer(EndPickHide, -15000)
+    ; Leave enough time for controller adjustment, but never stay hidden forever.
+    SetTimer(CapPickFailSafe, -120000)
+}
+
+CapPickFailSafe(*) {
+    global __CapPickState
+    if (__CapPickState.Has("active") && __CapPickState["active"])
+        CancelCapturePick()
+    else
+        EndPickHide()
 }
 
 EndPickHide(*) {
@@ -1026,34 +1623,79 @@ EndPickHide(*) {
     }
 }
 
-; Region rubber-band selection (drag, release to confirm)
-StartPickRegion(maxKB := "", *) {
+CapPickVirtualBounds(&x, &y, &w, &h) {
+    x := SysGet(76)
+    y := SysGet(77)
+    w := SysGet(78)
+    h := SysGet(79)
+}
+
+CapPickClampRegionRect(&x, &y, &w, &h) {
+    CapPickVirtualBounds(&left, &top, &virtualW, &virtualH)
+    right := left + virtualW, bottom := top + virtualH
+    w := Max(32, Min(Round(w), virtualW))
+    h := Max(32, Min(Round(h), virtualH))
+    x := Max(left, Min(Round(x), right - w))
+    y := Max(top, Min(Round(y), bottom - h))
+}
+
+CapPickApplyRegionRect(x, y, w, h) {
+    global __CapPickState, __SelBand
+    CapPickClampRegionRect(&x, &y, &w, &h)
+    state := __CapPickState
+    state["x"] := x, state["y"] := y, state["w"] := w, state["h"] := h
+    if IsSet(__SelBand) && IsObject(__SelBand)
+        try __SelBand.Show("NA x" x " y" y " w" w " h" h)
+    CapPickUpdateHud()
+}
+
+CapPickInitialRegionRect(&x, &y, &w, &h) {
+    global ControlIni
+    rectText := Trim(IniRead(ControlIni, "capture", "rect", ""))
+    savedRectParts := StrSplit(rectText, ",")
+    if (savedRectParts.Length = 4) {
+        try {
+            x := Integer(savedRectParts[1]), y := Integer(savedRectParts[2])
+            w := Integer(savedRectParts[3]), h := Integer(savedRectParts[4])
+            if (w > 0 && h > 0) {
+                CapPickClampRegionRect(&x, &y, &w, &h)
+                return
+            }
+        }
+    }
+    MonitorGetWorkArea(MonitorGetPrimary(), &left, &top, &right, &bottom)
+    workW := right - left, workH := bottom - top
+    w := Max(320, Round(workW * 0.55))
+    h := Max(180, Round(workH * 0.45))
+    x := left + Round((workW - w) / 2)
+    y := top + Round((workH - h) / 2)
+    CapPickClampRegionRect(&x, &y, &w, &h)
+}
+
+; Region selection: mouse drag, analog sticks, or arrows. Controller-style
+; activation displays the saved rectangle immediately; a mouse activation
+; starts with a clean canvas and reveals the rectangle only while dragging.
+StartPickRegion(maxKB := "", showSavedRegion := true, *) {
     global __Sel_Active, __Sel_Gui, __Sel_Kind, Cap_MaxKB
     global __SelBand, __SelTimerRunning
     global __Sel_sx, __Sel_sy, __Sel_ex, __Sel_ey, __SelDragging
+    global __CapPickState
 
-    ; NEW: ensure no stale window/region hooks or timers are active
     CancelAnyPick()
 
     __Sel_Kind := "region", __Sel_Active := true
 
-    ; Make sure window-click handler is not lingering, then register region handlers
     OnMessage(0x0201, PickWindowClick, 0)
-    OnMessage(0x0201, Region_LButtonDown) ; WM_LBUTTONDOWN
-    OnMessage(0x0202, Region_LButtonUp)   ; WM_LBUTTONUP
+    OnMessage(0x0201, Region_LButtonDown)
+    OnMessage(0x0202, Region_LButtonUp)
 
-    BeginPickHide()   ; <<< hide Translator + Explainer while picking
+    BeginPickHide()
     if (IsNumber(maxKB))
         Cap_MaxKB := Integer(maxKB)
 
-    ; use screen pixel coords and the full virtual desktop
     CoordMode "Mouse", "Screen"
-    vsx := SysGet(76)  ; SM_XVIRTUALSCREEN
-    vsy := SysGet(77)  ; SM_YVIRTUALSCREEN
-    vsw := SysGet(78)  ; SM_CXVIRTUALSCREEN
-    vsh := SysGet(79)  ; SM_CYVIRTUALSCREEN
+    CapPickVirtualBounds(&vsx, &vsy, &vsw, &vsh)
 
-    ; full-sheet GUI (NOT DPI-scaled) so sizes are 1:1 with pixels
     g := Gui("-Caption +AlwaysOnTop +ToolWindow -DPIScale")
     g.BackColor := "000000"
     g.Opt("+LastFound")
@@ -1061,29 +1703,35 @@ StartPickRegion(maxKB := "", *) {
     g.Show("x" vsx " y" vsy " w" vsw " h" vsh)
     __Sel_Gui := g
 
-    ; thin border we move as the mouse drags (also NOT DPI-scaled)
-    __SelBand := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale")
-    __SelBand.BackColor := "00FFFF"
-    WinSetTransparent 40, __SelBand.Hwnd
+    __SelBand := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale +E0x20 +E0x08000000")
+    __SelBand.BackColor := "00FF88"
+    WinSetTransparent 54, __SelBand.Hwnd
 
     __SelDragging := false
     __Sel_sx := __Sel_sy := __Sel_ex := __Sel_ey := 0
 
-    OnMessage(0x0201, Region_LButtonDown) ; WM_LBUTTONDOWN
-    OnMessage(0x0202, Region_LButtonUp)   ; WM_LBUTTONUP
-
     __SelTimerRunning := true
     SetTimer(DrawBand, 15)
-
-    ToolTip("Drag to select region… release to confirm"), SetTimer(() => ToolTip(""), -2000)
+    CapPickInitialRegionRect(&initialX, &initialY, &initialW, &initialH)
+    CapPickStartState("region")
+    if showSavedRegion {
+        CapPickApplyRegionRect(initialX, initialY, initialW, initialH)
+    } else {
+        ; Keep a valid rectangle ready in case the user switches from the mouse
+        ; to arrows or an analog stick, but do not draw the previous selection.
+        __CapPickState["x"] := initialX, __CapPickState["y"] := initialY
+        __CapPickState["w"] := initialW, __CapPickState["h"] := initialH
+        CapPickUpdateHud(true)
+    }
 }
 
 Region_LButtonDown(wParam := 0, lParam := 0, msg := 0, hwnd := 0) {
-    global __Sel_Active, __SelDragging, __Sel_sx, __Sel_sy
+    global __Sel_Active, __SelDragging, __Sel_sx, __Sel_sy, __CapPickState
     if (!__Sel_Active)
         return 0
     CoordMode "Mouse", "Screen"
     __SelDragging := true
+    __CapPickState["inputMode"] := "mouse"
     MouseGetPos &__Sel_sx, &__Sel_sy
     return 0
 }
@@ -1095,7 +1743,6 @@ Region_LButtonUp(wParam := 0, lParam := 0, msg := 0, hwnd := 0) {
     CoordMode "Mouse", "Screen"
     __SelDragging := false
     MouseGetPos &__Sel_ex, &__Sel_ey
-    DestroySelOverlay()
     FinishRegionPick(__Sel_sx, __Sel_sy, __Sel_ex, __Sel_ey)
     return 0
 }
@@ -1108,7 +1755,7 @@ DrawBand(*) {
     MouseGetPos &mx, &my
     x := Min(__Sel_sx, mx), y := Min(__Sel_sy, my)
     w := Max(Abs(mx - __Sel_sx), 2), h := Max(Abs(my - __Sel_sy), 2)
-    __SelBand.Show("NA x" x " y" y " w" w " h" h)
+    CapPickApplyRegionRect(x, y, w, h)
 }
 
 DestroySelOverlay() {
@@ -1134,36 +1781,214 @@ DestroySelOverlay() {
 }
 
 FinishRegionPick(sx, sy, ex, ey) {
-    global Cap_Mode, Cap_Rect, Cap_RectStr
     x := Min(sx, ex), y := Min(sy, ey), w := Abs(ex - sx), h := Abs(ey - sy)
     if (w < 4 || h < 4) {
         ToolTip("Selection too small"), SetTimer(() => ToolTip(""), -800)
         return
     }
+    FinishRegionPickRect(x, y, w, h)
+}
+
+FinishRegionPickRect(x, y, w, h) {
+    global Cap_Mode, Cap_Rect, Cap_RectStr, ControlIni
+    CapPickClampRegionRect(&x, &y, &w, &h)
     Cap_Mode := "region"
     Cap_Rect["x"] := x, Cap_Rect["y"] := y, Cap_Rect["w"] := w, Cap_Rect["h"] := h
     Cap_RectStr := x "," y "," w "," h
     IniWrite(Cap_Mode,    ControlIni, "capture", "mode")
     IniWrite(Cap_RectStr, ControlIni, "capture", "rect")
+    CapPickEndSession("selected")
     ToolTip("Region selected"), SetTimer(() => ToolTip(""), -700)
-	EndPickHide()  ; <<< restore overlays after region is set
 }
 
-; Window hover highlight → click to select
+CapPickMonitorCandidate(monitorIndex) {
+    MonitorGet(monitorIndex, &left, &top, &right, &bottom)
+    return Map("kind", "region", "monitor", monitorIndex
+        , "label", "Full screen - Monitor " monitorIndex
+        , "x", left, "y", top, "w", right - left, "h", bottom - top)
+}
+
+CapPickMonitorCandidateAt(x, y) {
+    Loop MonitorGetCount() {
+        MonitorGet(A_Index, &left, &top, &right, &bottom)
+        if (x >= left && x < right && y >= top && y < bottom)
+            return CapPickMonitorCandidate(A_Index)
+    }
+    return CapPickMonitorCandidate(MonitorGetPrimary())
+}
+
+CapPickIsDesktopClass(className) {
+    return className = "Progman" || className = "WorkerW"
+        || className = "Shell_TrayWnd" || className = "Shell_SecondaryTrayWnd"
+}
+
+CapPickWindowCandidate(hwnd, mouseX := "", mouseY := "") {
+    if !hwnd
+        return false
+    rootHwnd := DllCall("user32\GetAncestor", "ptr", hwnd, "uint", 2, "ptr")
+    if rootHwnd
+        hwnd := rootHwnd
+    className := ""
+    try className := WinGetClass("ahk_id " hwnd)
+    if CapPickIsDesktopClass(className) {
+        if (mouseX = "" || mouseY = "")
+            MouseGetPos(&mouseX, &mouseY)
+        return CapPickMonitorCandidateAt(mouseX, mouseY)
+    }
+    if !DllCall("user32\IsWindowVisible", "ptr", hwnd, "int")
+        return false
+    try {
+        if (WinGetPID("ahk_id " hwnd) = ProcessExist())
+            return false
+        if (WinGetMinMax("ahk_id " hwnd) = -1)
+            return false
+        exStyle := WinGetExStyle("ahk_id " hwnd)
+        if (exStyle & 0x00000080)
+            return false
+        title := Trim(WinGetTitle("ahk_id " hwnd))
+        if (title = "")
+            return false
+        WinGetPos(&x, &y, &w, &h, "ahk_id " hwnd)
+        if (w < 80 || h < 60)
+            return false
+        cloaked := Buffer(4, 0)
+        try {
+            if (DllCall("dwmapi\DwmGetWindowAttribute", "ptr", hwnd, "uint", 14
+                , "ptr", cloaked.Ptr, "uint", 4, "int") = 0 && NumGet(cloaked, 0, "uint"))
+                return false
+        }
+        exeName := ""
+        try exeName := WinGetProcessName("ahk_id " hwnd)
+        return Map("kind", "window", "hwnd", hwnd, "label", title
+            , "title", title, "class", className, "exe", exeName
+            , "x", x, "y", y, "w", w, "h", h)
+    }
+    return false
+}
+
+CapPickEnumerateWindows() {
+    candidates := []
+    Loop MonitorGetCount()
+        candidates.Push(CapPickMonitorCandidate(A_Index))
+    for hwnd in WinGetList() {
+        candidate := CapPickWindowCandidate(hwnd)
+        if IsObject(candidate) && candidate["kind"] = "window"
+            candidates.Push(candidate)
+    }
+    return candidates
+}
+
+CapPickShowWindowCandidate(candidate) {
+    global __WindowHighlightGui, __HoverBorderHwnd, __CapPickState
+    if !IsObject(candidate)
+        return
+    if !(__CapPickState.Has("active") && __CapPickState["active"]
+      && __CapPickState["kind"] = "window")
+        return
+    if !IsObject(__WindowHighlightGui) {
+        __WindowHighlightGui := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale +E0x20 +E0x08000000")
+        __WindowHighlightGui.BackColor := "00FF88"
+        WinSetTransparent(58, __WindowHighlightGui.Hwnd)
+    }
+    try __WindowHighlightGui.Show("NA x" candidate["x"] " y" candidate["y"]
+        . " w" candidate["w"] " h" candidate["h"])
+    __HoverBorderHwnd := __WindowHighlightGui.Hwnd
+}
+
+CapPickRaiseWindowPreview(candidate, inputMode) {
+    if (inputMode != "controller" || !IsObject(candidate)
+      || candidate["kind"] != "window")
+        return
+    hwnd := candidate["hwnd"]
+    if (!hwnd || !WinExist("ahk_id " hwnd))
+        return
+
+    ; Raise the preview without activating it and without making it permanently
+    ; topmost. The translucent picker highlight is shown immediately afterward.
+    try DllCall("user32\SetWindowPos"
+        , "ptr", hwnd, "ptr", 0
+        , "int", 0, "int", 0, "int", 0, "int", 0
+        , "uint", 0x0053) ; NOSIZE | NOMOVE | NOACTIVATE | SHOWWINDOW
+}
+
+CapPickCandidateIndex(candidate) {
+    global __CapPickState
+    if !IsObject(candidate) || !__CapPickState.Has("candidates")
+        return 0
+    for index, existing in __CapPickState["candidates"] {
+        if (candidate["kind"] = "window" && existing["kind"] = "window"
+         && candidate["hwnd"] = existing["hwnd"])
+            return index
+        if (candidate["kind"] = "region" && existing["kind"] = "region"
+         && candidate["monitor"] = existing["monitor"])
+            return index
+    }
+    return 0
+}
+
+CapPickSetWindowCandidate(candidate, index := 0, inputMode := "controller") {
+    global __CapPickState
+    if !IsObject(candidate)
+        return
+    state := __CapPickState
+    if !(state.Has("active") && state["active"] && state["kind"] = "window")
+        return
+    if !index
+        index := CapPickCandidateIndex(candidate)
+    state["currentCandidate"] := candidate
+    state["candidateIndex"] := index
+    state["inputMode"] := inputMode
+    CapPickRaiseWindowPreview(candidate, inputMode)
+    CapPickShowWindowCandidate(candidate)
+    CapPickUpdateHud(true)
+}
+
+CapPickCycleWindow(direction) {
+    global __CapPickState
+    state := __CapPickState
+    if !(state.Has("candidates") && state["candidates"].Length)
+        return
+    count := state["candidates"].Length
+    index := state.Has("candidateIndex") ? state["candidateIndex"] : 0
+    if !index
+        index := (direction < 0) ? count : 1
+    else
+        index := Mod(index - 1 + direction + count, count) + 1
+    CapPickSetWindowCandidate(state["candidates"][index], index, "controller")
+}
+
+; Window hover/click and controller/keyboard cycling share one candidate list.
 StartPickWindow(maxKB := "", *) {
-    global Cap_MaxKB
+    global Cap_MaxKB, __CapPickState, Cap_WinTit
 
     CancelAnyPick()
-
-    BeginPickHide()   ; <<< hide Translator + Explainer while picking
+    BeginPickHide()
     if (IsNumber(maxKB))
         Cap_MaxKB := Integer(maxKB)
 
-    ; The visual highlight is mouse-transparent, so capture the confirming click
-    ; globally instead of relying on that GUI to receive WM_LBUTTONDOWN.
-    Hotkey("LButton", PickWindowClick, "On")
+    CapPickStartState("window")
+    state := __CapPickState
+    state["candidates"] := CapPickEnumerateWindows()
+    state["candidateIndex"] := 0
+    MouseGetPos(&mouseX, &mouseY)
+    state["lastMouseX"] := mouseX - 1, state["lastMouseY"] := mouseY - 1
+
+    preferredIndex := 0
+    if (Cap_WinTit != "") {
+        for index, candidate in state["candidates"] {
+            if (candidate["kind"] = "window" && candidate["title"] = Cap_WinTit) {
+                preferredIndex := index
+                break
+            }
+        }
+    }
+    if !preferredIndex
+        preferredIndex := state["candidates"].Length ? 1 : 0
+    if preferredIndex
+        CapPickSetWindowCandidate(state["candidates"][preferredIndex], preferredIndex)
+
     SetTimer(PulseHover, 30)
-    ToolTip("Hover window and click to select…"), SetTimer(() => ToolTip(""), -1800)
+    PulseHover()
 }
 
 PickWindowUnderMouse() {
@@ -1178,65 +2003,69 @@ PickWindowUnderMouse() {
 }
 
 PulseHover() {
-    global __HoverBorderHwnd
-    static b := 0
-
-    hwnd := PickWindowUnderMouse()
-    if (!hwnd) {
-        if (__HoverBorderHwnd)
-            try WinHide "ahk_id " __HoverBorderHwnd
+    global __CapPickState
+    state := __CapPickState
+    if !(state.Has("active") && state["active"] && state["kind"] = "window")
         return
-    }
-
-    try WinGetPos &x, &y, &w, &h, "ahk_id " hwnd
-    catch {
-        if (__HoverBorderHwnd)
-            try WinHide "ahk_id " __HoverBorderHwnd
+    CoordMode("Mouse", "Screen")
+    MouseGetPos(&mouseX, &mouseY, &hwnd)
+    if (state.Has("lastMouseX") && mouseX = state["lastMouseX"] && mouseY = state["lastMouseY"])
         return
-    }
-    if (w <= 0 || h <= 0)
-        return
-
-    ; WS_EX_TRANSPARENT keeps this visual from becoming its own hover target;
-    ; WS_EX_NOACTIVATE keeps it from stealing focus while it follows the pointer.
-    if (!IsObject(b)) {
-        b := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale +E0x20 +E0x08000000")
-        b.BackColor := "00FFFF"
-        WinSetTransparent 60, b.Hwnd
-    }
-    b.Show("NA x" x " y" y " w" w " h" h)
-    __HoverBorderHwnd := b.Hwnd
+    state["lastMouseX"] := mouseX, state["lastMouseY"] := mouseY
+    candidate := CapPickWindowCandidate(hwnd, mouseX, mouseY)
+    if IsObject(candidate)
+        CapPickSetWindowCandidate(candidate, 0, "mouse")
 }
 
 PickWindowClick(*) {
-    ; Stop both the current global capture and any legacy message callback.
-    try Hotkey("LButton", PickWindowClick, "Off")
-    OnMessage(0x0201, PickWindowClick, 0)
-    SetTimer(PulseHover, 0)
-
-    ; Hide the hover border if it's still shown
-    global __HoverBorderHwnd
-    if IsSet(__HoverBorderHwnd) && __HoverBorderHwnd {
-        try WinHide "ahk_id " __HoverBorderHwnd
-    }
-
-    hwnd := PickWindowUnderMouse()
-    if (!hwnd) {
+    global __CapPickState
+    state := __CapPickState
+    if !(state.Has("active") && state["active"] && state["kind"] = "window")
+        return
+    CoordMode("Mouse", "Screen")
+    MouseGetPos(&mouseX, &mouseY, &hwnd)
+    candidate := CapPickWindowCandidate(hwnd, mouseX, mouseY)
+    if !IsObject(candidate) {
         ToolTip("No window"), SetTimer(() => ToolTip(""), -700)
         return
     }
-    tit := WinGetTitle("ahk_id " hwnd)
-    global Cap_Mode, Cap_WinTit
-    Cap_Mode := "window", Cap_WinTit := tit
-    IniWrite(Cap_Mode,   ControlIni, "capture", "mode")
-    IniWrite(Cap_WinTit, ControlIni, "capture", "winTitle")
-    ToolTip("Window selected: " tit), SetTimer(() => ToolTip(""), -900)
-	EndPickHide()  ; <<< restore overlays after window is set
+    CapPickSetWindowCandidate(candidate, 0, "mouse")
+    FinishWindowCandidate()
+}
+
+FinishWindowCandidate() {
+    global __CapPickState, Cap_Mode, Cap_WinTit, Cap_Rect, Cap_RectStr, ControlIni
+    state := __CapPickState
+    if !(state.Has("active") && state["active"] && state["kind"] = "window")
+        return
+    if !(state.Has("currentCandidate") && IsObject(state["currentCandidate"])) {
+        ToolTip("No window selected"), SetTimer(() => ToolTip(""), -800)
+        return
+    }
+    candidate := state["currentCandidate"]
+    if (candidate["kind"] = "region") {
+        Cap_Mode := "region"
+        Cap_Rect["x"] := candidate["x"], Cap_Rect["y"] := candidate["y"]
+        Cap_Rect["w"] := candidate["w"], Cap_Rect["h"] := candidate["h"]
+        Cap_RectStr := candidate["x"] "," candidate["y"] "," candidate["w"] "," candidate["h"]
+        IniWrite(Cap_Mode, ControlIni, "capture", "mode")
+        IniWrite(Cap_RectStr, ControlIni, "capture", "rect")
+        selectedText := candidate["label"]
+    } else {
+        Cap_Mode := "window", Cap_WinTit := candidate["title"]
+        IniWrite(Cap_Mode, ControlIni, "capture", "mode")
+        IniWrite(Cap_WinTit, ControlIni, "capture", "winTitle")
+        IniWrite(candidate["exe"], ControlIni, "capture", "winExe")
+        IniWrite(candidate["class"], ControlIni, "capture", "winClass")
+        selectedText := candidate["title"]
+    }
+    CapPickEndSession("selected")
+    ToolTip("Selected: " selectedText), SetTimer(() => ToolTip(""), -900)
 }
 
 ; Produce a screenshot file from current selection (persisted)
 CaptureOnceToFile(&outPath) {
-    global Cap_Mode, Cap_Rect, Cap_MaxKB, captureDir
+    global Cap_Mode, Cap_Rect, Cap_WinTit, Cap_MaxKB, captureDir
     global ControlIni, Cap_RectStr
 
     ; Always re-sync capture mode + rect from control.ini so that
@@ -1245,6 +2074,7 @@ CaptureOnceToFile(&outPath) {
     try {
         ; mode: "region" | "window"
         Cap_Mode := IniRead(ControlIni, "capture", "mode", Cap_Mode)
+        Cap_WinTit := IniRead(ControlIni, "capture", "winTitle", Cap_WinTit)
 
         ; rect: "x,y,w,h"
         newRectStr := IniRead(ControlIni, "capture", "rect", Cap_RectStr)
@@ -1368,7 +2198,7 @@ LoadOverlayBounds(){
     w := Max(w, MinW), h := Max(h, MinH)
 
     local b := Map("x", x, "y", y, "w", w, "h", h)
-    b := EnsureBoundsOnScreen(b)
+    b := EnsureBoundsOnScreen(b, savedDPI)
     DbgRect("LoadBounds after clamp", b["x"], b["y"], b["w"], b["h"])
     return b
 }
@@ -1533,6 +2363,8 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
     }
 
     local x := -1, y := -1, w := -1, h := -1
+    local capPickRequested := false, capPickKind := "", capPickMaxKB := ""
+    local showSavedRegion := true
     srcDPI := 0
 
     for pair in StrSplit(settingsStr, "|") {
@@ -1545,11 +2377,13 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             if IsSet(Overlay) && IsObject(Overlay)
                 WinSetTransparent(val, "ahk_id " Overlay.Hwnd)
 		        } else if (key = "capcmd" && val = "pick") {
-            __cap_pick := 1
+            capPickRequested := true
         } else if (key = "kind") {
-            __cap_kind := val   ; "region" | "window"
+            capPickKind := val   ; "region" | "window"
         } else if (key = "maxkb") {
-            __cap_maxkb := Integer(val)
+            capPickMaxKB := Integer(val)
+        } else if (key = "regionpreset") {
+            showSavedRegion := Integer(val) != 0
         } else if (key = "bg") {
             BOX_BG := val
         } else if (key = "b_out") {
@@ -1598,26 +2432,24 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
 
     if (x != -1 && y != -1 && w != -1 && h != -1) {
         Dbg("WM_COPYDATA parsed x=" x " y=" y " w=" w " h=" h " srcDPI=" srcDPI)
-        if (srcDPI > 0) {
-            cur := GetWindowDPI(Overlay.Hwnd)
-            scale := cur / Max(srcDPI, 1)
-            x := Round(x * scale), y := Round(y * scale)
-            w := Max(Round(w * scale), 100), h := Max(Round(h * scale), 100)
-            Dbg("WM_COPYDATA scaled-> x=" x " y=" y " w=" w " h=" h " curDPI=" cur " scale=" scale)
-        }
+        ; These values use the same mixed units as overlay.ini: physical X/Y
+        ; plus client W/H in DIPs. Gui.Show understands that representation;
+        ; Gui.Move scales every argument and would multiply X/Y at high DPI.
+        w := Max(w, 100), h := Max(h, 100)
         local bounds := Map("x", x, "y", y, "w", w, "h", h)
-        local safeBounds := EnsureBoundsOnScreen(bounds)
+        local boundsDPI := srcDPI > 0 ? srcDPI : GetWindowDPI(Overlay.Hwnd)
+        local safeBounds := EnsureBoundsOnScreen(bounds, boundsDPI)
         DbgRect("WM_COPYDATA clamp", safeBounds["x"], safeBounds["y"], safeBounds["w"], safeBounds["h"])
-        Overlay.Move(safeBounds["x"], safeBounds["y"], safeBounds["w"], safeBounds["h"])
+        Overlay.Show("NA x" safeBounds["x"] " y" safeBounds["y"] " w" safeBounds["w"] " h" safeBounds["h"])
         SetTimer(() => SaveOverlayBounds(), -75)
     }
 	
 	    ; Handle capture picker command after parsing all pairs
-    if (IsSet(__cap_pick) && __cap_pick = 1) {
-        if (__cap_kind = "region")
-            StartPickRegion(IsSet(__cap_maxkb) ? __cap_maxkb : "")
+    if capPickRequested {
+        if (capPickKind = "region")
+            StartPickRegion(capPickMaxKB, showSavedRegion)
         else
-            StartPickWindow(IsSet(__cap_maxkb) ? __cap_maxkb : "")
+            StartPickWindow(capPickMaxKB)
         return
     }
 
@@ -2217,7 +3049,7 @@ ShowContextMenu(gui, ctrl, *) {
 
 ResetWindow(*) {
     global Overlay
-    Overlay.Move(120, 120, 900, 500)
+    Overlay.Show("NA x120 y120 w900 h500")
     SaveOverlayBounds()
     OnResize(Overlay)
 }
@@ -2790,6 +3622,8 @@ if !DirExist(OVERLAY_TEMP_DIR)
 
 global __HK_FLAG := OVERLAY_TEMP_DIR "\hotkeys.reload"
 global __CMD_TOGGLE_EXPL := OVERLAY_TEMP_DIR "\cmd.toggle_explainer"
+global __CMD_TOGGLE_TRANSLATOR := OVERLAY_TEMP_DIR "\cmd.toggle_translator"
+global __CMD_RECAPTURE_REGION := OVERLAY_TEMP_DIR "\cmd.recapture_region"
 global __CMD_ONESHOT_TRANSLATE := OVERLAY_TEMP_DIR "\cmd.oneshot_translate"
 global __CMD_TAKE_SCREENSHOT := OVERLAY_TEMP_DIR "\cmd.take_screenshot"
 global __CMD_SCREENSHOT_TRANSLATION := OVERLAY_TEMP_DIR "\cmd.screenshot_translation"
@@ -2806,7 +3640,8 @@ CheckHotkeyReload() {
 }
 
 CheckCmdSignals() {
-    global __CMD_TOGGLE_EXPL, __CMD_ONESHOT_TRANSLATE, __CMD_TAKE_SCREENSHOT, __CMD_SCREENSHOT_TRANSLATION
+    global __CMD_TOGGLE_EXPL, __CMD_TOGGLE_TRANSLATOR, __CMD_RECAPTURE_REGION
+    global __CMD_ONESHOT_TRANSLATE, __CMD_TAKE_SCREENSHOT, __CMD_SCREENSHOT_TRANSLATION
     global __CMD_EXPLAIN_START
     global __EXPLAIN_MODE
     ; Only Explainer reacts to this command
@@ -2821,6 +3656,14 @@ CheckCmdSignals() {
     ; Only Translator reacts to screenshot commands
     if (__EXPLAIN_MODE)
         return
+    if FileExist(__CMD_TOGGLE_TRANSLATOR) {
+        try FileDelete(__CMD_TOGGLE_TRANSLATOR)
+        try ToggleTop()
+    }
+    if FileExist(__CMD_RECAPTURE_REGION) {
+        try FileDelete(__CMD_RECAPTURE_REGION)
+        try StartPickRegion()
+    }
     if FileExist(__CMD_ONESHOT_TRANSLATE) {
         try FileDelete(__CMD_ONESHOT_TRANSLATE)
         try oneshotTranslate()

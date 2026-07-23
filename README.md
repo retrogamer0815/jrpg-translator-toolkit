@@ -4,8 +4,9 @@ JRPG Translator is a Windows toolkit for translating Japanese games while you
 play. It combines screenshot translation, direct live-audio translation, and a
 separate Japanese-learning explainer with customizable overlay windows.
 
-The control panel works with a mouse and keyboard or entirely from a controller
-through mapping tools such as JoyToKey, Steam Input, or DS4Windows.
+The control panel works with a mouse and keyboard or directly from an
+XInput-compatible controller. Keyboard mapping tools such as JoyToKey, Steam
+Input, or DS4Windows remain optional for custom and multi-function mappings.
 
 ## Features
 
@@ -17,17 +18,20 @@ through mapping tools such as JoyToKey, Steam Input, or DS4Windows.
 - Optional automatic saving of explanations as text files for later study.
 - Independent Translator and Explainer overlays with configurable colors,
   fonts, borders, transparency, position, and size.
-- Translation and explanation prompt profiles editable from the control panel.
+- Translation and explanation prompts editable from the control panel.
+- Unified Profiles that store prompts, post-processing, terminology overrides,
+  capture target, and both overlays' appearance, position, and size.
 - Independent model lists for screenshot translation, live audio, and
   explanations, with API-backed model discovery and manual model-ID entry.
 - Selectable output language for live audio translation.
 - JP-to-target-language and target-language-to-target-language glossary profiles
   for consistent names, terminology, spelling, and preferred wording.
-- Configurable hotkeys, spatial controller navigation, and optional dark mode.
+- Configurable keyboard hotkeys, optional direct controller action bindings,
+  spatial controller navigation, and optional dark mode.
 - Non-activating overlays that can remain visible without taking focus from the
   game or pausing an emulator.
-- Optional per-game LaunchBox / Big Box integration with JoyToKey profile
-  switching.
+- Optional per-game LaunchBox / Big Box integration with JRPG Translator
+  Profile selection and independent JoyToKey profile switching.
 
 ## Requirements
 
@@ -95,16 +99,18 @@ also stored in `Settings/Explanations` for use as study material.
 
 ## Controller Use
 
-Map controller inputs to keyboard keys or JRPG Translator hotkeys with JoyToKey
-or another controller mapper. In the control panel:
+The control panel supports an XInput-compatible controller without a keyboard
+mapper:
 
-- Arrow keys move spatially between visible controls.
-- Enter activates buttons, checkboxes, and dropdown selections.
-- Page Up and Page Down switch tabs and work well when mapped to shoulder
-  buttons.
-- Transparency, font weight, and overlay colors can be adjusted without a
-  mouse; the controller color editor provides live hue, saturation, and
-  brightness previews.
+- The D-pad moves spatially between visible controls and tabs.
+- A / Cross confirms and B / Circle cancels.
+- The **Controls** tab can optionally bind actions such as Screenshot +
+  Translate, Explain, and overlay visibility directly to controller buttons.
+- Keyboard hotkeys remain available and can still be mapped through JoyToKey or
+  another controller mapper for custom, long-press, and multi-function layouts.
+- Font size, Max PNG size, transparency, font weight, and overlay colors can be
+  adjusted without a mouse. The controller color editor provides live hue,
+  saturation, and brightness previews.
 - Mouse-wheel or arrow-key mappings can scroll the visible Translator or
   Explainer overlay even when it does not own game focus.
 
@@ -119,6 +125,12 @@ the selected overlay and the right stick resizes it. Arrow keys provide a
 fallback; hold the configured Screenshot + Translate key while pressing arrows
 to resize. Enter saves the new bounds and Escape restores the previous bounds.
 
+Capture targets can also be configured without a mouse. **Capture > Region**
+reuses the analog-stick move and resize controls, while **Capture > Window**
+cycles through available windows and previews the selected target. A / Cross
+saves and B / Circle cancels either mode. Opening Region mode with a mouse keeps
+the conventional drag-to-select workflow.
+
 ## LaunchBox / Big Box Integration
 
 A preview plugin is included as source under `integrations/launchbox`. It adds
@@ -127,11 +139,14 @@ details menu. Per game, it can:
 
 - start JRPG Translator in background mode and close only the instance it
   started;
+- apply a selected JRPG Translator Profile for the game;
 - start JoyToKey or switch an existing instance to a selected profile; and
 - restore the previous JoyToKey profile when the game exits.
 
 The plugin setup window can browse for the Translator executable, JoyToKey
-executable, and JoyToKey profile folder. See
+executable, and JoyToKey profile folder. Big Box uses a controller-native path
+browser, while LaunchBox retains the standard Windows file and folder pickers.
+See
 [`integrations/launchbox/README.md`](integrations/launchbox/README.md) for build,
 packaging, and installation instructions.
 
@@ -162,12 +177,14 @@ Settings/
 |-- prompts/                     # screenshot translation prompts
 |-- prompts_explain/             # explanation prompts
 |-- glossaries/
-|-- profiles/                    # Translator overlay profiles
-`-- profiles_explainer/          # Explainer overlay profiles
+`-- game_profiles/               # unified Profiles
 ```
 
-Overlay size, position, appearance, and scrolling behavior are stored
-independently for the Translator and Explainer.
+A unified Profile stores the selected screenshot and explanation prompts,
+translation post-processing, terminology profiles, capture region or window,
+and both overlays' size, position, colors, transparency, font, size, and
+weight. Translator and Explainer settings remain independent inside each
+Profile.
 
 The source repository and release include three prompt families for every
 supported output language:
@@ -181,7 +198,10 @@ supported output language:
 Available language labels are `en`, `de`, `fr`, `es`, `it`, `pt`, `nl`, `pl`,
 `ru`, `uk`, `ko`, `zh-CN`, `zh-TW`, and `ja`. The screenshot prompts retain the
 literal `Transcript:` and `Translation:` headings because the output parser uses
-them; the translated content follows the language named by the profile.
+them; the translated content follows the language requested by the selected
+prompt. When several screenshots are submitted together, the bundled prompts
+instruct the model to reconstruct the passage in capture order before
+translating it.
 
 Additional prompt profiles created through the control panel remain local and
 are ignored by Git.

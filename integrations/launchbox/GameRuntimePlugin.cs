@@ -81,7 +81,7 @@ namespace JrpgTranslator.LaunchBox
 
                     if (game.TranslatorEnabled)
                     {
-                        StartTranslator(configuration, session);
+                        StartTranslator(configuration, game, session);
                     }
 
                     if (game.JoyToKeyEnabled)
@@ -111,7 +111,10 @@ namespace JrpgTranslator.LaunchBox
             }
         }
 
-        private static void StartTranslator(PluginConfiguration configuration, RuntimeSession session)
+        private static void StartTranslator(
+            PluginConfiguration configuration,
+            GameConfiguration game,
+            RuntimeSession session)
         {
             string executable = PluginPaths.ResolveTranslatorExecutable(configuration);
             if (!File.Exists(executable))
@@ -122,11 +125,7 @@ namespace JrpgTranslator.LaunchBox
 
             session.TranslatorBaseline = RuntimeProcessUtilities.GetProcessIds("JRPG Translator");
             session.OverlayBaseline = RuntimeProcessUtilities.GetProcessIds("overlay");
-            if (session.TranslatorBaseline.Count > 0)
-            {
-                RuntimeLog.Write("JRPG Translator was already running; it will be left open after the game.");
-                return;
-            }
+            bool translatorWasRunning = session.TranslatorBaseline.Count > 0;
 
             ProcessStartInfo startInfo = new ProcessStartInfo
             {
@@ -136,13 +135,33 @@ namespace JrpgTranslator.LaunchBox
                 CreateNoWindow = true
             };
             startInfo.ArgumentList.Add("--background");
+            if (!translatorWasRunning)
+            {
+                startInfo.ArgumentList.Add("--open-translator");
+            }
+            if (!string.IsNullOrWhiteSpace(game.TranslatorProfile))
+            {
+                startInfo.ArgumentList.Add("--profile");
+                startInfo.ArgumentList.Add(game.TranslatorProfile);
+            }
 
             using Process? process = Process.Start(startInfo);
+            if (translatorWasRunning)
+            {
+                RuntimeLog.Write(process == null
+                    ? "The running JRPG Translator could not receive the selected profile."
+                    : "The selected Profile was sent to the running JRPG Translator; it will be left open after the game.");
+                return;
+            }
+
             session.TranslatorStartedByPlugin = process != null;
             session.TranslatorProcessId = process?.Id;
             RuntimeLog.Write(process == null
                 ? "JRPG Translator could not be started."
-                : "JRPG Translator started for " + session.GameTitle + ".");
+                : "JRPG Translator started for " + session.GameTitle
+                    + (string.IsNullOrWhiteSpace(game.TranslatorProfile)
+                        ? "."
+                        : " with Profile '" + game.TranslatorProfile + "'."));
         }
 
         private static void StartJoyToKey(

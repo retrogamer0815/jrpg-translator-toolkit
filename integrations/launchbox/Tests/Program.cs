@@ -28,11 +28,25 @@ internal static class Program
             @"Apps\JRPG Translator\JRPG Translator.exe",
             StringComparison.Ordinal),
             "The default JRPG Translator path is incorrect.");
+
+        string translatorDirectory = Path.Combine(profileDirectory, "JRPG Translator");
+        string translatorProfilesDirectory = Path.Combine(translatorDirectory, "Settings", "game_profiles");
+        Directory.CreateDirectory(translatorProfilesDirectory);
+        string translatorExecutable = Path.Combine(translatorDirectory, "JRPG Translator.exe");
+        File.WriteAllText(translatorExecutable, string.Empty);
+        File.WriteAllText(Path.Combine(translatorProfilesDirectory, "Retro Style.ini"), "[profile]\nschemaVersion=1\n");
+        original.TranslatorExecutable = translatorExecutable;
+
+        string[] translatorProfiles = TranslatorProfileDiscovery.GetProfiles(original).ToArray();
+        Require(translatorProfiles.Contains("Retro Style", StringComparer.OrdinalIgnoreCase),
+            "The expected JRPG Translator Profile was not discovered.");
+
         original.UpsertGame(new GameConfiguration
         {
             GameId = "smoke-test-game",
             GameTitle = "Smoke Test Game",
             TranslatorEnabled = true,
+            TranslatorProfile = "Retro Style",
             JoyToKeyEnabled = true,
             JoyToKeyProfile = "PC-Engine Tr"
         });
@@ -47,6 +61,8 @@ internal static class Program
         GameConfiguration game = restored.GetGame("smoke-test-game", "Smoke Test Game");
         Require(game.TranslatorEnabled && game.JoyToKeyEnabled,
             "Per-game enabled settings did not round-trip.");
+        Require(string.Equals(game.TranslatorProfile, "Retro Style", StringComparison.Ordinal),
+            "The JRPG Translator Profile did not round-trip.");
         Require(string.Equals(game.JoyToKeyProfile, "PC-Engine Tr", StringComparison.Ordinal),
             "The JoyToKey profile did not round-trip.");
 
@@ -58,6 +74,8 @@ internal static class Program
         IGameMenuItemPlugin menuItem = new GameSetupMenuItem();
         Require(menuItem.ShowInLaunchBox && menuItem.ShowInBigBox,
             "The game setup command is not enabled for both LaunchBox and Big Box.");
+        Require(menuItem.IconImage != null,
+            "The game setup command icon resource could not be loaded.");
         Require(!menuItem.SupportsMultipleGames,
             "The game setup command should only appear for a single selected game.");
         Require(string.Equals(menuItem.Caption, "JRPG Translator Setup...", StringComparison.Ordinal),
@@ -84,7 +102,8 @@ internal static class Program
         File.Delete(testIni);
         Directory.Delete(profileDirectory, true);
 
-        Console.WriteLine("Smoke test passed: {0} JoyToKey profile(s), configuration, setup window, menu command, and launch lifecycle verified.",
+        Console.WriteLine("Smoke test passed: {0} JRPG Translator Profile(s), {1} JoyToKey profile(s), configuration, setup window, menu command, and launch lifecycle verified.",
+            translatorProfiles.Length,
             profiles.Length);
         return 0;
     }

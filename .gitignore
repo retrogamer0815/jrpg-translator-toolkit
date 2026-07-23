@@ -11,10 +11,9 @@ Settings/Explanations/
 Settings/profiles/
 Settings/profiles_explainer/
 Settings/prompts/*
-!Settings/prompts/default_en.txt
-!Settings/prompts/default_with_kanji_reading_en.txt
+!Settings/prompts/default_*.txt
 Settings/prompts_explain/*
-!Settings/prompts_explain/default_en.txt
+!Settings/prompts_explain/default_*.txt
 Settings/glossaries/*
 !Settings/glossaries/example/
 !Settings/glossaries/example/*.txt
@@ -33,4 +32,3 @@ __pycache__/
 # Captures and local test media
 *_cap.png
 Screenshot *.png
-

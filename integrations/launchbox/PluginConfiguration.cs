@@ -47,6 +47,7 @@ namespace JrpgTranslator.LaunchBox
         public string GameId { get; set; } = string.Empty;
         public string GameTitle { get; set; } = string.Empty;
         public bool TranslatorEnabled { get; set; }
+        public string TranslatorProfile { get; set; } = string.Empty;
         public bool JoyToKeyEnabled { get; set; }
         public string JoyToKeyProfile { get; set; } = string.Empty;
 
@@ -57,6 +58,7 @@ namespace JrpgTranslator.LaunchBox
                 GameId = GameId,
                 GameTitle = GameTitle,
                 TranslatorEnabled = TranslatorEnabled,
+                TranslatorProfile = TranslatorProfile,
                 JoyToKeyEnabled = JoyToKeyEnabled,
                 JoyToKeyProfile = JoyToKeyProfile
             };
@@ -260,6 +262,34 @@ namespace JrpgTranslator.LaunchBox
             }
 
             return Directory.EnumerateFiles(directory, "*.cfg", SearchOption.TopDirectoryOnly)
+                .Select(Path.GetFileNameWithoutExtension)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
+                .ToArray()!;
+        }
+    }
+
+    public static class TranslatorProfileDiscovery
+    {
+        public static string GetProfilesDirectory(PluginConfiguration configuration)
+        {
+            string executable = PluginPaths.ResolveTranslatorExecutable(configuration);
+            string? executableDirectory = Path.GetDirectoryName(executable);
+            return string.IsNullOrWhiteSpace(executableDirectory)
+                ? string.Empty
+                : Path.Combine(executableDirectory, "Settings", "game_profiles");
+        }
+
+        public static IReadOnlyList<string> GetProfiles(PluginConfiguration configuration)
+        {
+            string directory = GetProfilesDirectory(configuration);
+            if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
+            {
+                return Array.Empty<string>();
+            }
+
+            return Directory.EnumerateFiles(directory, "*.ini", SearchOption.TopDirectoryOnly)
                 .Select(Path.GetFileNameWithoutExtension)
                 .Where(name => !string.IsNullOrWhiteSpace(name))
                 .Distinct(StringComparer.OrdinalIgnoreCase)

@@ -2,6 +2,90 @@
 
 All notable changes to JRPG Translator are documented here.
 
+## 0.9.0 - 2026-07-23
+
+This release unifies per-game configuration into Profiles, expands native
+controller support across the control panel and capture tools, and turns the
+LaunchBox / Big Box integration into a practical controller-first launcher.
+
+### Unified Profiles
+
+- Added a dedicated Profiles tab for saving and applying complete setups.
+- Profiles store the selected screenshot and explanation prompts, translation
+  post-processing, terminology profiles, capture region or window, and both
+  overlays' size, position, colors, transparency, font, size, and weight.
+- Replaced the separate Translator and Explainer appearance-profile controls
+  with the unified profile workflow.
+- Applying a Profile updates open overlays safely, keeps their saved positions
+  on screen, and supports background startup through `--profile`.
+- Added per-game Profile selection to the LaunchBox / Big Box plugin.
+
+### Native controller controls
+
+- Renamed the Hotkeys tab to Controls and added separate Keyboard inputs and
+  Controller inputs views.
+- Added optional direct XInput action bindings without removing keyboard
+  hotkeys or compatibility with JoyToKey and similar mapping tools.
+- Added native D-pad navigation plus controller A / Cross confirmation and
+  B / Circle cancellation throughout the control panel, including duplicate
+  input suppression when a controller mapper also emits arrow keys.
+- Added controller operation for model dialogs, font size, Max PNG size,
+  transparency, color sliders, dropdowns, and other compact editors.
+- Added accelerated held-input behavior for color and transparency sliders.
+
+### Controller capture setup
+
+- Added a controller-first Capture > Region mode. The left stick moves the
+  current region and the right stick resizes it; A saves and B cancels.
+- Added a controller-first Capture > Window mode with directional window
+  cycling, selected-window highlighting, and safe foreground previews.
+- Preserved the conventional drag-to-select Region flow when capture setup is
+  opened with a mouse.
+- Improved capture-mode dialogs, dark-mode styling, spatial navigation,
+  instruction HUD layout, cancellation, click-through cleanup, and right-stick
+  axis consistency.
+
+### Overlay and appearance refinements
+
+- Extended direct-controller support for moving and resizing Translator and
+  Explainer overlays, including immediate A / B confirmation and cancellation.
+- Added controller-friendly font-size adjustment and clearer active-control
+  indicators.
+- Improved the hue, saturation, and brightness editor with informative
+  gradients, live previews, dark-mode focus frames, and faster held movement.
+- Fixed recurring caret, focus, color, and overlay-HUD issues during resizing,
+  scrolling, profile changes, and appearance updates.
+
+### LaunchBox / Big Box integration
+
+- Added per-game JRPG Translator Profile selection alongside JoyToKey profiles.
+- Fixed cold startup so configured games launch JRPG Translator even when it is
+  not already running.
+- Made JRPG Translator and JoyToKey independently optional per game.
+- Added direct-controller navigation in Big Box while retaining normal mouse
+  dialogs in LaunchBox.
+- Added a Big Box-native controller file and folder browser for locating the
+  Translator executable, JoyToKey executable, and JoyToKey profiles.
+- Improved directional navigation, dropdown reliability, focus styling,
+  theme contrast, window sizing, explanatory text, and the context-menu icon.
+
+### Prompts and model workflow
+
+- Updated every screenshot-translation prompt to combine multiple screenshots
+  in capture order before translating the complete reconstructed passage.
+- Rebuilt all localized explanation prompts from the updated English learning
+  prompt while preserving language-specific instructions.
+- Improved controller focus and cleanup in online model discovery dialogs,
+  including correct action-button highlighting and safe cancellation.
+
+### Reliability
+
+- Fixed destroyed-control warnings after closing model, color, capture, and
+  adjustment dialogs.
+- Fixed capture selection leaving an invisible input-blocking overlay behind.
+- Improved native-controller polling and transient input handling across modal
+  dialogs and overlay adjustment modes.
+
 ## 0.8.5 - 2026-07-21
 
 This release adds controller-driven overlay positioning, fixes repeat requests
