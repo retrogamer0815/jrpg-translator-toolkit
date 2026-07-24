@@ -319,6 +319,84 @@ def capture_blocks(speaker):
             yield pcm.tobytes()
 
 
+def test_audio_input(duration_seconds=4.0):
+    """Measure real loopback samples without connecting to a model API."""
+    speaker = _pick_speaker()
+    if speaker is None:
+        raise RuntimeError(
+            "No playback device found. Check Windows sound settings."
+        )
+
+    block_size = int(CAPTURE_RATE * BLOCK_DUR)
+    block_count = max(
+        1, int(round(float(duration_seconds) / BLOCK_DUR))
+    )
+    mic = sc.get_microphone(id=speaker.name, include_loopback=True)
+    peak = 0.0
+    sum_squares = 0.0
+    sample_count = 0
+
+    with mic.recorder(samplerate=CAPTURE_RATE, channels=2) as rec:
+        for _ in range(block_count):
+            data = np.asarray(
+                rec.record(numframes=block_size), dtype=np.float64
+            )
+            if data.size == 0:
+                continue
+            finite = data[np.isfinite(data)]
+            if finite.size == 0:
+                continue
+            peak = max(peak, float(np.max(np.abs(finite))))
+            sum_squares += float(np.dot(finite, finite))
+            sample_count += int(finite.size)
+
+    rms = (
+        float(np.sqrt(sum_squares / sample_count))
+        if sample_count
+        else 0.0
+    )
+    # WASAPI loopback silence is normally exactly zero. These thresholds still
+    # accept very quiet game audio while rejecting numerical background noise.
+    detected = peak >= 0.001 or rms >= 0.0002
+    return detected, peak, rms, speaker.name
+
+
+def emit_audio_test_result(status, detail=""):
+    detail = str(detail).replace("\r", " ").replace("\n", " ").strip()
+    line = f"JRPG_AUDIO_TEST:{status}"
+    if detail:
+        line += ":" + detail
+    result_path = os.environ.get("AUDIO_TEST_RESULT_FILE", "").strip()
+    if result_path:
+        try:
+            with open(
+                result_path, "w", encoding="utf-8", newline="\n"
+            ) as result_file:
+                result_file.write(line + "\n")
+        except Exception:
+            pass
+    print(line)
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def run_audio_test():
+    try:
+        detected, peak, rms, speaker_name = test_audio_input()
+        detail = (
+            f"peak={peak:.6f};rms={rms:.6f};device={speaker_name}"
+        )
+        emit_audio_test_result(
+            "DETECTED" if detected else "SILENT", detail
+        )
+        return 0 if detected else 2
+    except Exception as exc:
+        emit_audio_test_result("ERROR", exc)
+        return 1
+
+
 def trim_display(text):
     text = text.strip()
     if len(text) <= MAX_DISPLAY_CHARS:
@@ -556,4 +634,10 @@ if __name__ == "__main__":
         except Exception:
             pass
         os._exit(0)
+    if "--test-audio" in sys.argv:
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
+        except Exception:
+            pass
+        os._exit(run_audio_test())
     main()

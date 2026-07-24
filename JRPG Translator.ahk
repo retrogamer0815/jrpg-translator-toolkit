@@ -33,6 +33,7 @@ global CPOverlayAdjustState := Map("active", false)
 global CPOverlayAdjustHotkeysBound := false
 global CP_OVERLAY_ADJUST_FLAG := A_Temp "\JRPG_Overlay\controller_adjust.active"
 global CPControllerInputsEnabled := false
+global CPControllerDpadNavigationEnabled := true
 global CPControllerCaptureActive := false
 global CPControllerPreviousTokens := Map()
 global CPControllerBindings := Map()
@@ -165,6 +166,33 @@ CPOnDebugModeToggle(*) {
     MarkDirty()
 }
 
+PromptPostprocMode(promptName := "") {
+    global directModelOutput
+    if directModelOutput
+        return "none"
+
+    normalized := StrLower(Trim(promptName))
+    if InStr(normalized, "with_transcript") || InStr(normalized, "with_kanji_reading")
+        return "tt"
+    return "translation"
+}
+
+SyncPromptPostproc(promptName := "") {
+    global promptProfile, imgPostproc
+    if (promptName = "")
+        promptName := promptProfile
+    imgPostproc := PromptPostprocMode(promptName)
+    return imgPostproc
+}
+
+CPOnDirectModelOutputToggle(*) {
+    global cbDirectModelOutput, directModelOutput, promptProfile, imgPostproc
+    directModelOutput := cbDirectModelOutput.Value ? 1 : 0
+    imgPostproc := SyncPromptPostproc(promptProfile)
+    SaveAll()
+    ApplyShotSettings()
+}
+
 SetDebugMode(__DBG_ENABLED_CP)
 
 DbgCP(msg) {
@@ -206,7 +234,7 @@ global CPCapturePickerNavigation := Map()
 ; The existing layout remains a fixed minimum design surface. When the window is
 ; smaller, native scrollbars expose that surface instead of compressing controls.
 global CP_CANVAS_MIN_W := 890
-global CP_CANVAS_MIN_H := 680
+global CP_CANVAS_MIN_H := 640
 global CP_VIEWPORT_MIN_W := 640
 global CP_VIEWPORT_MIN_H := 480
 global CPCanvasScrollX := 0
@@ -895,6 +923,45 @@ CPOnDarkModeToggle(*) {
     controlDarkMode := chkDarkMode.Value ? 1 : 0
     IniWrite(controlDarkMode, iniPath, "cfg_control", "darkMode")
     CPApplyControlPanelTheme()
+}
+
+CPClampControlPanelOpacity(value) {
+    return Max(70, Min(100, Round(value)))
+}
+
+CPApplyControlPanelOpacity(persist := false) {
+    global ui, slControlOpacity, lblControlOpacityPct
+    global controlPanelOpacity, iniPath
+
+    controlPanelOpacity := CPClampControlPanelOpacity(controlPanelOpacity)
+    if (IsSet(slControlOpacity) && slControlOpacity) {
+        try {
+            if (slControlOpacity.Value != controlPanelOpacity)
+                slControlOpacity.Value := controlPanelOpacity
+        }
+    }
+    if (IsSet(lblControlOpacityPct) && lblControlOpacityPct)
+        try lblControlOpacityPct.Text := controlPanelOpacity "%"
+
+    if (persist)
+        IniWrite(controlPanelOpacity, iniPath, "cfg_control", "opacity")
+
+    if (!IsSet(ui) || !ui || !ui.Hwnd)
+        return
+
+    targetWindow := "ahk_id " ui.Hwnd
+    try {
+        if (controlPanelOpacity >= 100)
+            WinSetTransparent("Off", targetWindow)
+        else
+            WinSetTransparent(Round(controlPanelOpacity * 255 / 100), targetWindow)
+    }
+}
+
+CPOnControlPanelOpacityChange(ctrl, *) {
+    global controlPanelOpacity
+    controlPanelOpacity := CPClampControlPanelOpacity(ctrl.Value)
+    CPApplyControlPanelOpacity(true)
 }
 
 ; =========================
@@ -2286,18 +2353,29 @@ CPNavSpace(*) {
     CPNavActivate("Space")
 }
 
+CPNavCancelCurrent() {
+    if CPFontSizeAdjustCancel()
+        return true
+    if CPMaxPngAdjustCancel()
+        return true
+    cpNavFocusedHwnd := CPFocusedHwnd()
+    if (cpNavFocusedHwnd && CPHwndIsCombo(cpNavFocusedHwnd)
+     && CPComboDropped(cpNavFocusedHwnd)) {
+        CPShowCombo(cpNavFocusedHwnd, false)
+        return true
+    }
+    return false
+}
+
 CPNavEscape(*) {
     if CPControllerKeyboardMirrorActive("Cancel")
         return
-    if CPFontSizeAdjustCancel()
-        return
-    if CPMaxPngAdjustCancel()
-        return
-    HideControlPanel()
+    CPNavCancelCurrent()
 }
 
 CPNavSwitchTab(dir) {
     global tab, CPTabVisiblePages, CPFocusVisualNavHwnd
+
     if !(IsSet(tab) && tab && tab.Hwnd)
         return
 
@@ -2343,10 +2421,10 @@ RegisterControlPanelArrowNavigation() {
         return
 
     HotIfWinActive("ahk_id " ui.Hwnd)
-    try Hotkey("$Down", CPNavDown, "On")
-    try Hotkey("$Up", CPNavUp, "On")
-    try Hotkey("$Right", CPNavRight, "On")
-    try Hotkey("$Left", CPNavLeft, "On")
+try Hotkey("$Down", CPNavDown, "On")
+try Hotkey("$Up", CPNavUp, "On")
+try Hotkey("$Right", CPNavRight, "On")
+try Hotkey("$Left", CPNavLeft, "On")
     try Hotkey("$Enter", CPNavEnter, "On")
     try Hotkey("$NumpadEnter", CPNavEnter, "On")
     try Hotkey("$Space", CPNavSpace, "On")
@@ -2522,8 +2600,8 @@ defEN2ENGlossaryProfile := "default"
 defPromptProfile := "default_en"
 ; EXPLAIN: default prompt profile
 defExplainPromptProfile := "default_en"
-; (from previous build) screenshot post-processing
-defImgPostproc := "tt"  ; "tt" | "translation" | "none"
+; Advanced override for showing the screenshot model response unchanged.
+defDirectModelOutput := 0
 
 ; AUDIO live translation target language default
 defAudioTargetLang := "English (en)"
@@ -2548,6 +2626,8 @@ audioTargetLangs := [
 global gPidAudio := 0
 global gJustStoppedUntil := 0
 global gLastAction := ""
+global gAudioTestPid := 0
+global gAudioTestResultPath := ""
 global CPFocusVisualNavHwnd := 0
 
 ; -------- INI helpers --------
@@ -2603,8 +2683,12 @@ capRect    := IniRead(iniPath, "capture", "rect", "")                 ; "x,y,w,h
 
 showPathsTab := Integer(Load("showPathsTab", defShowPathsTab, "cfg")) ? 1 : 0
 debugMode := Integer(Load("debugMode", defDebugMode, "cfg"))
+directModelOutput := Integer(Load("directModelOutput", defDirectModelOutput, "cfg")) ? 1 : 0
 SetDebugMode(debugMode)
 controlDarkMode := Integer(Load("darkMode", 0, "cfg_control")) ? 1 : 0
+controlPanelOpacity := 100
+try controlPanelOpacity := Integer(Load("opacity", 100, "cfg_control"))
+controlPanelOpacity := CPClampControlPanelOpacity(controlPanelOpacity)
 CPSetPreferredAppDarkMode(controlDarkMode)
 
 ; overlay colors
@@ -2676,8 +2760,9 @@ promptProfile    := Load("promptProfile",    defPromptProfile)
 ; EXPLAIN: current prompt profile
 explainPromptProfile := Load("explainPromptProfile", defExplainPromptProfile)
 
-; (from previous build) post-processing mode
-imgPostproc      := Load("imgPostproc",      defImgPostproc)
+; Screenshot extraction follows the selected prompt name unless the advanced
+; direct-output override is enabled.
+imgPostproc      := PromptPostprocMode(promptProfile)
 audioTargetLang := Load("audioTargetLanguage", defAudioTargetLang)
 if !IndexOf(audioTargetLangs, audioTargetLang)
     audioTargetLang := defAudioTargetLang
@@ -2819,7 +2904,7 @@ SaveAll(){
     global pythonExe,audioScript,overlayAhk,imgScript,overlayTrans,captureDir
     global trModel,audioProvider,geminiAudioModel,audioTargetLang
     global imgProvider,imgModel,geminiImgModel
-    global iniPath, debugMode, showPathsTab
+    global iniPath, debugMode, showPathsTab, directModelOutput
     global capMaxKB,capMode,capRect
     global boxBgHex,bdrOutHex,bdrInHex,txtHex
     global fontName,fontSize,fontBold
@@ -2827,10 +2912,10 @@ SaveAll(){
     global bdrOutW,bdrInW
     global model_openai_img, model_gemini_img, model_openai_explain, model_gemini_explain
     global model_openai_audio, model_gemini_audio
-    global promptProfile, imgPostproc
- 	global promptProfile, imgPostproc, chkDel, chkTop, chkDarkMode, controlDarkMode
+    global promptProfile, imgPostproc, chkDel, chkTop, chkDarkMode, controlDarkMode, controlPanelOpacity
 
     SyncUnifiedWindowAppearance()
+    imgPostproc := SyncPromptPostproc(promptProfile)
     IniWrite(pythonExe,       iniPath, "cfg", "pythonExe")
 	IniWrite(captureDir,      iniPath, "paths", "captureDir")
 
@@ -2853,6 +2938,7 @@ SaveAll(){
     IniWrite(explainScript,   iniPath, "cfg", "explainScript")
 	IniWrite(chkTop.Value ? 1 : 0, iniPath, "cfg_control", "winTop")
     IniWrite(controlDarkMode ? 1 : 0, iniPath, "cfg_control", "darkMode")
+    IniWrite(controlPanelOpacity, iniPath, "cfg_control", "opacity")
     IniWrite(trModel,         iniPath, "cfg", "trModel")
     IniWrite(audioProvider,   iniPath, "cfg", "audioProvider")
     IniWrite(geminiAudioModel,iniPath, "cfg", "geminiAudioModel")
@@ -2867,6 +2953,7 @@ SaveAll(){
     IniWrite(imgPostproc,     iniPath, "cfg", "post")
 	IniWrite(showPathsTab, iniPath, "cfg", "showPathsTab")
 	IniWrite(debugMode, iniPath, "cfg", "debugMode")
+    IniWrite(directModelOutput, iniPath, "cfg", "directModelOutput")
 	; Also persist the delete-after-use toggle to [paths]
     IniWrite(chkDel.Value ? 1 : 0, iniPath, "paths", "deleteAfterUse")
 
@@ -3420,8 +3507,7 @@ _SendCapPick(kind, inputSource := "mouse") {
 ; Push current Screenshot Translation selections to environment so the next run uses them
 ; Push current Screenshot Translation selections to environment so the next run uses them
 ApplyShotSettings(*) {
-    global ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt, ddlPost
-    global postCodes  ; mapping we added earlier
+    global ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt, imgPostproc
     global chkGuess   ; <â€” new: UI toggle for highlighting
 
     ; Read current selections
@@ -3440,7 +3526,8 @@ ApplyShotSettings(*) {
     EnvSet("PROVIDER", provider)
     EnvSet("PROMPT_PROFILE", ddlPrompt.Text)
     EnvSet("PROMPT_FILE", "")
-    EnvSet("POSTPROC_MODE", postCodes[ddlPost.Value])
+    imgPostproc := SyncPromptPostproc(ddlPrompt.Text)
+    EnvSet("POSTPROC_MODE", imgPostproc)
 
     ; --- Highlight guessed subjects ---
     EnvSet("SHOT_ITALICIZE_GUESSED", chkGuess.Value ? "1" : "0")
@@ -3596,8 +3683,8 @@ FixEditableCombo(ctrl) {
 
 ; Convenience: fix all editable combos we use
 FixAllEditableCombos() {
-    global ddlAProv, ddlA_GM, ddlTR, ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt, ddlPost
-    for c in [ddlAProv, ddlA_GM, ddlTR, ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt, ddlPost]
+    global ddlAProv, ddlA_GM, ddlTR, ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt
+    for c in [ddlAProv, ddlA_GM, ddlTR, ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt]
         FixEditableCombo(c)
 }
 
@@ -3789,6 +3876,7 @@ CaptureHotkey(init := "") {
     dlg.OnEvent("Close",  (*) => (result := "__CANCEL__", closed := true))  ; window X
 
     dlg.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(dlg)
     while !closed
         Sleep(30)
     return result
@@ -4204,6 +4292,22 @@ CPControllerEnabledChanged(*) {
     CPControllerSetEnabled(cbControllerInputsEnabled.Value != 0)
 }
 
+CPControllerSetDpadNavigationEnabled(enabled, persist := true) {
+    global iniPath, CPControllerDpadNavigationEnabled
+    global cbControllerDpadNavigationEnabled
+    CPControllerDpadNavigationEnabled := enabled ? true : false
+    if IsSet(cbControllerDpadNavigationEnabled)
+        cbControllerDpadNavigationEnabled.Value := CPControllerDpadNavigationEnabled ? 1 : 0
+    if persist
+        IniWrite(CPControllerDpadNavigationEnabled ? 1 : 0, iniPath, "controller_inputs", "dpad_navigation")
+    CPControllerResetNavigation()
+}
+
+CPControllerDpadNavigationChanged(*) {
+    global cbControllerDpadNavigationEnabled
+    CPControllerSetDpadNavigationEnabled(cbControllerDpadNavigationEnabled.Value != 0)
+}
+
 CPOverlayWindowHwnd(title) {
     oldMode := A_TitleMatchMode
     oldHidden := A_DetectHiddenWindows
@@ -4315,17 +4419,19 @@ CPControllerNavigationTarget() {
 }
 
 CPControllerNavigationState(snapshot) {
+    global CPControllerDpadNavigationEnabled
     cpNavTokens := snapshot["tokens"]
     cpNavIsXInput := InStr(snapshot["name"], "XInput controller ") = 1
     cpNavIsPlayStation := RegExMatch(snapshot["name"], "i)(DualSense|DualShock|Wireless Controller|PlayStation)")
     cpNavConfirmToken := cpNavIsPlayStation ? "J:Button 2" : "J:Button 1"
     cpNavCancelToken := cpNavIsPlayStation ? "J:Button 3" : "J:Button 2"
+    cpNavDpadEnabled := CPControllerDpadNavigationEnabled
 
     return Map(
-        "Up", cpNavTokens.Has(cpNavIsXInput ? "X:DPAD_UP" : "J:D-pad Up"),
-        "Down", cpNavTokens.Has(cpNavIsXInput ? "X:DPAD_DOWN" : "J:D-pad Down"),
-        "Left", cpNavTokens.Has(cpNavIsXInput ? "X:DPAD_LEFT" : "J:D-pad Left"),
-        "Right", cpNavTokens.Has(cpNavIsXInput ? "X:DPAD_RIGHT" : "J:D-pad Right"),
+        "Up", cpNavDpadEnabled && cpNavTokens.Has(cpNavIsXInput ? "X:DPAD_UP" : "J:D-pad Up"),
+        "Down", cpNavDpadEnabled && cpNavTokens.Has(cpNavIsXInput ? "X:DPAD_DOWN" : "J:D-pad Down"),
+        "Left", cpNavDpadEnabled && cpNavTokens.Has(cpNavIsXInput ? "X:DPAD_LEFT" : "J:D-pad Left"),
+        "Right", cpNavDpadEnabled && cpNavTokens.Has(cpNavIsXInput ? "X:DPAD_RIGHT" : "J:D-pad Right"),
         "Activate", cpNavTokens.Has(cpNavIsXInput ? "X:A" : cpNavConfirmToken),
         "Cancel", cpNavTokens.Has(cpNavIsXInput ? "X:B" : cpNavCancelToken)
     )
@@ -4355,6 +4461,7 @@ CPControllerSendDialogKey(keyName) {
 
 CPControllerDispatchNavigation(command, targetHwnd) {
     global ui, CPControllerLastNativeNavigationAt
+
     if (targetHwnd = ui.Hwnd) {
         CPControllerLastNativeNavigationAt[command] := A_TickCount
         switch command {
@@ -4365,17 +4472,7 @@ CPControllerDispatchNavigation(command, targetHwnd) {
                 ; from the native controller path itself.
                 CPNavActivate("Enter")
             case "Cancel":
-                if CPFontSizeAdjustCancel()
-                    return
-                if CPMaxPngAdjustCancel()
-                    return
-                ; B / Circle is reserved for backing out of a temporary UI
-                ; state. The main panel has a dedicated hide/show action, so a
-                ; stray cancel press must never hide it.
-                cpNavFocusedHwnd := CPFocusedHwnd()
-                if (cpNavFocusedHwnd && CPHwndIsCombo(cpNavFocusedHwnd)
-                 && CPComboDropped(cpNavFocusedHwnd))
-                    CPShowCombo(cpNavFocusedHwnd, false)
+                CPNavCancelCurrent()
         }
         return
     }
@@ -4630,7 +4727,7 @@ AddModelValue(arr, key, combo, newModel) {
 }
 
 AddModel(arr, key, combo) {
-    newModel := Trim(InputBox("Add model:", "Add").Value)
+    newModel := Trim(CPThemedInputBox("Add model:", "Add", "", "", 360).Value)
     return AddModelValue(arr, key, combo, newModel)
 }
 
@@ -4648,6 +4745,40 @@ CPApplyOwnedDialogTheme(dlg) {
             CPApplyThemeToControl(controlHwnd, controlDarkMode)
     }
     try DllCall("user32\RedrawWindow", "ptr", dlg.Hwnd, "ptr", 0, "ptr", 0, "uint", 0x185)
+}
+
+CPThemedInputBox(promptText, dialogTitle, infoText := "", initialValue := "", dialogWidth := 420) {
+    global ui
+    result := {Result: "Cancel", Value: ""}
+    closed := false
+    contentWidth := Max(280, dialogWidth - 32)
+
+    dlg := Gui("+Owner" ui.Hwnd " +AlwaysOnTop", dialogTitle)
+    dlg.MarginX := 16
+    dlg.MarginY := 14
+    dlg.Add("Text", "xm w" contentWidth, promptText)
+    if (infoText != "")
+        dlg.Add("Text", "xm y+8 w" contentWidth, infoText)
+    editor := dlg.Add("Edit", "xm y+12 w" contentWidth, initialValue)
+    btnOK := dlg.Add("Button", "xm y+14 w120 Default", "OK")
+    btnCancel := dlg.Add("Button", "x+10 yp w120", "Cancel")
+
+    btnOK.OnEvent("Click", (*) => (
+        result.Result := "OK",
+        result.Value := editor.Value,
+        closed := true,
+        dlg.Destroy()
+    ))
+    btnCancel.OnEvent("Click", (*) => (closed := true, dlg.Destroy()))
+    dlg.OnEvent("Escape", (*) => (closed := true, dlg.Destroy()))
+    dlg.OnEvent("Close", (*) => (closed := true))
+
+    dlg.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(dlg)
+    try editor.Focus()
+    while !closed
+        Sleep(30)
+    return result
 }
 
 CPShowTextEditorDialog(dlg, editorCtrl) {
@@ -5459,6 +5590,7 @@ LaunchOverlay(*) {
     ; Pass prompt profile & post-processing.
     EnvSet("PROMPT_PROFILE", promptProfile)
     EnvSet("PROMPT_FILE", "")
+    imgPostproc := SyncPromptPostproc(promptProfile)
     EnvSet("POSTPROC_MODE", imgPostproc)
 	EnvSet "JRPG_DEBUG", (debugMode ? "1" : "0")
     EnvSet("PYTHONIOENCODING","utf-8")
@@ -6457,8 +6589,9 @@ GameProfileAppendWarning(&warnings, message) {
 }
 
 GameProfileSave(name, announce := true) {
-    global iniPath, postCodes
-    global ddlPrompt, ddlPost, ddlEPr, ddlJPG, ddlENG
+    global iniPath
+    global CPControllerDpadNavigationEnabled
+    global ddlPrompt, ddlEPr, ddlJPG, ddlENG
     global chkGuess, chkName, chkOpenTW, chkTop_TW, chkOpenEW, chkTop_EW
     global overlayTrans, boxBgHex, txtHex, nameHex, fontName, fontSize, fontBold
     global overlayTrans_EW, boxBgHex_EW, txtHex_EW, fontName_EW, fontSize_EW, fontBold_EW
@@ -6476,7 +6609,6 @@ GameProfileSave(name, announce := true) {
 
         promptName := Trim(ddlPrompt.Text)
         explainPromptName := Trim(ddlEPr.Text)
-        postValue := (ddlPost.Value >= 1 && ddlPost.Value <= postCodes.Length) ? postCodes[ddlPost.Value] : "tt"
         jpProfile := Trim(ddlJPG.Text)
         tlProfile := Trim(ddlENG.Text)
 
@@ -6485,7 +6617,6 @@ GameProfileSave(name, announce := true) {
         IniWriteRetry(FormatTime(, "yyyy-MM-dd HH:mm:ss"), path, "profile", "updated")
 
         IniWriteRetry(promptName, path, "screenshot", "promptProfile")
-        IniWriteRetry(postValue, path, "screenshot", "postProcessing")
         IniWriteRetry(IniRead(iniPath, "capture", "mode", "region"), path, "screenshot", "captureMode")
         IniWriteRetry(IniRead(iniPath, "capture", "rect", ""), path, "screenshot", "captureRect")
         IniWriteRetry(IniRead(iniPath, "capture", "winTitle", ""), path, "screenshot", "captureWindowTitle")
@@ -6523,6 +6654,7 @@ GameProfileSave(name, announce := true) {
                 IniWriteRetry(Integer(value), path, "explainer_control_bounds", key)
         }
 
+        IniWriteRetry(CPControllerDpadNavigationEnabled ? 1 : 0, path, "controls", "dpadNavigation")
         IniWriteRetry(name, iniPath, "game_profiles", "active")
         DbgCP("Saved unified profile: " name)
         if announce
@@ -6589,12 +6721,12 @@ GameProfileApplyBounds(title, profilePath, section) {
 }
 
 GameProfileApply(name, announce := true) {
-    global iniPath, postCodes
+    global iniPath
     global promptProfile, explainPromptProfile, imgPostproc, jp2enGlossaryProfile, en2enGlossaryProfile
     global capMode, capRect, capWinInfo
     global overlayTrans, boxBgHex, txtHex, nameHex, fontName, fontSize, fontBold
     global overlayTrans_EW, boxBgHex_EW, txtHex_EW, fontName_EW, fontSize_EW, fontBold_EW
-    global ddlPrompt, ddlPost, ddlEPr, ddlJPG, ddlENG
+    global ddlPrompt, ddlEPr, ddlJPG, ddlENG
     global chkGuess, chkName, chkOpenTW, chkTop_TW, chkOpenEW, chkTop_EW
     global slTrans, lblTransPct, rectBg, rectTxt, rectName, ddlFont, edFSize, udFSize, chkFontBold
     global slTrans_EW, lblTransPct_EW, rectBg_EW, rectTxt_EW, ddlFont_EW, edFSize_EW, udFSize_EW, chkFontBold_EW
@@ -6629,9 +6761,6 @@ GameProfileApply(name, announce := true) {
         explainPromptProfile := candidate
     else
         GameProfileAppendWarning(&warnings, "Explanation prompt '" candidate "' was not found; the current prompt was kept.")
-
-    postValue := Trim(IniRead(path, "screenshot", "postProcessing", imgPostproc))
-    imgPostproc := ArrHas(postCodes, postValue) ? postValue : imgPostproc
 
     glossaryList := ListGlossaryProfiles()
     candidate := Trim(IniRead(path, "terminology", "jp2tlProfile", jp2enGlossaryProfile))
@@ -6668,8 +6797,7 @@ GameProfileApply(name, announce := true) {
     SyncUnifiedWindowAppearance()
 
     RefreshPromptProfilesList(promptProfile)
-    postIndex := ArrIndexOf(postCodes, imgPostproc)
-    ddlPost.Value := postIndex ? postIndex : 1
+    imgPostproc := SyncPromptPostproc(promptProfile)
     RefreshExplainPromptProfilesList(explainPromptProfile)
     RefreshGlossaryProfilesList(jp2enGlossaryProfile, en2enGlossaryProfile)
 
@@ -6679,6 +6807,10 @@ GameProfileApply(name, announce := true) {
     chkTop_TW.Value := GameProfileReadInt(path, "translator", "alwaysOnTop", chkTop_TW.Value) ? 1 : 0
     chkOpenEW.Value := GameProfileReadInt(path, "explainer", "openOnLaunch", chkOpenEW.Value) ? 1 : 0
     chkTop_EW.Value := GameProfileReadInt(path, "explainer", "alwaysOnTop", chkTop_EW.Value) ? 1 : 0
+
+    profileDpadNavigation := GameProfileReadInt(path, "controls", "dpadNavigation", -1)
+    if (profileDpadNavigation >= 0)
+        CPControllerSetDpadNavigationEnabled(profileDpadNavigation != 0, true)
 
     slTrans.Value := overlayTrans
     lblTransPct.Value := Round(overlayTrans / 255 * 100) "%"
@@ -6824,7 +6956,7 @@ GameProfileUpdateSummary(*) {
 
 CreateGameProfile(*) {
     global ddlGameProfile
-    input := InputBox("Enter a name for the new profile:", "Create Profile", "w360 h150")
+    input := CPThemedInputBox("Enter a name for the new profile:", "Create Profile", "", "", 400)
     if (input.Result != "OK")
         return
     name := GameProfileSafeName(input.Value)
@@ -6951,22 +7083,9 @@ btnPrEdit  := ui.Add("Button", "x+6 w70", "Edit")
 btnPrNew   := ui.Add("Button", "x+6 w70", "Add")
 btnPrDel   := ui.Add("Button", "x+6 w70", "Delete")
 
-ui.Add("Text", "xm y+12", "Translation post-processing:")
-postLabels := ["Translation with transcript","Translation only","Direct model output"]
-postCodes  := ["tt","translation","none"]
-
-; AltSubmit => .Value returns 1..N (index into postCodes)
-ddlPost := ui.Add("DropDownList", "x+m w260 AltSubmit 0x210", postLabels)
-
-; Initialize selection from saved code (imgPostproc)
-postInitIdx := ArrIndexOf(postCodes, imgPostproc)
-if (!postInitIdx)
-    postInitIdx := 1
-ddlPost.Value := postInitIdx
-
 ; Toggle: delete screenshots after translation
 delAfterUse := Integer(IniRead(iniPath, "paths", "deleteAfterUse", 0))
-chkDel := ui.Add("Checkbox", "xm y+10", "Delete screenshots after translation")
+chkDel := ui.Add("Checkbox", "xm y+16", "Delete screenshots after translation")
 chkDel.Value := delAfterUse ? 1 : 0
 ; Persist to control.ini immediately when toggled
 chkDel.OnEvent("Click", (*) => IniWrite(chkDel.Value ? 1 : 0, iniPath, "paths", "deleteAfterUse"))
@@ -7008,7 +7127,6 @@ ddlProv.OnEvent("Change", (*) => (UpdateVars(), SaveAll(), ApplyShotSettings()))
 ddlIMG.OnEvent("Change", (*) => (UpdateVars(), SaveAll(), ApplyShotSettings()))
 ddlIMG_GM.OnEvent("Change", (*) => (UpdateVars(), SaveAll(), ApplyShotSettings()))
 ddlPrompt.OnEvent("Change", (*) => (UpdateVars(), SaveAll(), ApplyShotSettings()))
-ddlPost.OnEvent("Change", (*) => (UpdateVars(), SaveAll(), ApplyShotSettings()))
 
 ; --- Max size + Capture picker (native path, non-breaking) ---
 ; Pin this row to the left-column baseline under the "Delete screenshots after translation" checkbox
@@ -7088,9 +7206,25 @@ lblLiveInput.SetFont("Bold")
 ui.Add("Text", "xm y+10", "Listen device")
 ddlSpeaker := ui.Add("DropDownList", "x+m w360 0x210", [])
 btnSpRef   := ui.Add("Button", "x+6 w80", "Refresh")
+btnAudioTest := ui.Add("Button", "x+6 w90", "Test Audio")
+
+txtAudioHelp := ui.Add(
+    "Text",
+    "xm y+10 w700 h76",
+    "Live Audio Translation captures the selected Windows output and translates spoken Japanese as it plays.`n"
+    . "Play any audible sound, then select `"Test Audio.`" If no sound is detected, verify the selected device "
+    . "or try another audio driver in the game or emulator, such as XAudio instead of WASAPI in RetroArch. "
+    . "No API request is made."
+)
+CPRegisterMutedControl(txtAudioHelp)
+txtAudioTestStatus := ui.Add(
+    "Text",
+    "xm y+4 w700 h24",
+    "Test status: Not tested"
+)
 
 ; Live translation provider
-lblLiveTranslation := ui.Add("Text", "xm y+20 w180", "Live translation")
+lblLiveTranslation := ui.Add("Text", "xm y+12 w180", "Live translation")
 lblLiveTranslation.SetFont("Bold")
 ui.Add("Text", "xm y+10", "AI Provider:")
 ddlAProv := ui.Add("DropDownList", "x+m w220 0x210", ["Gemini","OpenAI"])
@@ -7123,6 +7257,7 @@ ddlAudioTarget.OnEvent("Change", (*) => AutoPersist())
 ; fill and wire the device dropdown
 PopulateSpeakersList(speakerName)
 btnSpRef.OnEvent("Click", RefreshSpeakerList)
+btnAudioTest.OnEvent("Click", TestAudioInput)
 ddlSpeaker.OnEvent("Change", SpeakerChanged)
 
 ; --- Tab 3: TRANSLATION WINDOW
@@ -7385,7 +7520,7 @@ btnGameProfileDelete := ui.Add("Button", "x+6 w80", "Delete")
 
 txtGameProfileState := ui.Add("Text", "xm y+18 w760", "")
 txtGameProfileDetails := ui.Add("Text", "xm y+18 w760 cGray"
-    , "Saved settings include overlay colors, fonts, transparency, size and position, startup/topmost choices, capture region or window, both selected prompts, post-processing, and both terminology profiles.")
+    , "Saved settings include overlay colors, fonts, transparency, size and position, startup/topmost choices, capture region or window, both selected prompts, and both terminology profiles. Screenshot output processing follows the selected prompt automatically.")
 CPRegisterMutedControl(txtGameProfileDetails)
 
 ddlGameProfile.OnEvent("Change", GameProfileUpdateSummary)
@@ -7423,8 +7558,16 @@ eExplain := ui.Add("Edit",  "x+m w560", explainScript)
 bExplainSel := ui.Add("Button","x+m w80", "Browse")
 bExplainSel.OnEvent("Click", BrowseExplainScript)
 
+; --- Advanced screenshot output override (hidden with the Paths tab) ---
+directOpts := "xm y+18 w220"
+if (directModelOutput)
+    directOpts .= " Checked"
+cbDirectModelOutput := ui.Add("CheckBox", directOpts, "Direct model output")
+TooltipBind(cbDirectModelOutput, "Advanced: bypass screenshot translation extraction and show the model response unchanged")
+cbDirectModelOutput.OnEvent("Click", CPOnDirectModelOutputToggle)
+
 ; --- Debug toggle (bottom of Paths tab) ---
-opts := "xm y+18 w140"
+opts := "xm y+12 w140"
 if (debugMode)
     opts .= " Checked"
 cbDebug := ui.Add("CheckBox", opts, "Debug mode")
@@ -7484,12 +7627,19 @@ Hotkeys_ShowConflicts()
 ; dialogs is in the foreground. Global action bindings remain opt-in and use
 ; rising-edge button presses, so connecting a controller cannot fire an action.
 controllerTopY := controlsContentY
+controllerInfoX := controlsActionX + 350
+controllerInfoW := 490
 global cbControllerInputsEnabled := CPAddControlsViewControl("controller", ui.Add("CheckBox", "x" controlsActionX " y" controllerTopY " w330 h28", "Enable direct controller action bindings"))
-global txtControllerStatus := CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsBindingX " y" (controllerTopY + 4) " w570 h24 cGray", "Action bindings are off. D-pad / A / B still navigate this window."))
+global txtControllerStatus := CPAddControlsViewControl("controller", ui.Add("Text", "x" controllerInfoX " y" (controllerTopY + 4) " w" controllerInfoW " h24 cGray", "Action bindings are off. Controller navigation remains available."))
 CPRegisterMutedControl(txtControllerStatus)
 cbControllerInputsEnabled.OnEvent("Click", CPControllerEnabledChanged)
 
-controllerHeaderY := controllerTopY + 40
+global cbControllerDpadNavigationEnabled := CPAddControlsViewControl("controller", ui.Add("CheckBox", "x" controlsActionX " y" (controllerTopY + 40) " w330 h28", "Use D-pad for control panel navigation"))
+global txtControllerDpadNote := CPAddControlsViewControl("controller", ui.Add("Text", "x" controllerInfoX " y" (controllerTopY + 44) " w" controllerInfoW " h42 cGray", "Turn this off when another app maps the D-pad to arrow keys, to prevent duplicate navigation. A / Cross, B / Circle, and keyboard controls remain available."))
+CPRegisterMutedControl(txtControllerDpadNote)
+cbControllerDpadNavigationEnabled.OnEvent("Click", CPControllerDpadNavigationChanged)
+
+controllerHeaderY := controllerTopY + 92
 CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsActionX " y" controllerHeaderY " w260", "Action"))
 CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsBindingX " y" controllerHeaderY " w240", "Current controller input"))
 controllerRowY := controllerHeaderY + 28
@@ -7510,13 +7660,14 @@ for controllerActionKey in hotkeyActions {
     controllerRowY += controlsRowStep
 }
 
-txtControllerNote := CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsActionX " y" controllerRowY " w900 h52 cGray", "D-pad, A / Cross, and B / Circle navigate the control panel automatically. Optional action bindings do not consume controller presses; the game still receives them. Avoid assigning the same action through both direct input and keyboard-emulation software."))
+txtControllerNote := CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsActionX " y" controllerRowY " w900 h52 cGray", "A / Cross and B / Circle navigate the control panel automatically. D-pad navigation can be disabled above when keyboard-emulation software supplies the arrow keys. Optional action bindings do not consume controller presses; the game still receives them."))
 CPRegisterMutedControl(txtControllerNote)
 
 CPControllerLoadBindings()
 savedControlsView := IniRead(iniPath, "controller_inputs", "view", "keyboard")
 CPSetControlsView(savedControlsView, false)
 CPControllerSetEnabled(Integer(IniRead(iniPath, "controller_inputs", "enabled", 0)) != 0, false)
+CPControllerSetDpadNavigationEnabled(Integer(IniRead(iniPath, "controller_inputs", "dpad_navigation", 1)) != 0, false)
 
 tab.UseTab()
 FixAllEditableCombos()
@@ -7537,6 +7688,11 @@ chkTop    := ui.Add("CheckBox", "x+12 yp+6", "Always on top")
 chkDarkMode := ui.Add("CheckBox", "x+18 yp", "Dark mode")
 chkDarkMode.Value := controlDarkMode
 chkDarkMode.OnEvent("Click", CPOnDarkModeToggle)
+txtControlOpacity := ui.Add("Text", "x+18 yp", "Opacity:")
+slControlOpacity := ui.Add("Slider", "x+8 yp-6 w110 h24 Range70-100 ToolTip")
+slControlOpacity.Value := controlPanelOpacity
+slControlOpacity.OnEvent("Change", CPOnControlPanelOpacityChange)
+lblControlOpacityPct := ui.Add("Text", "x+8 yp+6 w44", controlPanelOpacity "%")
 
 ; --- Dirty wiring (manual-save-worthy settings) ---
 ; Topmost toggle
@@ -7634,7 +7790,6 @@ for ctl in ctls
     ctl.OnEvent("Change", (*) => (AutoPersist(), ToggleAudioControls(), ToggleModelControls(), ToggleExplanationControls()))
 
 ddlPrompt.OnEvent("Change", (*) => (UpdateVars(), SaveAll()))
-ddlPost.OnEvent("Change",   (*) => (UpdateVars(), SaveAll()))
 
 ; --- Tab 9: API KEYS
 tab.UseTab(9)
@@ -7878,6 +8033,7 @@ DllCall("RedrawWindow"
     , "uint", 0x0001 | 0x0080 | 0x0100) ; RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW
 CPCreateComboArrowOverlays()
 CPApplyControlPanelTheme()
+CPApplyControlPanelOpacity(false)
 
 Rebind_LaunchExplainerRequest()
 Rebind_ExplainLastTranslation()
@@ -7922,11 +8078,11 @@ ForcePaint(ctrls*) {
         }
     }
 }
-ForcePaint(ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt, ddlPost)
+ForcePaint(ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt)
 ; Do one more pass after creation so no dropdowns look â€œselectedâ€ on first open
 ClearAllComboSelections(*) {
-    global ddlAProv, ddlA_GM, ddlTR, ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt, ddlPost
-    for cmb in [ddlAProv, ddlA_GM, ddlTR, ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt, ddlPost]
+    global ddlAProv, ddlA_GM, ddlTR, ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt
+    for cmb in [ddlAProv, ddlA_GM, ddlTR, ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt]
         ComboUnselectText(cmb)
 }
 
@@ -7978,8 +8134,8 @@ Repaint(){
     global rectBg,rectTxt, boxBgHex,txtHex
     global ddlFont, edFSize, chkFontBold, fontName, fontSize, fontBold
     global chkFontBold_EW, fontBold_EW
-    global ddlPrompt, promptProfile
-    global ddlPost, imgPostproc, postCodes
+    global ddlPrompt, promptProfile, imgPostproc
+    global directModelOutput, cbDirectModelOutput
 	global ddlEProv, ddlEOpenAI, ddlEGem
     global explainProvider, explainOpenAIModel, explainGeminiModel, iniPath
     global model_openai_img, model_gemini_img, model_openai_explain, model_gemini_explain
@@ -8019,13 +8175,9 @@ Repaint(){
     edFSize.Value := fontSize
     chkFontBold.Value := fontBold
 
-    ; (Do not set ddlPrompt.Text here â€“ list may be empty on first run)
-    postSelIdx := ArrIndexOf(postCodes, imgPostproc)
-    if (!postSelIdx)
-    postSelIdx := 1
-    ddlPost.Value := postSelIdx
-
     RefreshPromptProfilesList(promptProfile)
+    imgPostproc := SyncPromptPostproc(promptProfile)
+    try cbDirectModelOutput.Value := directModelOutput
 
     ; ===== Explanation tab: reflect persisted provider/model =====
     if IsSet(ddlEProv) {
@@ -8185,6 +8337,114 @@ SpeakerChanged(*) {
     IniWrite(speakerName, iniPath, "cfg", "speakerName")
 }
 
+SetAudioTestStatus(message) {
+    global txtAudioTestStatus
+    try txtAudioTestStatus.Text := "Test status: " message
+}
+
+TestAudioInput(*) {
+    global pythonExe, audioScript, ddlSpeaker, btnAudioTest
+    global gAudioTestPid, gAudioTestResultPath
+
+    if (gAudioTestPid && ProcessExist(gAudioTestPid))
+        return
+
+    if AudioIsRunning() {
+        SetAudioTestStatus(
+            "Stop Audio Translation before testing."
+        )
+        return
+    }
+
+    px := ResolvePath(pythonExe)
+    ap := ResolvePath(audioScript)
+    if !(FileExist(px) && FileExist(ap)) {
+        SetAudioTestStatus(
+            "Could not open the selected device."
+        )
+        return
+    }
+
+    spick := Trim(ddlSpeaker.Text)
+    if (spick = "" || spick = "[Windows Default]")
+        EnvSet("SPEAKER_NAME", "")
+    else
+        EnvSet("SPEAKER_NAME", spick)
+
+    resultPath := A_Temp "\jrpg_audio_test_"
+        . A_TickCount "_" Random(1000, 9999) ".txt"
+    try FileDelete(resultPath)
+    EnvSet("AUDIO_TEST_RESULT_FILE", resultPath)
+
+    SetAudioTestStatus("Listening for audio...")
+    try btnAudioTest.Enabled := false
+    try {
+        testPid := 0
+        Run(
+            '"' px '" "' ap '" --test-audio',
+            A_ScriptDir,
+            "Hide",
+            &testPid
+        )
+        gAudioTestPid := testPid
+    } catch as ex {
+        EnvSet("AUDIO_TEST_RESULT_FILE", "")
+        gAudioTestPid := 0
+        gAudioTestResultPath := ""
+        try btnAudioTest.Enabled := true
+        SetAudioTestStatus(
+            "Could not open the selected device."
+        )
+        DbgCP("Audio test launch failed: " ex.Message)
+        return
+    }
+
+    EnvSet("AUDIO_TEST_RESULT_FILE", "")
+    gAudioTestResultPath := resultPath
+    SetTimer(AudioTestPoll, 100)
+}
+
+AudioTestPoll() {
+    global gAudioTestPid, gAudioTestResultPath, btnAudioTest
+
+    if (gAudioTestPid && ProcessExist(gAudioTestPid))
+        return
+
+    SetTimer(AudioTestPoll, 0)
+    gAudioTestPid := 0
+    output := ""
+    try output := FileRead(gAudioTestResultPath, "UTF-8")
+    try FileDelete(gAudioTestResultPath)
+    gAudioTestResultPath := ""
+    try btnAudioTest.Enabled := true
+
+    if InStr(output, "JRPG_AUDIO_TEST:DETECTED") {
+        SetAudioTestStatus(
+            "Audio detected. This device is ready."
+        )
+        DbgCP("Audio test detected signal: " Trim(output))
+    } else if InStr(output, "JRPG_AUDIO_TEST:SILENT") {
+        SetAudioTestStatus(
+            "No audio detected. Check the device or application audio driver."
+        )
+        DbgCP("Audio test found silence: " Trim(output))
+    } else if InStr(output, "JRPG_AUDIO_TEST:ERROR") {
+        detail := RegExReplace(
+            Trim(output),
+            "^JRPG_AUDIO_TEST:ERROR:\s*"
+        )
+        SetAudioTestStatus(
+            "Device error: " (detail != "" ? detail : "Could not open the selected device.")
+        )
+        DbgCP("Audio test device error: " Trim(output))
+    } else {
+        SetAudioTestStatus(
+            "Audio test ended without returning a result."
+        )
+        DbgCP("Audio test failed: " Trim(output))
+    }
+}
+
 ResolvePythonNoConsole(px) {
     try {
         if InStr(px, "\python.exe") {
@@ -8206,7 +8466,7 @@ UpdateVars(){
     global ePython,eAudio,eOverlay,eImg,ddlTR,ddlAProv,ddlA_GM,ddlAudioTarget,ddlProv,ddlIMG,ddlIMG_GM,slTrans
 	global ddlFont, edFSize, chkFontBold, fontName, fontSize, fontBold
     global ddlPrompt, promptProfile
-    global ddlPost, imgPostproc
+    global imgPostproc, directModelOutput, cbDirectModelOutput
 	global debugMode, cbDebug
     pythonExe        := ePython.Value
     audioScript      := eAudio.Value
@@ -8226,7 +8486,8 @@ UpdateVars(){
     fontBold         := chkFontBold.Value ? 1 : 0
     SyncUnifiedWindowAppearance()
     promptProfile    := ddlPrompt.Text
-    imgPostproc      := postCodes[ddlPost.Value]
+    directModelOutput := cbDirectModelOutput.Value ? 1 : 0
+    imgPostproc      := SyncPromptPostproc(promptProfile)
 	explainProvider    := ddlEProv.Text
     explainOpenAIModel := ddlEOpenAI.Text
     explainGeminiModel := ddlEGem.Text
@@ -8272,12 +8533,14 @@ ResizeUI(gui, minMax, w, h){
     global tab, sepAction
     global tPython,ePython,bPy,tAud,eAudio,bAud,tOv,eOverlay,bOvSel,tImg,eImg,bImgSel,tExplain,eExplain,bExplainSel
     global ddlSpeaker,ddlAProv,ddlA_GM,ddlTR,ddlAudioTarget,ddlProv,ddlIMG,ddlIMG_GM
+    global txtAudioHelp,txtAudioTestStatus
     global btnStart,btnStop,btnAudio,btnOv,btnOvClose,btnExplainerLaunch,btnExplainerClose,btnExplainNow,bSave,bClose,chkTop,chkDarkMode,chkGuess
+    global txtControlOpacity,slControlOpacity,lblControlOpacityPct
     global btnA_GM_Add, btnA_GM_Del, btnTR_Add, btnTR_Del
     global btnIMG_Add, btnIMG_Del, btnIMG_GM_Add, btnIMG_GM_Del
     ; NEW prompt widgets
         ; NEW prompt widgets
-    global ddlPrompt, btnPrEdit, btnPrNew, btnPrDel, ddlPost
+    global ddlPrompt, btnPrEdit, btnPrNew, btnPrDel
     ; AUDIO target language widget
     global ddlAudioTarget
 
@@ -8327,6 +8590,10 @@ ResizeUI(gui, minMax, w, h){
     btnA_GM_Del.Move(audioComboRight + gap + 60 + gap, audioGeminiY, 60, btnH)
     btnTR_Add.Move(audioComboRight + gap, audioOpenAIY, 60, btnH)
     btnTR_Del.Move(audioComboRight + gap + 60 + gap, audioOpenAIY, 60, btnH)
+    for audioText in [txtAudioHelp, txtAudioTestStatus] {
+        audioText.GetPos(&audioTextX)
+        audioText.Move(, , Max(300, rightEdge - audioTextX))
+    }
     ; Screenshot Translation uses one shared combo boundary: the left edge of
     ; "Highlight guessed subjects". This keeps selected values readable when
     ; a narrow viewport scrolls focused controls into view.
@@ -8353,11 +8620,6 @@ ResizeUI(gui, minMax, w, h){
     btnPrNew .Move(pcx + pW + g + btnW + g, pcy, btnW, btnH)
     btnPrDel .Move(pcx + pW + g + (btnW+g)*2, pcy, btnW, btnH)
 
-    ; post-processing row (single combo)
-    ddlPost.GetPos(&ppx,&ppy,,)
-    ppW := Max(160, shotComboRight - ppx)
-    ddlPost.Move(, , ppW)
-
             ; place a thin separator directly under the tab
     sepY := pad + tabH + 4
     try sepAction.Move(pad, sepY, w - pad*2, 2)
@@ -8381,6 +8643,12 @@ ResizeUI(gui, minMax, w, h){
     chkTop.Move(cx + btnW + 12, ySave + 6)
     chkTop.GetPos(&cpTopX, &cpTopY, &cpTopW)
     chkDarkMode.Move(cpTopX + cpTopW + 18, ySave + 6)
+    chkDarkMode.GetPos(&cpDarkX, &cpDarkY, &cpDarkW)
+    txtControlOpacity.Move(cpDarkX + cpDarkW + 18, ySave + 6)
+    txtControlOpacity.GetPos(&cpOpacityLabelX, &cpOpacityLabelY, &cpOpacityLabelW)
+    slControlOpacity.Move(cpOpacityLabelX + cpOpacityLabelW + 8, ySave + 1, 110, 24)
+    slControlOpacity.GetPos(&cpOpacitySliderX, &cpOpacitySliderY, &cpOpacitySliderW)
+    lblControlOpacityPct.Move(cpOpacitySliderX + cpOpacitySliderW + 8, ySave + 6, 44)
     CPUpdateComboArrowOverlays()
     CPCanvasFinishLayout(viewportW, viewportH, canvasRestore, false)
 
@@ -8664,7 +8932,7 @@ CPControllerColorSliderRepeatActive(targetHwnd, direction) {
 }
 
 CPControllerAcceleratedSliderRepeatActive(targetHwnd, direction) {
-    global ui, slTrans, slTrans_EW, eCapMax
+    global ui, slTrans, slTrans_EW, slControlOpacity, eCapMax
     cpAcceleratedFocusHwnd := DllCall("user32\GetFocus", "ptr")
     ; Font size always advances in single-point steps, even while the D-pad is held.
     if CPFontSizeAdjustActive()
@@ -8679,7 +8947,7 @@ CPControllerAcceleratedSliderRepeatActive(targetHwnd, direction) {
 
     try {
         if (targetHwnd = ui.Hwnd) {
-            for cpAcceleratedSliderCtrl in [slTrans, slTrans_EW] {
+            for cpAcceleratedSliderCtrl in [slTrans, slTrans_EW, slControlOpacity] {
                 if (cpAcceleratedFocusHwnd = cpAcceleratedSliderCtrl.Hwnd)
                     return true
             }
@@ -9484,7 +9752,7 @@ OpenExplainPromptEditor_Multi(*) {
 
 NewExplainPromptProfile(*) {
     global ddlEPr
-    ib := InputBox("Enter a name for the new EXPLANATION prompt:", "New EXPLAIN prompt", "w320 h140")
+    ib := CPThemedInputBox("Enter a name for the new EXPLANATION prompt:", "New EXPLAIN prompt")
     if (ib.Result = "Cancel")
         return
     name := Trim(ib.Value)
@@ -9568,7 +9836,14 @@ OpenPromptEditor(*) {
 }
 NewPromptProfile(*) {
     global ddlPrompt
-    ib := InputBox("Enter a name for the new prompt profile:", "New prompt", "w320 h140")
+    ib := CPThemedInputBox(
+        "Enter a name for the new prompt profile:",
+        "New prompt",
+        "To show a transcript in the Translation overlay, include`n"
+            . "with_transcript or with_kanji_reading in the name.",
+        "",
+        520
+    )
     if (ib.Result = "Cancel")
         return
     name := Trim(ib.Value)
@@ -9709,7 +9984,7 @@ OpenGlossaryEditor(kind := "jp") {
 
 NewGlossaryProfile(*) {
     global ddlJPG, ddlENG, iniPath, jp2enGlossaryProfile, en2enGlossaryProfile
-    ib := InputBox("Enter a name for the new glossary profile:", "New glossary", "w320 h140")
+    ib := CPThemedInputBox("Enter a name for the new glossary profile:", "New glossary")
     if (ib.Result = "Cancel")
         return
     name := Trim(ib.Value)

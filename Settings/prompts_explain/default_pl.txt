@@ -25,7 +25,7 @@ OUTPUT FORMAT
 
 Oryginalny tekst japoński:
 
-Reproduce the complete Japanese input exactly, preserving all characters, readings, punctuation, brackets, spacing, and line breaks.
+Reproduce the complete Japanese input, preserving all original characters, punctuation, brackets, spacing, and line breaks. After every word containing kanji, add its full reading in hiragana inside full-width parentheses, for example お城（おしろ）. Do not replace or remove the original kanji.
 
 Naturalne tłumaczenie na polski:
 

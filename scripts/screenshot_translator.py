@@ -38,6 +38,7 @@ import re
 import sys
 import base64
 import mimetypes
+import shutil
 import time
 import tempfile
 from typing import List, Tuple
@@ -103,6 +104,7 @@ TEMP_DIR = os.environ.get("TEMP") or tempfile.gettempdir()
 OVERLAY_DIR = os.path.join(TEMP_DIR, "JRPG_Overlay")
 LAST_JP = os.path.join(OVERLAY_DIR, "last_jp.txt")
 LAST_SRC = os.path.join(OVERLAY_DIR, "last_src.txt")
+LAST_SRC_DIR = os.path.join(OVERLAY_DIR, "last_source_images")
 OCR_TXT = os.path.join(OVERLAY_DIR, "ocr.txt")
 OCR_DONE = os.path.join(OVERLAY_DIR, "ocr.done")
 os.makedirs(OVERLAY_DIR, exist_ok=True)
@@ -697,6 +699,52 @@ def split_tt(s: str) -> Tuple[str, str]:
     return jp, en
 
 
+def has_transcript_translation_sections(s: str) -> bool:
+    return bool(
+        re.search(r"(?mi)^Transcript:\s*", s or "")
+        and re.search(r"(?mi)^Translation:\s*", s or "")
+    )
+
+
+def extract_translation_output(s: str) -> str:
+    """Accept both legacy two-section output and direct translation-only output."""
+    text = (s or "").replace("\r\n", "\n").strip()
+    if has_transcript_translation_sections(text):
+        _jp, translation = split_tt(enforce_transcript_translation(text))
+        return translation.strip()
+    return re.sub(r"(?i)^\s*Translation:\s*", "", text, count=1).strip()
+
+
+def cache_last_source_images(paths: List[str]) -> List[str]:
+    """Keep private source copies so Explain Last works without a visible transcript."""
+    os.makedirs(LAST_SRC_DIR, exist_ok=True)
+    cached_paths = []
+    staged = []
+
+    for index, source_path in enumerate(paths):
+        if not source_path or not os.path.isfile(source_path):
+            continue
+        extension = os.path.splitext(source_path)[1].lower() or ".png"
+        final_path = os.path.join(LAST_SRC_DIR, f"source_{index:02d}{extension}")
+        staged_path = final_path + ".tmp"
+        shutil.copy2(source_path, staged_path)
+        staged.append((staged_path, final_path))
+
+    for name in os.listdir(LAST_SRC_DIR):
+        if name.startswith("source_") and not name.endswith(".tmp"):
+            try:
+                os.remove(os.path.join(LAST_SRC_DIR, name))
+            except OSError:
+                pass
+
+    for staged_path, final_path in staged:
+        os.replace(staged_path, final_path)
+        cached_paths.append(final_path)
+
+    atomic_write_text(LAST_SRC, "\r\n".join(cached_paths))
+    return cached_paths
+
+
 def normalize_jp_speaker_line(jp_block: str) -> Tuple[str, str]:
     if not jp_block:
         return jp_block, ""
@@ -889,14 +937,14 @@ def translate_images(paths: List[str],
     out = strip_code_fences(raw)
 
     try:
-        enforced = enforce_transcript_translation(out)
-        _jp_block, _en_block = split_tt(enforced)
-        _jp_block_norm, _ = normalize_jp_speaker_line(_jp_block)
-
-        if _jp_block_norm.strip():
+        cache_last_source_images(paths)
+        if has_transcript_translation_sections(out):
+            enforced = enforce_transcript_translation(out)
+            _jp_block, _en_block = split_tt(enforced)
+            _jp_block_norm, _ = normalize_jp_speaker_line(_jp_block)
             atomic_write_text(LAST_JP, _jp_block_norm.strip())
-            if paths:
-                atomic_write_text(LAST_SRC, "\r\n".join(os.path.abspath(p) for p in paths))
+        else:
+            atomic_write_text(LAST_JP, "")
     except Exception:
         pass
 
@@ -904,8 +952,7 @@ def translate_images(paths: List[str],
         return out.replace("\r\n", "\n").strip()
 
     if POSTPROC_MODE in ("translation", "en-only", "en"):
-        enforced = enforce_transcript_translation(out)
-        _jp_block, en_block = split_tt(enforced)
+        en_block = extract_translation_output(out)
         if en2en:
             en_block = apply_en_glossary(en_block, en2en)
         en_block = _mark_translation_name_line(en_block)

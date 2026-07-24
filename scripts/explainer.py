@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 
 import configparser
+import base64
 import io
+import mimetypes
 import os
 import re
 import sys
@@ -19,6 +21,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="repla
 TEMP_DIR      = os.environ.get("TEMP") or tempfile.gettempdir()
 OVERLAY_DIR   = os.path.join(TEMP_DIR, "JRPG_Overlay")
 LAST_JP       = os.path.join(OVERLAY_DIR, "last_jp.txt")
+LAST_SRC      = os.path.join(OVERLAY_DIR, "last_src.txt")
 EXPLAINER_TXT = os.path.join(OVERLAY_DIR, "explainer.txt")
 os.makedirs(OVERLAY_DIR, exist_ok=True)
 
@@ -50,6 +53,22 @@ def read_text(path: str) -> str:
             return f.read()
     except Exception:
         return ""
+
+
+def read_last_source_paths() -> List[str]:
+    paths = []
+    for line in read_text(LAST_SRC).splitlines():
+        path = line.strip()
+        if path and os.path.isfile(path):
+            paths.append(path)
+    return paths
+
+
+def file_to_data_url(path: str) -> str:
+    mime_type = mimetypes.guess_type(path)[0] or "image/png"
+    with open(path, "rb") as image_file:
+        encoded = base64.b64encode(image_file.read()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
 
 
 def load_glossary(path: str) -> List[Tuple[str, str]]:
@@ -340,11 +359,23 @@ if EXPLAIN_PROMPT_FILE and os.path.isfile(EXPLAIN_PROMPT_FILE):
         pass
 
 jp = read_text(LAST_JP).strip()
-if not jp:
-    print("(No last_jp.txt found or it is empty)", file=sys.stderr)
+source_paths = read_last_source_paths()
+if not jp and not source_paths:
+    print("(No Japanese transcript or cached source screenshots found)", file=sys.stderr)
     sys.exit(2)
 
-prompt = prompt_tpl.format(jp=jp)
+if jp:
+    prompt = prompt_tpl.format(jp=jp)
+else:
+    prompt = prompt_tpl.format(
+        jp="[Read the original Japanese from the attached screenshot(s), in order.]"
+    )
+    prompt += (
+        "\n\nThe original Japanese source is supplied in the attached screenshot(s). "
+        "Read only the Japanese text inside the dialogue, message, or menu box. "
+        "When multiple images are attached, treat them as consecutive parts of one passage "
+        "in the order supplied and join sentence fragments across image boundaries."
+    )
 source_glossary_prompt = build_source_glossary_prompt(JP2TL_GLOSSARY)
 if source_glossary_prompt:
     prompt += "\n\n" + source_glossary_prompt
@@ -386,9 +417,21 @@ try:
             model_name = model_name[len("models/"):]
 
         client = genai.Client(api_key=api_key)
+        if source_paths:
+            content_parts = [types.Part.from_text(text=prompt)]
+            for source_path in source_paths:
+                mime_type = mimetypes.guess_type(source_path)[0] or "image/png"
+                with open(source_path, "rb") as image_file:
+                    content_parts.append(
+                        types.Part.from_bytes(data=image_file.read(), mime_type=mime_type)
+                    )
+            contents = [types.Content(role="user", parts=content_parts)]
+        else:
+            contents = prompt
+
         resp = client.models.generate_content(
             model=model_name,
-            contents=prompt,
+            contents=contents,
             config=types.GenerateContentConfig(
                 temperature=0.2,
                 safety_settings=gemini_safety_settings(types),
@@ -471,7 +514,16 @@ try:
             raise RuntimeError("Missing OPENAI_API_KEY (or *_LOCAL / _FILE)")
 
         client = OpenAI(api_key=api_key)
-        r = client.responses.create(model=MODEL_NAME, input=prompt)
+        if source_paths:
+            input_content = [{"type": "input_text", "text": prompt}]
+            input_content.extend(
+                {"type": "input_image", "image_url": file_to_data_url(source_path)}
+                for source_path in source_paths
+            )
+            request_input = [{"role": "user", "content": input_content}]
+        else:
+            request_input = prompt
+        r = client.responses.create(model=MODEL_NAME, input=request_input)
         text = (getattr(r, "output_text", "") or "").strip()
 
     else:
@@ -512,7 +564,13 @@ if save_flag:
     try:
         with open(out_path, "w", encoding="utf-8", newline="\r\n") as f:
             f.write("=== Japanese (source) ===\r\n")
-            f.write(jp + "\r\n\r\n")
+            if jp:
+                f.write(jp + "\r\n\r\n")
+            else:
+                f.write("[Source supplied as cached screenshot(s)]\r\n")
+                for source_path in source_paths:
+                    f.write(source_path + "\r\n")
+                f.write("\r\n")
             f.write("=== Explanation ===\r\n")
             f.write(text + "\r\n")
         print(f"(Archived) {out_path}")

@@ -2,6 +2,73 @@
 
 All notable changes to JRPG Translator are documented here.
 
+## 0.9.1 - 2026-07-24
+
+This maintenance release improves in-game usability, makes audio capture easier
+to diagnose, and resolves several controller, prompt, glossary, and dialog
+issues found after the 0.9.0 release.
+
+### Audio capture diagnostics
+
+- Added a Test Audio button to the Audio Translation tab.
+- The test checks the selected Windows output locally without making an API
+  request and reports whether audible output is reaching the capture device.
+- Added concise troubleshooting guidance for device selection and emulator
+  audio drivers such as XAudio and WASAPI.
+- Fixed opening the Windows default output and explicitly selected endpoints
+  during the audio test.
+
+### Prompt and output handling
+
+- Removed the normal-user Translation post-processing selector.
+- Translation prompts containing `with_transcript` or `with_kanji_reading`
+  now select transcript-aware output handling automatically.
+- Added a hidden Direct model output override to the optional Paths tab; it is
+  disabled by default.
+- Cleaned up translation-only prompts and synchronized multilingual explanation
+  prompts.
+- Explanation prompts now request hiragana readings for kanji in the repeated
+  Japanese context.
+- Restored TL -> TL terminology replacement for screenshot translations while
+  keeping the same case-insensitive matching and case-preserving replacement
+  behavior used by explanations and live audio output.
+
+### Controller and keyboard behavior
+
+- Added a persistent Use D-pad for control panel navigation option.
+- Stored the D-pad navigation preference in Profiles so LaunchBox / Big Box can
+  apply it with the rest of a setup.
+- When D-pad navigation is disabled, controller A / Cross and B / Circle remain
+  available while mapper-generated keyboard arrows can navigate without
+  duplicate tab movement.
+- Changed Esc to behave like controller B / Circle for cancel and back actions
+  instead of hiding the entire control panel.
+- Removed automatic JoyToKey-process inference from control-panel navigation.
+- Improved controller behavior for sliders, numeric fields, capture dialogs,
+  model pickers, color controls, and overlay move / resize modes.
+
+### Interface and dialog polish
+
+- Added persistent opacity control for the complete control panel, including its
+  controls and title bar.
+- Added dark-mode support to prompt-name, Profile-name, and hotkey-entry
+  dialogs.
+- The New prompt dialog now documents the `with_transcript` and
+  `with_kanji_reading` naming convention.
+- Fixed Controls-tab label and description repaint artifacts.
+- Refined Screenshot Translation spacing after removing the post-processing
+  selector.
+
+### Reliability fixes
+
+- Fixed destroyed-control errors when closing or refreshing online model lists.
+- Fixed warnings and duplicate navigation caused by mixed controller and
+  keyboard input paths.
+- Fixed stale or clipped capture and move / resize instruction overlays.
+- Fixed immediate controller cancellation in capture and overlay-adjust modes.
+- Fixed repeat screenshot requests, output color restoration, caret hiding, and
+  several overlay refresh edge cases.
+
 ## 0.9.0 - 2026-07-23
 
 This release unifies per-game configuration into Profiles, expands native
