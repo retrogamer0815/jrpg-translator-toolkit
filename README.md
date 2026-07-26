@@ -8,6 +8,68 @@ The control panel works with a mouse and keyboard or directly from an
 XInput-compatible controller. Keyboard mapping tools such as JoyToKey, Steam
 Input, or DS4Windows remain optional for custom and multi-function mappings.
 
+## See It in Action
+
+### Live Audio Translation
+
+Translated dialogue appears in the overlay while a voiced cutscene is playing.
+
+<p align="center">
+  <a href="docs/media/live-audio-translation.gif">
+    <img src="docs/media/live-audio-translation.gif" alt="Live audio translation appearing during a voiced game cutscene" width="800">
+  </a>
+</p>
+
+### Screenshot Translation Modes
+
+Choose a compact translation-only overlay or include the Japanese transcript
+and kanji readings for language study. Click either image to view it at full
+size.
+
+<table>
+  <tr>
+    <th width="50%">Translation only</th>
+    <th width="50%">Transcript, kanji readings, and translation</th>
+  </tr>
+  <tr>
+    <td>
+      <a href="docs/media/screenshot-translation.jpg">
+        <img src="docs/media/screenshot-translation.jpg" alt="Japanese game with a compact English translation overlay">
+      </a>
+    </td>
+    <td>
+      <a href="docs/media/transcript-kanji-readings.jpg">
+        <img src="docs/media/transcript-kanji-readings.jpg" alt="Japanese game with transcript, kanji readings, and English translation">
+      </a>
+    </td>
+  </tr>
+</table>
+
+### Explanations and Frontend Integration
+
+The separate Explainer can break down vocabulary, readings, grammar, and nuance.
+The optional LaunchBox / Big Box plugin prepares the selected JRPG Translator
+Profile automatically for each game.
+
+<table>
+  <tr>
+    <th width="50%">Japanese-learning explanation</th>
+    <th width="50%">LaunchBox / Big Box integration</th>
+  </tr>
+  <tr>
+    <td>
+      <a href="docs/media/japanese-explainer.png">
+        <img src="docs/media/japanese-explainer.png" alt="Detailed Japanese language explanation displayed over a game">
+      </a>
+    </td>
+    <td>
+      <a href="docs/media/launchbox-integration.jpg">
+        <img src="docs/media/launchbox-integration.jpg" alt="JRPG Translator Setup entry in LaunchBox and Big Box">
+      </a>
+    </td>
+  </tr>
+</table>
+
 ## Features
 
 - Screenshot translation with OpenAI and Google Gemini vision models.
