@@ -1,57 +1,59 @@
-# JRPG Translator v0.9.1
+# JRPG Translator v0.9.2
 
-Version 0.9.1 is a focused refinement release for the controller-first 0.9
-workflow. It improves audio troubleshooting, removes an unnecessary screenshot
-translation setting, and resolves several issues discovered while using the
-tool alongside JoyToKey, LaunchBox, Big Box, and emulators.
+Version 0.9.2 is a usability and reliability update for the controller-first
+0.9 workflow. It makes the control panel behave naturally at smaller sizes,
+finishes the Terminology Overrides on/off workflow, and prevents unrelated
+glossary names from appearing as translated speakers.
 
 ## Highlights
 
-### Test live audio before translating
+### Better compact-window behavior
 
-The Audio Translation tab now includes **Test Audio**. Play any audible sound
-and run the test to verify that the selected Windows output is reaching JRPG
-Translator. The check is local and does not make an API request.
+The control panel now has preferred horizontal and vertical resize points. When
+resizing close to either point, the corresponding edge settles into the ideal
+size without moving the window elsewhere on screen.
 
-The tab also includes troubleshooting guidance for output-device selection and
-emulator audio drivers. This is especially useful when one application can be
-captured but an emulator using WASAPI or another backend cannot.
+The footer keeps its proper height and opaque background while moving over the
+scrollable tab content as the window becomes shorter. A vertical scrollbar
+appears only after shrinking below the preferred height. Narrow windows wrap
+controller guidance instead of clipping it, and squeezed top-level tabs no
+longer appear a second time below the tab row.
 
-### Automatic screenshot output handling
+### Safer terminology overrides
 
-The visible **Translation post-processing** menu has been removed. Prompts whose
-names contain `with_transcript` or `with_kanji_reading` automatically use the
-transcript-aware display path; other prompts use translation-only handling.
+The Terminology Overrides tab now includes **Use terminology overrides**. Turning
+it off prevents JP -> TL entries from being sent to translation or explanation
+models and prevents local TL -> TL replacement. The setting takes effect
+immediately and is stored in Profiles, including Profiles selected through the
+LaunchBox / Big Box integration.
 
-Advanced users can still bypass processing with the **Direct model output**
-toggle in the optional Paths tab. It remains off by default.
+JP -> TL instructions now define every entry as a strict conditional exact
+match. Screenshot translations also validate translated speaker headers against
+the Japanese transcript. If a target belonging to a different Japanese source
+is detected, the request is retried once with only glossary entries actually
+present in the transcript.
 
-### Cleaner controller and JoyToKey coexistence
+### Controller-only editing
 
-The Controls tab now has a persistent **Use D-pad for control panel navigation**
-option. Turn it off when another program maps the D-pad to keyboard arrows. This
-prevents duplicate movement while keeping controller A / Cross and B / Circle
-available. Profiles remember this choice, including Profiles selected through
-the LaunchBox / Big Box plugin.
+Controller B / Circle can close prompt and terminology text editors, so small
+changes no longer require reaching for a mouse just to leave the editor.
 
-Esc now performs the same cancel or back action as controller B / Circle instead
-of hiding the control panel.
+Translation-only prompts now format speaker headers consistently, improving
+speaker-name color detection.
 
-### Prompt and terminology fixes
+### Cleaner saving behavior
 
-- Translation-only prompts no longer carry unnecessary transcript instructions.
-- Multilingual explanation prompts have been synchronized.
-- Repeated Japanese context in explanations includes hiragana readings for
-  kanji.
-- TL -> TL terminology overrides work again for screenshot translations.
+The manual **Save** button now lives in the optional Paths tab, where it remains
+available for manually edited paths and Debug mode. The footer's **Always on
+top** setting saves automatically, and redundant dirty-state handling has been
+removed.
 
-### Additional polish
+### Additional fixes
 
-- Added opacity control for the entire control panel.
-- Added dark-mode support to prompt, Profile, and hotkey entry dialogs.
-- Documented prompt naming requirements in the New prompt dialog.
-- Fixed online model picker cleanup errors and several capture, overlay,
-  controller, caret, color, and refresh edge cases.
+- Reorganized Controller inputs to fit the preferred control-panel height.
+- Fixed footer transparency and control-order artifacts while resizing.
+- Fixed an artifact covering part of the Audio Translation output-language
+  dropdown.
 
 ## Included source
 

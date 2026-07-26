@@ -159,24 +159,28 @@ def apply_target_glossary(
     return out
 
 
-def resolve_target_glossary_path(project_root: Path) -> str:
+def resolve_target_glossary_settings(project_root: Path) -> Tuple[str, bool, str]:
     """Resolve the TL-to-TL profile selected in the Terminology Overrides tab."""
+    enabled = (
+        os.environ.get("USE_TERMINOLOGY_OVERRIDES", "1").strip().lower()
+        not in {"0", "false", "no", "off"}
+    )
     explicit_path = (
         os.environ.get("TL2TL_GLOSSARY_PATH", "").strip()
         or os.environ.get("EN2EN_GLOSSARY_PATH", "").strip()
     )
-    if explicit_path:
-        return explicit_path
 
     settings_dir = Path(
         os.environ.get("SETTINGS_DIR", "").strip()
         or project_root / "Settings"
     )
     profile = "default"
+    selected_ini_path = ""
     for ini_name in ("control.ini", "config.ini"):
         ini_path = settings_dir / ini_name
         if not ini_path.is_file():
             continue
+        selected_ini_path = str(ini_path)
         for encoding in (
             "utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be",
             "cp1252", "cp932",
@@ -191,18 +195,58 @@ def resolve_target_glossary_path(project_root: Path) -> str:
                     ).strip()
                     or "default"
                 )
+                enabled = config.getboolean(
+                    "cfg", "useTerminologyOverrides", fallback=True
+                )
                 break
             except Exception:
                 continue
         break
 
-    return str(settings_dir / "glossaries" / profile / "en2en.txt")
+    glossary_path = explicit_path or str(
+        settings_dir / "glossaries" / profile / "en2en.txt"
+    )
+    return glossary_path, enabled, selected_ini_path
 
 
 _load_dotenv_files()
 
-TL2TL_GLOSSARY_PATH = resolve_target_glossary_path(PROJECT_ROOT)
+(
+    TL2TL_GLOSSARY_PATH,
+    USE_TERMINOLOGY_OVERRIDES,
+    TERMINOLOGY_SETTINGS_INI,
+) = (
+    resolve_target_glossary_settings(PROJECT_ROOT)
+)
 TL2TL_GLOSSARY = load_glossary(TL2TL_GLOSSARY_PATH)
+_TERMINOLOGY_CHECK_AFTER = 0.0
+
+
+def terminology_overrides_enabled() -> bool:
+    """Refresh the toggle cheaply so it also affects an active audio session."""
+    global USE_TERMINOLOGY_OVERRIDES, _TERMINOLOGY_CHECK_AFTER
+    now = time.monotonic()
+    if now < _TERMINOLOGY_CHECK_AFTER:
+        return USE_TERMINOLOGY_OVERRIDES
+    _TERMINOLOGY_CHECK_AFTER = now + 0.5
+
+    if not TERMINOLOGY_SETTINGS_INI:
+        return USE_TERMINOLOGY_OVERRIDES
+    for encoding in (
+        "utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be",
+        "cp1252", "cp932",
+    ):
+        try:
+            config = configparser.ConfigParser(interpolation=None)
+            with open(TERMINOLOGY_SETTINGS_INI, "r", encoding=encoding) as ini_file:
+                config.read_file(ini_file)
+            USE_TERMINOLOGY_OVERRIDES = config.getboolean(
+                "cfg", "useTerminologyOverrides", fallback=True
+            )
+            break
+        except Exception:
+            continue
+    return USE_TERMINOLOGY_OVERRIDES
 
 OPENAI_API_KEY = _get_key(
     "OPENAI_API_KEY", "OPENAI_LOCAL_KEY", "OPENAI_API_KEY_LOCAL", "OPENAI_KEY",
@@ -422,8 +466,11 @@ class TranscriptBuffer:
         self.write()
 
     def write(self):
+        glossary = (
+            TL2TL_GLOSSARY if terminology_overrides_enabled() else []
+        )
         display_text = trim_display(
-            apply_target_glossary(self.text, TL2TL_GLOSSARY)
+            apply_target_glossary(self.text, glossary)
         )
         if display_text != self.last_write:
             atomic_write_text(AUDIO_TXT, display_text)

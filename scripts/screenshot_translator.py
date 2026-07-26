@@ -41,6 +41,7 @@ import mimetypes
 import shutil
 import time
 import tempfile
+import unicodedata
 from typing import List, Tuple
 
 # --- .env bootstrap: prefer SETTINGS_DIR\.env, then Settings\.env, then root (BOM-safe) ---
@@ -197,45 +198,60 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)  # one level up from /scripts
 # 1) If env vars are set, they win. If not, leave as None for profile resolution.
 JP2EN_GLOSSARY_PATH = (os.environ.get("JP2EN_GLOSSARY_PATH", "").strip() or None)
 EN2EN_GLOSSARY_PATH = (os.environ.get("EN2EN_GLOSSARY_PATH", "").strip() or None)
+USE_TERMINOLOGY_OVERRIDES = (
+    os.environ.get("USE_TERMINOLOGY_OVERRIDES", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
 
-# 2) Otherwise resolve via Control Panel profiles in Settings\control.ini
-#    (fall back to Settings\config.ini only if control.ini is absent)
+# 2) Always refresh the enable/disable policy from the Control Panel INI.
+#    Glossary paths may be exported by an already-running overlay, but its
+#    inherited environment cannot reflect a toggle changed after it launched.
 try:
     import configparser
 
     def _find_settings_ini(base_dir: str):
-        cands = [
+        env_settings_dir = os.environ.get("SETTINGS_DIR", "").strip()
+        cands = []
+        if env_settings_dir:
+            cands.extend([
+                os.path.join(env_settings_dir, "control.ini"),
+                os.path.join(env_settings_dir, "config.ini"),
+            ])
+        cands.extend([
             os.path.join(base_dir, "Settings", "control.ini"),
             os.path.join(os.path.dirname(base_dir), "Settings", "control.ini"),
             os.path.join(base_dir, "Settings", "config.ini"),
             os.path.join(os.path.dirname(base_dir), "Settings", "config.ini"),
-        ]
+        ])
         for p in cands:
             if os.path.isfile(p):
                 return p
         return None
 
+    cfg_path = _find_settings_ini(SCRIPT_DIR)
+    prof_jp = prof_en = "default"
+
+    def _read_profiles_from_ini(_path: str):
+        encs = ["utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "cp1252", "cp932"]
+        for enc in encs:
+            try:
+                cfg = configparser.ConfigParser()
+                with open(_path, "r", encoding=enc) as fh:
+                    cfg.read_file(fh)
+                jp = (cfg.get("cfg", "jp2enGlossaryProfile", fallback="default").strip() or "default")
+                en = (cfg.get("cfg", "en2enGlossaryProfile", fallback="default").strip() or "default")
+                enabled = cfg.getboolean(
+                    "cfg", "useTerminologyOverrides", fallback=True
+                )
+                return jp, en, enabled
+            except Exception:
+                continue
+        return "default", "default", USE_TERMINOLOGY_OVERRIDES
+
+    if cfg_path:
+        prof_jp, prof_en, USE_TERMINOLOGY_OVERRIDES = _read_profiles_from_ini(cfg_path)
+
     if JP2EN_GLOSSARY_PATH is None or EN2EN_GLOSSARY_PATH is None:
-        cfg_path = _find_settings_ini(SCRIPT_DIR)
-        prof_jp = prof_en = "default"
-
-        def _read_profiles_from_ini(_path: str):
-            encs = ["utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "cp1252", "cp932"]
-            for enc in encs:
-                try:
-                    cfg = configparser.ConfigParser()
-                    with open(_path, "r", encoding=enc) as fh:
-                        cfg.read_file(fh)
-                    jp = (cfg.get("cfg", "jp2enGlossaryProfile", fallback="default").strip() or "default")
-                    en = (cfg.get("cfg", "en2enGlossaryProfile", fallback="default").strip() or "default")
-                    return jp, en
-                except Exception:
-                    continue
-            return "default", "default"
-
-        if cfg_path:
-            prof_jp, prof_en = _read_profiles_from_ini(cfg_path)
-
         # Prefer Control Panel's exported SETTINGS_DIR if present; otherwise fall back
         env_settings_dir = (os.environ.get("SETTINGS_DIR", "").strip() or None)
         if env_settings_dir:
@@ -394,8 +410,9 @@ def _mark_translation_name_line(en_block: str) -> str:
     if idx is None:
         return en_block
     first = lines[idx].strip()
-    if len(first) >= 2 and first[0] == "「" and first[-1] == "」":
-        inner = first[1:-1].strip()
+    match = NAME_LINE_RE.match(first)
+    if match:
+        inner = match.group(1).strip()
         left = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
         lines[idx] = f"{left}⟦name⟧{inner}⟦/name⟧"
         return "\n".join(lines)
@@ -411,8 +428,9 @@ def _mark_transcript_name_line(jp_block: str) -> str:
     if idx is None:
         return jp_block
     first = lines[idx].strip()
-    if len(first) >= 2 and first[0] == "「" and first[-1] == "」":
-        inner = first[1:-1].strip()
+    match = NAME_LINE_RE.match(first)
+    if match:
+        inner = match.group(1).strip()
         left = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
         lines[idx] = f"{left}⟦name⟧{inner}⟦/name⟧"
         return "\n".join(lines)
@@ -586,7 +604,18 @@ def load_system_prompt() -> str:
 def build_jp2en_prompt(jp2en: List[Tuple[str, str]]) -> str:
     if not jp2en:
         return ""
-    lines = ["When translating, apply these exact JP→EN mappings wherever they appear:"]
+    lines = [
+        "Glossary rules (strict conditional exact matches):",
+        "- Use a target value only when its exact Japanese source text appears in the "
+        "Japanese text you transcribe from the image(s).",
+        "- Do not select a glossary target based on similarity, pronunciation, context, "
+        "speaker role, or merely because it is a known name.",
+        "- If an exact Japanese source is absent, ignore that entry completely and never "
+        "introduce its target because of the glossary.",
+        "- For a speaker header, use an entry only when the Japanese speaker header "
+        "exactly matches that entry's Japanese source.",
+        "JP→target-language entries:",
+    ]
     for jp, en in jp2en:
         lines.append(f"- {jp} → {en}")
     return "\n".join(lines)
@@ -646,13 +675,83 @@ def gemini_image_parts(paths: List[str]):
 # Output post-processing (sanitize / enforce / name header normalization)
 # ==============================================================================
 
-OPEN_BRACKETS = "「『〈《［（[<"
-CLOSE_BRACKETS = "」』〉》］）]>"
+OPEN_BRACKETS = "「『〈《【〔〖〘〚［（[<‹«"
+CLOSE_BRACKETS = "」』〉》】〕〗〙〛］）]>›»"
 OPEN_CLASS = "[" + re.escape(OPEN_BRACKETS) + "]"
 CLOSE_CLASS = "[" + re.escape(CLOSE_BRACKETS) + "]"
 
 NAME_LINE_RE = re.compile(rf"^\s*{OPEN_CLASS}\s*(.+?)\s*{CLOSE_CLASS}\s*$")
 INLINE_HEADER_RE = re.compile(rf"^\s*{OPEN_CLASS}\s*(.+?)\s*{CLOSE_CLASS}\s*[:：]?\s*(.+)$")
+READING_ANNOTATION_RE = re.compile(r"(?<=[\u3400-\u9fff々〆ヶ])\([ぁ-ゖー]+\)")
+
+
+def strip_generated_kanji_readings(text: str) -> str:
+    """Remove prompt-added readings such as 名前(なまえ) for exact source matching."""
+    return READING_ANNOTATION_RE.sub("", text or "")
+
+
+def jp_glossary_match_key(text: str) -> str:
+    return unicodedata.normalize("NFKC", strip_generated_kanji_readings(text)).strip()
+
+
+def target_glossary_match_key(text: str) -> str:
+    return unicodedata.normalize("NFKC", text or "").strip().casefold()
+
+
+def first_name_line(block: str) -> str:
+    """Return the first non-empty line's bracketed name, or an empty string."""
+    for line in (block or "").replace("\r\n", "\n").split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = NAME_LINE_RE.match(stripped)
+        return match.group(1).strip() if match else ""
+    return ""
+
+
+def speaker_names_from_output(model_output: str) -> Tuple[str, str]:
+    if not has_transcript_translation_sections(model_output):
+        return "", ""
+    jp_block, target_block = split_tt(enforce_transcript_translation(model_output))
+    return first_name_line(jp_block), first_name_line(target_block)
+
+
+def find_speaker_glossary_conflict(
+    model_output: str,
+    jp2en: List[Tuple[str, str]],
+) -> Tuple[str, str]:
+    """Find a target header reserved for a different Japanese glossary source."""
+    if not jp2en:
+        return "", ""
+
+    jp_name, target_name = speaker_names_from_output(model_output)
+    if not jp_name or not target_name:
+        return "", ""
+
+    jp_key = jp_glossary_match_key(jp_name)
+    target_key = target_glossary_match_key(target_name)
+    sources_for_target = {
+        jp_glossary_match_key(source)
+        for source, target in jp2en
+        if target_glossary_match_key(target) == target_key
+    }
+    if sources_for_target and jp_key not in sources_for_target:
+        return jp_name, target_name
+    return "", ""
+
+
+def filter_jp2en_for_transcript(
+    jp2en: List[Tuple[str, str]],
+    jp_block: str,
+) -> List[Tuple[str, str]]:
+    """Keep only entries whose exact Japanese source occurs in the transcript."""
+    transcript_key = jp_glossary_match_key(jp_block)
+    return [
+        (source, target)
+        for source, target in jp2en
+        if jp_glossary_match_key(source)
+        and jp_glossary_match_key(source) in transcript_key
+    ]
 
 
 def strip_code_fences(s: str) -> str:
@@ -763,11 +862,19 @@ def normalize_jp_speaker_line(jp_block: str) -> Tuple[str, str]:
     return jp_block.strip(), ""
 
 
+def exact_jp2en_target(name_jp: str, jp2en: List[Tuple[str, str]]) -> str:
+    name_key = jp_glossary_match_key(name_jp)
+    for jp, target in jp2en:
+        if name_key == jp_glossary_match_key(jp):
+            return target
+    return ""
+
+
 def translate_jp_name_to_en(name_jp: str, jp2en: List[Tuple[str, str]]) -> str:
-    nm = name_jp.strip()
-    for jp, en in jp2en:
-        if nm == jp:
-            return en
+    nm = jp_glossary_match_key(name_jp)
+    exact_target = exact_jp2en_target(nm, jp2en)
+    if exact_target:
+        return exact_target
     if is_all_kana(nm):
         return kana_to_romaji(nm)
     return nm
@@ -784,8 +891,11 @@ def normalize_translation_name_line(en_block: str, jp2en: List[Tuple[str, str]],
     first = lines[idx].strip()
     m = NAME_LINE_RE.match(first)
     if m:
+        # The Japanese transcript is the source of truth for exact glossary mappings.
+        # This also corrects a model spelling such as Dain when ダイン → Dyne is defined.
+        exact_target = exact_jp2en_target(jp_name_hint, jp2en) if jp_name_hint else ""
         name = m.group(1).strip()
-        name_en = translate_jp_name_to_en(name, jp2en)
+        name_en = exact_target or translate_jp_name_to_en(name, jp2en)
         lines[idx] = f"「{name_en}」"
         return "\n".join(lines).strip()
 
@@ -795,6 +905,32 @@ def normalize_translation_name_line(en_block: str, jp2en: List[Tuple[str, str]],
         return "\n".join(lines).strip()
 
     return en_block.strip()
+
+
+def repair_conflicting_speaker_header(
+    model_output: str,
+    jp2en: List[Tuple[str, str]],
+) -> str:
+    """Replace a confirmed conflicting target header with a deterministic fallback."""
+    if not has_transcript_translation_sections(model_output):
+        return model_output
+
+    enforced = enforce_transcript_translation(model_output)
+    jp_block, target_block = split_tt(enforced)
+    jp_name = first_name_line(jp_block)
+    if not jp_name:
+        return model_output
+
+    fallback_name = translate_jp_name_to_en(jp_name, jp2en)
+    lines = target_block.replace("\r\n", "\n").split("\n")
+    idx = next((i for i, line in enumerate(lines) if line.strip()), None)
+    if idx is None or not NAME_LINE_RE.match(lines[idx].strip()):
+        return model_output
+
+    indentation = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
+    lines[idx] = f"{indentation}「{fallback_name}」"
+    repaired_target = "\n".join(lines).strip()
+    return f"Transcript:\n{jp_block.strip()}\n\nTranslation:\n{repaired_target}"
 
 
 # ==============================================================================
@@ -918,6 +1054,15 @@ def call_gemini(image_paths: List[str], jp2en: List[Tuple[str, str]]) -> str:
     return "(Gemini returned no text candidates.)"
 
 
+def call_translation_provider(
+    image_paths: List[str],
+    jp2en: List[Tuple[str, str]],
+) -> str:
+    if PROVIDER == "gemini":
+        return call_gemini(image_paths, jp2en)
+    return call_openai(image_paths, jp2en)
+
+
 # ==============================================================================
 # Main translation
 # ==============================================================================
@@ -926,15 +1071,50 @@ def translate_images(paths: List[str],
                      jp2en: List[Tuple[str, str]],
                      en2en: List[Tuple[str, str]]) -> str:
     try:
-        if PROVIDER == "gemini":
-            raw = call_gemini(paths, jp2en)
-        else:
-            raw = call_openai(paths, jp2en)
+        raw = call_translation_provider(paths, jp2en)
     except Exception as e:
         provider_name = "Gemini" if PROVIDER == "gemini" else "OpenAI"
         return f"(Python error) {provider_name} call failed: {e}"
 
     out = strip_code_fences(raw)
+    jp_conflict_name, target_conflict_name = find_speaker_glossary_conflict(out, jp2en)
+    if jp_conflict_name and target_conflict_name:
+        first_out = out
+        first_jp_block, _first_target_block = split_tt(
+            enforce_transcript_translation(first_out)
+        )
+        filtered_jp2en = filter_jp2en_for_transcript(jp2en, first_jp_block)
+
+        try:
+            retry_raw = call_translation_provider(paths, filtered_jp2en)
+            retry_out = strip_code_fences(retry_raw)
+            retry_jp_name, retry_target_name = speaker_names_from_output(retry_out)
+            # Validate against the entries actually sent on the retry. If a removed
+            # glossary target is produced independently, it may be a legitimate
+            # translation shared by another Japanese spelling.
+            retry_conflict = find_speaker_glossary_conflict(
+                retry_out,
+                filtered_jp2en,
+            )
+            same_jp_header = (
+                jp_glossary_match_key(retry_jp_name)
+                == jp_glossary_match_key(jp_conflict_name)
+            )
+
+            if (
+                retry_jp_name
+                and retry_target_name
+                and same_jp_header
+                and not any(retry_conflict)
+            ):
+                out = retry_out
+            else:
+                repair_base = retry_out if same_jp_header else first_out
+                out = repair_conflicting_speaker_header(repair_base, jp2en)
+        except Exception:
+            # A corrective retry must never turn a usable first response into an
+            # application error. Fall back to the exact glossary or local romaji.
+            out = repair_conflicting_speaker_header(first_out, jp2en)
 
     try:
         cache_last_source_images(paths)
@@ -986,8 +1166,8 @@ def main() -> None:
         sys.exit(2)
 
     images = sys.argv[1:]
-    jp2en = load_glossary(JP2EN_GLOSSARY_PATH)
-    en2en = load_glossary(EN2EN_GLOSSARY_PATH)
+    jp2en = load_glossary(JP2EN_GLOSSARY_PATH) if USE_TERMINOLOGY_OVERRIDES else []
+    en2en = load_glossary(EN2EN_GLOSSARY_PATH) if USE_TERMINOLOGY_OVERRIDES else []
 
     result = translate_images(images, jp2en, en2en)
     atomic_write_text(OCR_TXT, result)

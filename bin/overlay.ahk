@@ -626,6 +626,7 @@ ExportGlossaryEnv() {
     ; Make sure profile keys exist
     EnsureIniDefault(ControlIni, "cfg", "jp2enGlossaryProfile", "default")
     EnsureIniDefault(ControlIni, "cfg", "en2enGlossaryProfile", "default")
+    EnsureIniDefault(ControlIni, "cfg", "useTerminologyOverrides", 1)
 
     jpProf := Trim(IniRead(ControlIni, "cfg", "jp2enGlossaryProfile", "default"))
     if (jpProf = "")
@@ -633,6 +634,9 @@ ExportGlossaryEnv() {
     enProf := Trim(IniRead(ControlIni, "cfg", "en2enGlossaryProfile", "default"))
     if (enProf = "")
         enProf := "default"
+    useTerminologyOverrides := Integer(
+        IniRead(ControlIni, "cfg", "useTerminologyOverrides", 1)
+    ) ? 1 : 0
 
 jpPath := ResolvePath(".\Settings\glossaries\" jpProf "\jp2en.txt")
 enPath := ResolvePath(".\Settings\glossaries\" enProf "\en2en.txt")
@@ -645,6 +649,7 @@ enPath := ResolvePath(".\Settings\glossaries\" enProf "\en2en.txt")
         "GLOSSARY_EN2EN",      enPath,
         "JRPG_JP2EN_GLOSSARY", jpPath,
         "JRPG_EN2EN_GLOSSARY", enPath,
+        "USE_TERMINOLOGY_OVERRIDES", useTerminologyOverrides ? "1" : "0",
         ; policy hint for downstream: apply only to English translation
         "GLOSSARY_SCOPE",      "translation_only"
     )

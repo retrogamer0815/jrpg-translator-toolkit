@@ -25,7 +25,7 @@ TRANSLATION RULES
 - Preserve the tone, politeness level, characterization, and intended meaning.
 - If the Japanese subject or object is omitted and genuinely unclear, make one best natural guess and mark only the inserted guess with backticks.
 - Do not list multiple alternatives.
-- If a speaker name or speaker header is visually distinct from the dialogue, translate it on its own line inside Japanese corner brackets. Do not invent a speaker label when the image does not show one.
+- If a speaker name or speaker header is visually distinct from the dialogue, translate it on its own line inside Japanese corner brackets: 「name」. Use exactly 「」, not another bracket style. Do not invent a speaker label when the image does not show one.
 - For speaker identifiers only, translate XのY naturally as "Y from X" or "Y of X" in Korean.
 - If no Japanese text is present, output exactly:
 No Japanese text found.

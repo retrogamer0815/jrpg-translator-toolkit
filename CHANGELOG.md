@@ -2,6 +2,63 @@
 
 All notable changes to JRPG Translator are documented here.
 
+## 0.9.2 - 2026-07-26
+
+This maintenance release improves compact-window behavior, finishes the
+Terminology Overrides workflow, strengthens controller-only editing, and
+prevents unrelated glossary names from leaking into screenshot translations.
+
+### Compact and resizable control panel
+
+- Reorganized Controller inputs so its direct-binding and D-pad options fit
+  beside the binding controls without making the tab taller than Keyboard
+  inputs at the preferred window size.
+- Made the controller guidance wrap vertically as the window narrows instead of
+  being clipped off the right edge.
+- Fixed squeezed top-level tabs being rendered a second time below the tab row.
+- Added magnetic horizontal and vertical resize points at the preferred control
+  panel size without moving the window on screen.
+- Kept the footer at a fixed height while allowing it to move upward over
+  scrollable tab content as the window shrinks.
+- Delayed the vertical scrollbar until the window is reduced below its preferred
+  height.
+- Gave the footer an opaque, correctly ordered background so content beneath it
+  cannot show through.
+- Fixed a stray rectangle covering part of the Audio Translation output-language
+  dropdown.
+
+### Terminology Overrides
+
+- Added a persistent Use terminology overrides option to enable or disable both
+  JP -> TL and TL -> TL processing throughout supported workflows.
+- Stored the option in Profiles so Profiles selected through LaunchBox / Big Box
+  apply the same terminology policy.
+- Made changes effective immediately for open Translator and Explainer
+  workflows.
+- Strengthened JP -> TL model instructions so entries are strict conditional
+  exact matches and absent Japanese sources cannot introduce glossary targets.
+- Added local speaker-header validation. A glossary target assigned to a
+  different Japanese speaker triggers one retry using only entries found in the
+  transcript.
+- Exact Japanese speaker matches now force their configured target locally;
+  failed corrective retries fall back safely to kana romanization or the
+  original Japanese name.
+
+### Controller and editing improvements
+
+- Controller B / Circle can now close prompt and terminology text editors after
+  navigating to their Close button.
+- Standardized speaker headers in translation-only prompts so speaker-name color
+  detection works consistently across prompt families.
+
+### Saving and state cleanup
+
+- Moved the manual Save action into the optional Paths tab, where it remains
+  available for edited paths and Debug mode.
+- Made the footer's Always on top option save automatically.
+- Removed obsolete dirty-state wiring left behind by settings that already save
+  immediately.
+
 ## 0.9.1 - 2026-07-24
 
 This maintenance release improves in-game usability, makes audio capture easier

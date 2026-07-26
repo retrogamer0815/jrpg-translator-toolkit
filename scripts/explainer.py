@@ -207,8 +207,12 @@ def build_source_glossary_prompt(glossary: List[Tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def resolve_glossary_paths(project_root: str) -> Tuple[str, str]:
+def resolve_glossary_settings(project_root: str) -> Tuple[str, str, bool]:
     """Resolve the profiles selected in the control panel's Terminology tab."""
+    enabled = (
+        os.environ.get("USE_TERMINOLOGY_OVERRIDES", "1").strip().lower()
+        not in {"0", "false", "no", "off"}
+    )
     source_path = (
         os.environ.get("JP2TL_GLOSSARY_PATH", "").strip()
         or os.environ.get("JP2EN_GLOSSARY_PATH", "").strip()
@@ -217,9 +221,6 @@ def resolve_glossary_paths(project_root: str) -> Tuple[str, str]:
         os.environ.get("TL2TL_GLOSSARY_PATH", "").strip()
         or os.environ.get("EN2EN_GLOSSARY_PATH", "").strip()
     )
-    if source_path and target_path:
-        return source_path, target_path
-
     settings_dir = (
         os.environ.get("SETTINGS_DIR", "").strip()
         or os.path.join(project_root, "Settings")
@@ -249,6 +250,9 @@ def resolve_glossary_paths(project_root: str) -> Tuple[str, str]:
                     ).strip()
                     or "default"
                 )
+                enabled = config.getboolean(
+                    "cfg", "useTerminologyOverrides", fallback=True
+                )
                 break
             except Exception:
                 continue
@@ -259,7 +263,7 @@ def resolve_glossary_paths(project_root: str) -> Tuple[str, str]:
         source_path = os.path.join(glossary_dir, source_profile, "jp2en.txt")
     if not target_path:
         target_path = os.path.join(glossary_dir, target_profile, "en2en.txt")
-    return source_path, target_path
+    return source_path, target_path, enabled
 
 # Env + provider
 try:
@@ -304,9 +308,17 @@ EXPLAIN_PROMPT_FILE = os.environ.get("EXPLAIN_PROMPT_FILE", "").strip()
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-JP2TL_GLOSSARY_PATH, TL2TL_GLOSSARY_PATH = resolve_glossary_paths(PROJECT_ROOT)
-JP2TL_GLOSSARY = load_glossary(JP2TL_GLOSSARY_PATH)
-TL2TL_GLOSSARY = load_glossary(TL2TL_GLOSSARY_PATH)
+(
+    JP2TL_GLOSSARY_PATH,
+    TL2TL_GLOSSARY_PATH,
+    USE_TERMINOLOGY_OVERRIDES,
+) = resolve_glossary_settings(PROJECT_ROOT)
+JP2TL_GLOSSARY = (
+    load_glossary(JP2TL_GLOSSARY_PATH) if USE_TERMINOLOGY_OVERRIDES else []
+)
+TL2TL_GLOSSARY = (
+    load_glossary(TL2TL_GLOSSARY_PATH) if USE_TERMINOLOGY_OVERRIDES else []
+)
 
 BASE_PROMPT = """You are a friendly tutor for learners of Japanese (upper beginner to intermediate).
 Input is a short Japanese line (from a JRPG). Produce a concise, readable explanation in PLAIN TEXT.

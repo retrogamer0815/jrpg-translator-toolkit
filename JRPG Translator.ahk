@@ -160,10 +160,10 @@ SetDebugMode(enabled) {
 }
 
 CPOnDebugModeToggle(*) {
-    global cbDebug, debugMode
+    global cbDebug, debugMode, iniPath
     debugMode := cbDebug.Value ? 1 : 0
     SetDebugMode(debugMode)
-    MarkDirty()
+    IniWrite(debugMode, iniPath, "cfg", "debugMode")
 }
 
 PromptPostprocMode(promptName := "") {
@@ -236,7 +236,7 @@ global CPCapturePickerNavigation := Map()
 global CP_CANVAS_MIN_W := 890
 global CP_CANVAS_MIN_H := 640
 global CP_VIEWPORT_MIN_W := 640
-global CP_VIEWPORT_MIN_H := 480
+global CP_VIEWPORT_MIN_H := 380
 global CPCanvasScrollX := 0
 global CPCanvasScrollY := 0
 global CPCanvasScrollMaxX := 0
@@ -244,6 +244,16 @@ global CPCanvasScrollMaxY := 0
 global CPCanvasViewportW := CP_CANVAS_MIN_W
 global CPCanvasViewportH := CP_CANVAS_MIN_H
 global CPCanvasMessagesRegistered := false
+global CPCanvasFixedXHwnds := Map()
+global CPCanvasFixedYHwnds := Map()
+global CPCanvasClipStates := Map()
+global CPCanvasSiblingClipHwnds := Map()
+global CPPreferredViewportW := CP_CANVAS_MIN_W
+global CPPreferredViewportH := CP_CANVAS_MIN_H
+global CPWindowWidthSnapActive := false
+global CPWindowHeightSnapActive := false
+global CPWindowSnapRange := 14
+global CPWindowSnapReleaseRange := 24
 
 CPRegisterCanvasMessages() {
     global ui, CPCanvasMessagesRegistered
@@ -252,10 +262,23 @@ CPRegisterCanvasMessages() {
     OnMessage(0x0114, CPOnCanvasScroll) ; WM_HSCROLL
     OnMessage(0x0115, CPOnCanvasScroll) ; WM_VSCROLL
     OnMessage(0x020A, CPOnCanvasMouseWheel) ; WM_MOUSEWHEEL
+    OnMessage(0x0231, CPOnWindowEnterSizeMove) ; WM_ENTERSIZEMOVE
+    OnMessage(0x0214, CPOnWindowSizing) ; WM_SIZING
+    OnMessage(0x0232, CPOnWindowExitSizeMove) ; WM_EXITSIZEMOVE
     ; Start with the non-client scrollbars hidden. SetScrollInfo will reveal
     ; either one only when the viewport is smaller than the design surface.
     try DllCall("user32\ShowScrollBar", "ptr", ui.Hwnd, "int", 3, "int", 0)
     CPCanvasMessagesRegistered := true
+}
+
+CPRegisterCanvasFixedControl(ctrl, fixedX := false, fixedY := true) {
+    global CPCanvasFixedXHwnds, CPCanvasFixedYHwnds
+    if !IsObject(ctrl) || !ctrl.Hwnd
+        return
+    if fixedX
+        CPCanvasFixedXHwnds[ctrl.Hwnd] := true
+    if fixedY
+        CPCanvasFixedYHwnds[ctrl.Hwnd] := true
 }
 
 CPCanvasDirectControls() {
@@ -274,7 +297,7 @@ CPCanvasDirectControls() {
 }
 
 CPCanvasMoveChildren(dx, dy, redraw := true, manageRedraw := true) {
-    global ui
+    global ui, CPCanvasFixedXHwnds, CPCanvasFixedYHwnds
     if (!dx && !dy)
         return
 
@@ -284,16 +307,99 @@ CPCanvasMoveChildren(dx, dy, redraw := true, manageRedraw := true) {
     try {
         for ctrl in CPCanvasDirectControls() {
             try {
+                ctrlDx := CPCanvasFixedXHwnds.Has(ctrl.Hwnd) ? 0 : dx
+                ctrlDy := CPCanvasFixedYHwnds.Has(ctrl.Hwnd) ? 0 : dy
+                if (!ctrlDx && !ctrlDy)
+                    continue
                 ctrl.GetPos(&x, &y)
-                ctrl.Move(x + dx, y + dy)
+                ctrl.Move(x + ctrlDx, y + ctrlDy)
             }
         }
+        CPClipScrollableControlsToViewport(false)
     } finally {
         if (hwnd && manageRedraw) {
             DllCall("user32\SendMessage", "ptr", hwnd, "uint", 0x000B, "ptr", 1, "ptr", 0)
             if redraw
                 DllCall("user32\RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0, "uint", 0x0001 | 0x0004 | 0x0080 | 0x0100)
         }
+    }
+}
+
+CPClipScrollableControlsToViewport(redraw := false) {
+    global ui, CPCanvasFixedYHwnds, CPCanvasClipStates, CPCanvasSiblingClipHwnds
+    global CPTabBarFill, sepAction
+    if !(IsSet(ui) && ui && ui.Hwnd
+        && IsSet(CPTabBarFill) && CPTabBarFill
+        && IsSet(sepAction) && sepAction)
+        return
+
+    headerRect := Buffer(16, 0)
+    footerRect := Buffer(16, 0)
+    if !DllCall("user32\GetWindowRect", "ptr", CPTabBarFill.Hwnd, "ptr", headerRect.Ptr, "int")
+        return
+    if !DllCall("user32\GetWindowRect", "ptr", sepAction.Hwnd, "ptr", footerRect.Ptr, "int")
+        return
+
+    clipTopPx := NumGet(headerRect, 12, "int")
+    clipBottomPx := NumGet(footerRect, 4, "int")
+    for scrollCtrl in CPCanvasDirectControls() {
+        scrollHwnd := scrollCtrl.Hwnd
+        if (CPCanvasFixedYHwnds.Has(scrollHwnd))
+            continue
+
+        ctrlRect := Buffer(16, 0)
+        if !DllCall("user32\GetWindowRect", "ptr", scrollHwnd, "ptr", ctrlRect.Ptr, "int")
+            continue
+        ctrlLeftPx := NumGet(ctrlRect, 0, "int")
+        ctrlTopPx := NumGet(ctrlRect, 4, "int")
+        ctrlWidthPx := Max(0, NumGet(ctrlRect, 8, "int") - ctrlLeftPx)
+        ctrlHeightPx := Max(0, NumGet(ctrlRect, 12, "int") - ctrlTopPx)
+        visibleTopPx := Max(0, clipTopPx - ctrlTopPx)
+        visibleBottomPx := Min(ctrlHeightPx, clipBottomPx - ctrlTopPx)
+        if (visibleBottomPx < visibleTopPx)
+            visibleBottomPx := visibleTopPx
+
+        needsSiblingClip := visibleTopPx > 0 || visibleBottomPx < ctrlHeightPx
+        scrollStyle := DllCall("user32\GetWindowLongPtr", "ptr", scrollHwnd, "int", -16, "ptr")
+        if needsSiblingClip {
+            ; Only controls crossing a sticky boundary need WS_CLIPSIBLINGS.
+            ; Leaving it enabled on ordinary tab content lets hidden controls
+            ; from other pages carve holes into visible dropdowns.
+            if !(scrollStyle & 0x04000000) {
+                DllCall("user32\SetWindowLongPtr", "ptr", scrollHwnd, "int", -16
+                    , "ptr", scrollStyle | 0x04000000, "ptr")
+                CPCanvasSiblingClipHwnds[scrollHwnd] := true
+                DllCall("user32\SetWindowPos", "ptr", scrollHwnd, "ptr", 0
+                    , "int", 0, "int", 0, "int", 0, "int", 0
+                    , "uint", 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
+            }
+        } else if CPCanvasSiblingClipHwnds.Has(scrollHwnd) {
+            if (scrollStyle & 0x04000000) {
+                DllCall("user32\SetWindowLongPtr", "ptr", scrollHwnd, "int", -16
+                    , "ptr", scrollStyle & ~0x04000000, "ptr")
+                DllCall("user32\SetWindowPos", "ptr", scrollHwnd, "ptr", 0
+                    , "int", 0, "int", 0, "int", 0, "int", 0
+                    , "uint", 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
+            }
+            CPCanvasSiblingClipHwnds.Delete(scrollHwnd)
+        }
+
+        clipState := ctrlWidthPx "|" ctrlHeightPx "|" visibleTopPx "|" visibleBottomPx
+        if (CPCanvasClipStates.Has(scrollHwnd) && CPCanvasClipStates[scrollHwnd] = clipState)
+            continue
+
+        if (visibleTopPx = 0 && visibleBottomPx = ctrlHeightPx) {
+            DllCall("user32\SetWindowRgn", "ptr", scrollHwnd, "ptr", 0, "int", redraw ? 1 : 0)
+        } else {
+            clipRegion := DllCall("gdi32\CreateRectRgn", "int", 0, "int", visibleTopPx
+                , "int", ctrlWidthPx, "int", visibleBottomPx, "ptr")
+            if clipRegion {
+                if !DllCall("user32\SetWindowRgn", "ptr", scrollHwnd, "ptr", clipRegion
+                    , "int", redraw ? 1 : 0)
+                    DllCall("gdi32\DeleteObject", "ptr", clipRegion)
+            }
+        }
+        CPCanvasClipStates[scrollHwnd] := clipState
     }
 }
 
@@ -424,6 +530,7 @@ CPOnCanvasMouseWheel(wParam, lParam, msg, hwnd) {
 
 CPEnsureFocusedControlVisible(*) {
     global ui, CPCanvasScrollX, CPCanvasScrollY, CPCanvasScrollMaxX, CPCanvasScrollMaxY
+    global CPCanvasFixedYHwnds, CPTabBarFill, sepAction
     if !(IsSet(ui) && ui && ui.Hwnd && (CPCanvasScrollMaxX > 0 || CPCanvasScrollMaxY > 0))
         return
     focusHwnd := CPFocusRingTargetHwnd(CPFocusedHwnd())
@@ -438,6 +545,8 @@ CPEnsureFocusedControlVisible(*) {
         CPCanvasScrollTo(0, 0)
         return
     }
+    if (IsSet(CPCanvasFixedYHwnds) && CPCanvasFixedYHwnds.Has(focusHwnd))
+        return
 
     ctrlRect := Buffer(16, 0)
     clientRect := Buffer(16, 0)
@@ -453,6 +562,11 @@ CPEnsureFocusedControlVisible(*) {
     viewT := NumGet(clientOrigin, 4, "int") + margin
     viewR := NumGet(clientOrigin, 0, "int") + NumGet(clientRect, 8, "int") - margin
     viewB := NumGet(clientOrigin, 4, "int") + NumGet(clientRect, 12, "int") - margin
+    stickyRect := Buffer(16, 0)
+    if (IsSet(CPTabBarFill) && CPTabBarFill && DllCall("user32\GetWindowRect", "ptr", CPTabBarFill.Hwnd, "ptr", stickyRect.Ptr, "int"))
+        viewT := Max(viewT, NumGet(stickyRect, 12, "int") + 8)
+    if (IsSet(sepAction) && sepAction && DllCall("user32\GetWindowRect", "ptr", sepAction.Hwnd, "ptr", stickyRect.Ptr, "int"))
+        viewB := Min(viewB, NumGet(stickyRect, 4, "int") - 8)
     ctrlL := NumGet(ctrlRect, 0, "int")
     ctrlT := NumGet(ctrlRect, 4, "int")
     ctrlR := NumGet(ctrlRect, 8, "int")
@@ -475,6 +589,118 @@ CPEnsureFocusedControlVisible(*) {
         nextY += ctrlB - viewB
 
     CPCanvasScrollTo(nextX, nextY)
+}
+
+CPTargetPreferredOuterWidthPx() {
+    global ui, CPPreferredViewportW
+    if !(IsSet(ui) && ui && ui.Hwnd && CPPreferredViewportW > 0)
+        return 0
+
+    windowRect := Buffer(16, 0)
+    clientRect := Buffer(16, 0)
+    if !DllCall("user32\GetWindowRect", "ptr", ui.Hwnd, "ptr", windowRect.Ptr, "int")
+        return 0
+    if !DllCall("user32\GetClientRect", "ptr", ui.Hwnd, "ptr", clientRect.Ptr, "int")
+        return 0
+
+    outerWidthPx := NumGet(windowRect, 8, "int") - NumGet(windowRect, 0, "int")
+    clientWidthPx := NumGet(clientRect, 8, "int")
+    ui.GetClientPos(,, &logicalClientW, &logicalClientH)
+    logicalToPhysical := clientWidthPx / Max(1, logicalClientW)
+    targetClientWidthPx := Round(CPPreferredViewportW * logicalToPhysical)
+    return targetClientWidthPx + outerWidthPx - clientWidthPx
+}
+
+CPTargetPreferredOuterHeightPx() {
+    global ui, CPPreferredViewportH
+    if !(IsSet(ui) && ui && ui.Hwnd && CPPreferredViewportH > 0)
+        return 0
+
+    windowRect := Buffer(16, 0)
+    clientRect := Buffer(16, 0)
+    if !DllCall("user32\GetWindowRect", "ptr", ui.Hwnd, "ptr", windowRect.Ptr, "int")
+        return 0
+    if !DllCall("user32\GetClientRect", "ptr", ui.Hwnd, "ptr", clientRect.Ptr, "int")
+        return 0
+
+    outerHeightPx := NumGet(windowRect, 12, "int") - NumGet(windowRect, 4, "int")
+    clientHeightPx := NumGet(clientRect, 12, "int")
+    ui.GetClientPos(,, &logicalClientW, &logicalClientH)
+    logicalToPhysical := clientHeightPx / Max(1, logicalClientH)
+    targetClientHeightPx := Round(CPPreferredViewportH * logicalToPhysical)
+    return targetClientHeightPx + outerHeightPx - clientHeightPx
+}
+
+CPWindowSnapShouldApply(distance, &active) {
+    global CPWindowSnapRange, CPWindowSnapReleaseRange
+    if !active {
+        if (distance > CPWindowSnapRange)
+            return false
+        active := true
+    } else if (distance > CPWindowSnapReleaseRange) {
+        active := false
+        return false
+    }
+    return true
+}
+
+CPOnWindowEnterSizeMove(wParam, lParam, msg, hwnd) {
+    global ui, CPWindowWidthSnapActive, CPWindowHeightSnapActive
+    if (IsSet(ui) && ui && hwnd = ui.Hwnd) {
+        CPWindowWidthSnapActive := false
+        CPWindowHeightSnapActive := false
+    }
+}
+
+CPOnWindowSizing(wParam, lParam, msg, hwnd) {
+    global ui, CPWindowWidthSnapActive, CPWindowHeightSnapActive
+    if !(IsSet(ui) && ui && hwnd = ui.Hwnd && lParam)
+        return
+
+    proposedLeft := NumGet(lParam, 0, "int")
+    proposedTop := NumGet(lParam, 4, "int")
+    proposedRight := NumGet(lParam, 8, "int")
+    proposedBottom := NumGet(lParam, 12, "int")
+    snapped := false
+
+    ; Left/right edges and corners snap width while preserving the opposite edge.
+    if (wParam = 1 || wParam = 2 || wParam = 4 || wParam = 5
+        || wParam = 7 || wParam = 8) {
+        targetOuterWidth := CPTargetPreferredOuterWidthPx()
+        widthDistance := Abs(proposedRight - proposedLeft - targetOuterWidth)
+        if (targetOuterWidth > 0 && CPWindowSnapShouldApply(widthDistance, &CPWindowWidthSnapActive)) {
+            if (wParam = 1 || wParam = 4 || wParam = 7)
+                NumPut("int", proposedRight - targetOuterWidth, lParam, 0)
+            else
+                NumPut("int", proposedLeft + targetOuterWidth, lParam, 8)
+            snapped := true
+        }
+    }
+
+    ; Top/bottom edges and corners snap height while preserving the opposite edge.
+    if (wParam = 3 || wParam = 4 || wParam = 5
+        || wParam = 6 || wParam = 7 || wParam = 8) {
+        targetOuterHeight := CPTargetPreferredOuterHeightPx()
+        heightDistance := Abs(proposedBottom - proposedTop - targetOuterHeight)
+        if (targetOuterHeight > 0 && CPWindowSnapShouldApply(heightDistance, &CPWindowHeightSnapActive)) {
+            if (wParam = 3 || wParam = 4 || wParam = 5)
+                NumPut("int", proposedBottom - targetOuterHeight, lParam, 4)
+            else
+                NumPut("int", proposedTop + targetOuterHeight, lParam, 12)
+            snapped := true
+        }
+    }
+
+    if snapped
+        return true
+}
+
+CPOnWindowExitSizeMove(wParam, lParam, msg, hwnd) {
+    global ui, CPWindowWidthSnapActive, CPWindowHeightSnapActive
+    if (IsSet(ui) && ui && hwnd = ui.Hwnd) {
+        CPWindowWidthSnapActive := false
+        CPWindowHeightSnapActive := false
+    }
 }
 
 CPPalette(darkMode := -1) {
@@ -644,6 +870,8 @@ CPCreateComboArrowOverlays() {
         CPComboArrowOverlays.Push(Map("combo", cpComboCtrl, "arrow", cpArrowCtrl))
     }
     CPUpdateComboArrowOverlays()
+    CPClipScrollableControlsToViewport(false)
+    CPMaintainFooterZOrder()
 }
 
 CPUpdateComboArrowOverlays(*) {
@@ -889,7 +1117,7 @@ CPRegisterThemeMessages() {
 }
 
 CPApplyControlPanelTheme(forceRedraw := true) {
-    global ui, controlDarkMode, CPTabBarFill, CPTabRenderedState, hkConflictText
+    global ui, controlDarkMode, CPTabBarFill, CPFooterFill, CPTabRenderedState, hkConflictText
     if !(IsSet(ui) && ui && ui.Hwnd)
         return
 
@@ -908,12 +1136,15 @@ CPApplyControlPanelTheme(forceRedraw := true) {
 
     if (IsSet(CPTabBarFill) && CPTabBarFill)
         try CPTabBarFill.Opt("+Background" cpApplyColors["window"])
+    if (IsSet(CPFooterFill) && CPFooterFill)
+        try CPFooterFill.Opt("+Background" cpApplyColors["window"])
     if (IsSet(hkConflictText) && hkConflictText)
         try hkConflictText.SetFont("c" (cpApplyDark ? "FF7B72" : "FF0000"))
 
     CPTabRenderedState := ""
     CPRenderCustomTabBar(true)
     CPUpdateComboArrowOverlays()
+    CPMaintainFooterZOrder()
     if forceRedraw
         try DllCall("user32\RedrawWindow", "ptr", ui.Hwnd, "ptr", 0, "ptr", 0, "uint", 0x0001 | 0x0004 | 0x0080 | 0x0100 | 0x0400)
 }
@@ -1270,6 +1501,7 @@ CPShowColorFocusFrame(swatchHwnd) {
             , "int", 0, "int", 0, "int", 0, "int", 0, "uint", SWP_KEEP_GEOMETRY)
         try cpFramePart.Redraw()
     }
+    CPClipScrollableControlsToViewport(false)
 }
 
 CPRestoreFocusVisual() {
@@ -1349,6 +1581,27 @@ CPMaintainCustomTabZOrder() {
     for cpTabCtrl in CPTabButtons
         try DllCall("user32\SetWindowPos", "ptr", cpTabCtrl.Hwnd, "ptr", 0
             , "int", 0, "int", 0, "int", 0, "int", 0, "uint", SWP_KEEP_GEOMETRY)
+}
+
+CPMaintainFooterZOrder() {
+    global CPFooterFill, sepAction, btnOv, btnOvClose, btnAudio
+    global btnExplainerLaunch, btnExplainerClose, bClose
+    global chkTop, chkDarkMode, txtControlOpacity, slControlOpacity, lblControlOpacityPct
+    if !(IsSet(CPFooterFill) && CPFooterFill && CPFooterFill.Hwnd)
+        return
+
+    static SWP_KEEP_GEOMETRY := 0x0001 | 0x0002 | 0x0010 ; NOSIZE | NOMOVE | NOACTIVATE
+    ; The opaque fill sits above scrollable page controls. Footer controls are
+    ; then raised above the fill so content can never bleed through this region.
+    try DllCall("user32\SetWindowPos", "ptr", CPFooterFill.Hwnd, "ptr", 0
+        , "int", 0, "int", 0, "int", 0, "int", 0, "uint", SWP_KEEP_GEOMETRY)
+    for footerZCtrl in [sepAction, btnOv, btnOvClose, btnAudio, btnExplainerLaunch
+        , btnExplainerClose, bClose, chkTop, chkDarkMode, txtControlOpacity
+        , slControlOpacity, lblControlOpacityPct] {
+        if (footerZCtrl && footerZCtrl.Hwnd)
+            try DllCall("user32\SetWindowPos", "ptr", footerZCtrl.Hwnd, "ptr", 0
+                , "int", 0, "int", 0, "int", 0, "int", 0, "uint", SWP_KEEP_GEOMETRY)
+    }
 }
 
 CPLayoutCustomTabBar(cpViewportW := 0) {
@@ -1455,17 +1708,21 @@ CPCreateCustomTabBar() {
 
     ; This opaque strip covers the native tab header. The real tab control remains
     ; underneath only to manage page visibility and provide a keyboard focus target.
-    try tab.Opt("+0x04000000") ; WS_CLIPSIBLINGS keeps native painting below the custom row.
+    ; Keep it single-line so hidden native labels can never wrap below the cover.
+    try tab.Opt("-Wrap +0x04000000") ; WS_CLIPSIBLINGS keeps native painting below the custom row.
     CPTabBarFill := ui.Add("Text", "x0 y0 w1 h1 Hidden BackgroundF0F0F0 +0x100 +0x04000000")
+    CPRegisterCanvasFixedControl(CPTabBarFill, true, true)
     for cpTabPage in CPTabVisiblePages {
         cpTabLabel := tabNames[cpTabPage]
         cpTabCtrl := ui.Add("Text", "x0 y0 h30 Hidden Center Border +0x100 +0x200 +0x04000000 BackgroundF3F3F3 c202020", cpTabLabel)
+        CPRegisterCanvasFixedControl(cpTabCtrl, true, true)
         cpTabCtrl.GetPos(,, &cpTabNaturalW)
         CPTabNaturalWidths.Push(Max(46, cpTabNaturalW + 18))
         cpTabCtrl.Cursor := "Hand"
         cpTabCtrl.OnEvent("Click", CPSelectCustomTab.Bind(cpTabPage))
         CPTabButtons.Push(cpTabCtrl)
     }
+    CPConfigurePreferredPanelWidth()
     CPLayoutCustomTabBar()
 }
 
@@ -2595,6 +2852,7 @@ defDebugMode := 0
 ; --- Glossary profile defaults ---
 defJP2ENGlossaryProfile := "default"
 defEN2ENGlossaryProfile := "default"
+defUseTerminologyOverrides := 1
 
 ; NEW: default prompt profile name
 defPromptProfile := "default_en"
@@ -2782,6 +3040,8 @@ guiY_saved := (tmpY != "" && IsNumber(tmpY)) ? Integer(tmpY) : ""
 ; Glossary profile selections
 jp2enGlossaryProfile := Load("jp2enGlossaryProfile", defJP2ENGlossaryProfile)
 en2enGlossaryProfile := Load("en2enGlossaryProfile", defEN2ENGlossaryProfile)
+useTerminologyOverrides := Integer(Load("useTerminologyOverrides", defUseTerminologyOverrides)) ? 1 : 0
+EnvSet("USE_TERMINOLOGY_OVERRIDES", useTerminologyOverrides ? "1" : "0")
 
 ; ---------- Model list persistence (new) ----------
 ; We store lists under [models] with comma-separated values.
@@ -2913,6 +3173,7 @@ SaveAll(){
     global model_openai_img, model_gemini_img, model_openai_explain, model_gemini_explain
     global model_openai_audio, model_gemini_audio
     global promptProfile, imgPostproc, chkDel, chkTop, chkDarkMode, controlDarkMode, controlPanelOpacity
+    global useTerminologyOverrides
 
     SyncUnifiedWindowAppearance()
     imgPostproc := SyncPromptPostproc(promptProfile)
@@ -2954,6 +3215,7 @@ SaveAll(){
 	IniWrite(showPathsTab, iniPath, "cfg", "showPathsTab")
 	IniWrite(debugMode, iniPath, "cfg", "debugMode")
     IniWrite(directModelOutput, iniPath, "cfg", "directModelOutput")
+    IniWrite(useTerminologyOverrides, iniPath, "cfg", "useTerminologyOverrides")
 	; Also persist the delete-after-use toggle to [paths]
     IniWrite(chkDel.Value ? 1 : 0, iniPath, "paths", "deleteAfterUse")
 
@@ -3113,54 +3375,164 @@ _UpdateStatus(){
     UpdateStatus()
 }
 
-; === Dirty-flag & autosave helpers ===
-MarkDirty(){
-    global isDirty, bSave
-    isDirty := true
-    if IsSet(bSave) && IsObject(bSave){
-        try bSave.Enabled := true
-        try bSave.Text := "Save *"
+; === Path-only dirty state & autosave helpers ===
+global pathsDirty := false
+
+UpdatePathsDirtyState(*) {
+    global pathsDirty, btnSavePaths
+    global ePython, eOverlay, eImg, eAudio, eExplain
+    global pythonExe, overlayAhk, imgScript, audioScript, explainScript
+    if !(IsSet(btnSavePaths) && IsSet(ePython) && IsSet(eOverlay)
+      && IsSet(eImg) && IsSet(eAudio) && IsSet(eExplain))
+        return
+
+    pathsDirty := (
+        ePython.Value != pythonExe
+        || eOverlay.Value != overlayAhk
+        || eImg.Value != imgScript
+        || eAudio.Value != audioScript
+        || eExplain.Value != explainScript
+    )
+    btnSavePaths.Enabled := pathsDirty
+    btnSavePaths.Text := pathsDirty ? "Save paths *" : "Save paths"
+}
+
+ClearPathsDirty() {
+    global pathsDirty, btnSavePaths
+    pathsDirty := false
+    if IsSet(btnSavePaths) && IsObject(btnSavePaths) {
+        btnSavePaths.Enabled := false
+        btnSavePaths.Text := "Save paths"
     }
 }
-ClearDirty(){
-    global isDirty, bSave
-    isDirty := false
-    if IsSet(bSave) && IsObject(bSave){
-        try bSave.Enabled := false
-        try bSave.Text := "Save"
+
+EditedPathsAreValid() {
+    global ePython, eOverlay, eImg, eAudio, eExplain
+    pathSpecs := [
+        ["Python executable", ePython.Value],
+        ["Overlay executable", eOverlay.Value],
+        ["Screenshot translator", eImg.Value],
+        ["Audio translator", eAudio.Value],
+        ["Explainer", eExplain.Value]
+    ]
+    missing := ""
+    for pathSpec in pathSpecs {
+        rawPath := Trim(pathSpec[2])
+        if (rawPath = "" || !FileExist(ResolvePath(rawPath)))
+            missing .= (missing = "" ? "" : "`n") "- " pathSpec[1] ": " (rawPath = "" ? "(empty)" : rawPath)
     }
+    if (missing = "")
+        return true
+    answer := MsgBox(
+        "These entries do not currently point to files:`n`n" missing
+        . "`n`nSave them anyway?",
+        "Save paths",
+        "YesNo Icon!"
+    )
+    return answer = "Yes"
 }
-; Use this for changes that should immediately persist and NOT wake the Save button
+
+SaveEditedPaths(showToast := true) {
+    global pythonExe, overlayAhk, imgScript, audioScript, explainScript
+    global ePython, eOverlay, eImg, eAudio, eExplain, iniPath
+    if !EditedPathsAreValid()
+        return false
+
+    pythonExe := ePython.Value
+    overlayAhk := eOverlay.Value
+    imgScript := eImg.Value
+    audioScript := eAudio.Value
+    explainScript := eExplain.Value
+
+    IniWrite(pythonExe, iniPath, "cfg", "pythonExe")
+    IniWrite(overlayAhk, iniPath, "cfg", "overlayAhk")
+    IniWrite(imgScript, iniPath, "cfg", "imgScript")
+    IniWrite(audioScript, iniPath, "cfg", "audioScript")
+    IniWrite(explainScript, iniPath, "cfg", "explainScript")
+    ClearPathsDirty()
+    if showToast
+        Toast("Paths saved")
+    DbgCP("Edited paths saved")
+    return true
+}
+
+ConfirmUnsavedPaths() {
+    global pathsDirty
+    if !pathsDirty
+        return true
+    answer := MsgBox(
+        "The Paths tab contains unsaved edits.",
+        "Unsaved paths",
+        "YesNoCancel Icon!"
+    )
+    if (answer = "Cancel")
+        return false
+    if (answer = "Yes")
+        return SaveEditedPaths(false)
+    ClearPathsDirty()
+    return true
+}
+
+ExitControlPanel(*) {
+    if !ConfirmUnsavedPaths()
+        return
+    SetTimer(_UpdateStatus, 0)
+    SetTimer(UpdateCPFocusRing, 0)
+    SetTimer(UpdateCPActiveTabHighlight, 0)
+    SavePanelBounds()
+    ExitApp()
+}
+
+; Use this for changes that should immediately persist.
 AutoPersist(){
     UpdateVars()
     SaveAll()
-    ClearDirty()
 }
 
 ; -------- Browse handlers --------
 BrowsePythonExe(*) {
-    global pythonExe
+    global pythonExe, ePython, iniPath
     sel := FileSelect(3,, "Select python.exe", "Programs (*.exe)")
-    if (sel != "")
-        pythonExe := sel, SaveAll(), Repaint(), DbgCP("BrowsePythonExe -> " sel)
+    if (sel != "") {
+        pythonExe := sel
+        ePython.Value := sel
+        IniWrite(pythonExe, iniPath, "cfg", "pythonExe")
+        UpdatePathsDirtyState()
+        DbgCP("BrowsePythonExe -> " sel)
+    }
 }
 BrowseAudioScript(*) {
-    global audioScript
+    global audioScript, eAudio, iniPath
     sel := FileSelect(3,, "Select audio subtitle .py", "Python (*.py)")
-    if (sel != "")
-        audioScript := sel, SaveAll(), Repaint(), DbgCP("BrowseAudioScript -> " sel)
+    if (sel != "") {
+        audioScript := sel
+        eAudio.Value := sel
+        IniWrite(audioScript, iniPath, "cfg", "audioScript")
+        UpdatePathsDirtyState()
+        DbgCP("BrowseAudioScript -> " sel)
+    }
 }
 BrowseOverlayAhk(*) {
-    global overlayAhk
+    global overlayAhk, eOverlay, iniPath
     sel := FileSelect(3,, "Select overlay .exe", "AutoHotkey (*.exe)")
-    if (sel != "")
-        overlayAhk := sel, SaveAll(), Repaint(), DbgCP("BrowseOverlayAhk -> " sel)
+    if (sel != "") {
+        overlayAhk := sel
+        eOverlay.Value := sel
+        IniWrite(overlayAhk, iniPath, "cfg", "overlayAhk")
+        UpdatePathsDirtyState()
+        DbgCP("BrowseOverlayAhk -> " sel)
+    }
 }
 BrowseImageScript(*) {
-    global imgScript
+    global imgScript, eImg, iniPath
     sel := FileSelect(3,, "Select image translator .py", "Python (*.py)")
-    if (sel != "")
-        imgScript := sel, SaveAll(), Repaint(), DbgCP("BrowseImageScript -> " sel)
+    if (sel != "") {
+        imgScript := sel
+        eImg.Value := sel
+        IniWrite(imgScript, iniPath, "cfg", "imgScript")
+        UpdatePathsDirtyState()
+        DbgCP("BrowseImageScript -> " sel)
+    }
 }
 
 BrowseCaptureDir(*) {
@@ -3171,10 +3543,15 @@ BrowseCaptureDir(*) {
 }
 
 BrowseExplainScript(*) {
-    global explainScript
+    global explainScript, eExplain, iniPath
     sel := FileSelect(3,, "Select explainer .py", "Python (*.py)")
-    if (sel != "")
-        explainScript := sel, SaveAll(), Repaint(), DbgCP("BrowseExplainScript -> " sel)
+    if (sel != "") {
+        explainScript := sel
+        eExplain.Value := sel
+        IniWrite(explainScript, iniPath, "cfg", "explainScript")
+        UpdatePathsDirtyState()
+        DbgCP("BrowseExplainScript -> " sel)
+    }
 }
 
 ; --- Screenshots: trigger ShareX â€œdefine capture regionâ€ (Ctrl+Alt+F2) ---
@@ -4161,7 +4538,7 @@ CPControllerUpdateStatus(snapshot := 0) {
     if !IsSet(txtControllerStatus)
         return
     if !CPControllerInputsEnabled {
-        newStatus := "Action bindings are off. D-pad / A / B still navigate this window."
+        newStatus := "Bindings off; navigation remains active."
     } else {
         if !IsObject(snapshot)
             snapshot := CPControllerReadSnapshot()
@@ -4781,7 +5158,17 @@ CPThemedInputBox(promptText, dialogTitle, infoText := "", initialValue := "", di
     return result
 }
 
+CPTextEditorClose(dlg, *) {
+    try dlg.Destroy()
+}
+
 CPShowTextEditorDialog(dlg, editorCtrl) {
+    global ui
+    ; Ownership lets the controller-navigation poll recognize this editor as
+    ; part of the control-panel workflow. B / Circle is dispatched as Escape,
+    ; which uses the same close path as the editor's Close button.
+    try dlg.Opt("+Owner" ui.Hwnd)
+    dlg.OnEvent("Escape", CPTextEditorClose.Bind(dlg))
     dlg.Show()
     CPApplyOwnedDialogTheme(dlg)
 
@@ -6591,6 +6978,7 @@ GameProfileAppendWarning(&warnings, message) {
 GameProfileSave(name, announce := true) {
     global iniPath
     global CPControllerDpadNavigationEnabled
+    global useTerminologyOverrides
     global ddlPrompt, ddlEPr, ddlJPG, ddlENG
     global chkGuess, chkName, chkOpenTW, chkTop_TW, chkOpenEW, chkTop_EW
     global overlayTrans, boxBgHex, txtHex, nameHex, fontName, fontSize, fontBold
@@ -6624,6 +7012,7 @@ GameProfileSave(name, announce := true) {
         IniWriteRetry(chkName.Value ? 1 : 0, path, "screenshot", "colorSpeaker")
 
         IniWriteRetry(explainPromptName, path, "explanation", "promptProfile")
+        IniWriteRetry(useTerminologyOverrides ? 1 : 0, path, "terminology", "enabled")
         IniWriteRetry(jpProfile, path, "terminology", "jp2tlProfile")
         IniWriteRetry(tlProfile, path, "terminology", "tl2tlProfile")
 
@@ -6723,10 +7112,11 @@ GameProfileApplyBounds(title, profilePath, section) {
 GameProfileApply(name, announce := true) {
     global iniPath
     global promptProfile, explainPromptProfile, imgPostproc, jp2enGlossaryProfile, en2enGlossaryProfile
+    global useTerminologyOverrides
     global capMode, capRect, capWinInfo
     global overlayTrans, boxBgHex, txtHex, nameHex, fontName, fontSize, fontBold
     global overlayTrans_EW, boxBgHex_EW, txtHex_EW, fontName_EW, fontSize_EW, fontBold_EW
-    global ddlPrompt, ddlEPr, ddlJPG, ddlENG
+    global ddlPrompt, ddlEPr, ddlJPG, ddlENG, chkUseTerminologyOverrides
     global chkGuess, chkName, chkOpenTW, chkTop_TW, chkOpenEW, chkTop_EW
     global slTrans, lblTransPct, rectBg, rectTxt, rectName, ddlFont, edFSize, udFSize, chkFontBold
     global slTrans_EW, lblTransPct_EW, rectBg_EW, rectTxt_EW, ddlFont_EW, edFSize_EW, udFSize_EW, chkFontBold_EW
@@ -6773,6 +7163,9 @@ GameProfileApply(name, announce := true) {
         en2enGlossaryProfile := candidate
     else
         GameProfileAppendWarning(&warnings, "TL -> TL glossary '" candidate "' was not found; the current selection was kept.")
+    ; Profiles created before this toggle existed used terminology overrides
+    ; unconditionally, so a missing key intentionally falls back to enabled.
+    useTerminologyOverrides := GameProfileReadInt(path, "terminology", "enabled", 1) ? 1 : 0
 
     capMode := StrLower(Trim(IniRead(path, "screenshot", "captureMode", capMode)))
     if (capMode != "window")
@@ -6800,6 +7193,8 @@ GameProfileApply(name, announce := true) {
     imgPostproc := SyncPromptPostproc(promptProfile)
     RefreshExplainPromptProfilesList(explainPromptProfile)
     RefreshGlossaryProfilesList(jp2enGlossaryProfile, en2enGlossaryProfile)
+    chkUseTerminologyOverrides.Value := useTerminologyOverrides
+    EnvSet("USE_TERMINOLOGY_OVERRIDES", useTerminologyOverrides ? "1" : "0")
 
     chkGuess.Value := GameProfileReadInt(path, "screenshot", "highlightGuessed", chkGuess.Value) ? 1 : 0
     chkName.Value := GameProfileReadInt(path, "screenshot", "colorSpeaker", chkName.Value) ? 1 : 0
@@ -6835,6 +7230,7 @@ GameProfileApply(name, announce := true) {
     IniWriteRetry(explainPromptProfile, iniPath, "cfg", "explainPromptProfile")
     IniWriteRetry(jp2enGlossaryProfile, iniPath, "cfg", "jp2enGlossaryProfile")
     IniWriteRetry(en2enGlossaryProfile, iniPath, "cfg", "en2enGlossaryProfile")
+    IniWriteRetry(useTerminologyOverrides, iniPath, "cfg", "useTerminologyOverrides")
     IniWriteRetry(chkGuess.Value, iniPath, "cfg", "highlightGuessed")
     IniWriteRetry(chkName.Value, iniPath, "cfg", "colorSpeaker")
     IniWriteRetry(chkOpenTW.Value, iniPath, "cfg", "openTranslatorOnLaunch")
@@ -7049,7 +7445,8 @@ tabNames := ["Screenshot Translation","Audio Translation","Translation Window","
 CPTabVisiblePages := [1, 2, 3, 4, 5, 6, 7, 8, 9]
 if showPathsTab
     CPTabVisiblePages.Push(10)
-tab := ui.Add("Tab", "xm ym w760 h420 Buttons", tabNames)
+tab := ui.Add("Tab", "xm ym w760 h420 Buttons -Wrap", tabNames)
+CPRegisterCanvasFixedControl(tab, false, true)
 
 ; --- Tab 1: SCREENSHOT TRANSLATION
 tab.UseTab(1)
@@ -7471,7 +7868,11 @@ txtGlossaryHelp4 := ui.Add("Text", "xm y+20 cGray w760"
 ; --- Row 1: Japanese -> target-language glossary
 for cpMutedGlossaryCtrl in [txtGlossaryHelp1, txtGlossaryHelp2, txtGlossaryHelp3, txtGlossaryHelp4]
     CPRegisterMutedControl(cpMutedGlossaryCtrl)
-ui.Add("Text", "xm y+20", "JP -> TL glossary:")
+chkUseTerminologyOverrides := ui.Add("CheckBox", "xm y+20", "Use terminology overrides")
+chkUseTerminologyOverrides.Value := useTerminologyOverrides
+chkUseTerminologyOverrides.OnEvent("Click", TerminologyOverridesChanged)
+
+ui.Add("Text", "xm y+16", "JP -> TL glossary:")
 ddlJPG := ui.Add("DropDownList", "x+m w260 0x210", [])   ; filled by RefreshGlossaryProfilesList
 btnJPG_Edit := ui.Add("Button", "x+6 w70", "Edit")
 btnJPG_New  := ui.Add("Button", "x+6 w70", "Add")
@@ -7505,7 +7906,7 @@ ui.Add("Text", "xm y+4 w0 h0")
 lblGameProfilesTitle := ui.Add("Text", "xm y+10 w760", "Profiles")
 lblGameProfilesTitle.SetFont("Bold")
 txtGameProfileIntro := ui.Add("Text", "xm y+8 w760 cGray"
-    , "Save and restore complete setups for screenshot and explanation prompts, translation post-processing, capture target, terminology overrides, and both overlay windows.")
+    , "Save and restore complete setups for screenshot and explanation prompts, translation post-processing, capture target, terminology override selections and on/off state, and both overlay windows.")
 txtGameProfileGlobal := ui.Add("Text", "xm y+6 w760 cGray"
     , "Audio provider, model, input device, and target language remain global and are not changed by a profile.")
 CPRegisterMutedControl(txtGameProfileIntro)
@@ -7557,6 +7958,10 @@ tExplain := ui.Add("Text",  "xm y+10", "Explainer (.py)")
 eExplain := ui.Add("Edit",  "x+m w560", explainScript)
 bExplainSel := ui.Add("Button","x+m w80", "Browse")
 bExplainSel.OnEvent("Click", BrowseExplainScript)
+
+btnSavePaths := ui.Add("Button", "xm y+16 w140", "Save paths")
+btnSavePaths.Enabled := false
+btnSavePaths.OnEvent("Click", (*) => SaveEditedPaths())
 
 ; --- Advanced screenshot output override (hidden with the Paths tab) ---
 directOpts := "xm y+18 w220"
@@ -7623,33 +8028,37 @@ global hkConflictText
 hkConflictText := CPAddControlsViewControl("keyboard", ui.Add("Text", "x" controlsActionX " y" controlsRowY " w800 h18 cRed", ""))
 Hotkeys_ShowConflicts()
 
-; D-pad / A / B navigation is always available while this window or one of its
-; dialogs is in the foreground. Global action bindings remain opt-in and use
-; rising-edge button presses, so connecting a controller cannot fire an action.
+; Keep the controller binding list aligned with the keyboard list. Controller-
+; only options use the otherwise empty area to the right of the Disable buttons.
 controllerTopY := controlsContentY
-controllerInfoX := controlsActionX + 350
-controllerInfoW := 490
-global cbControllerInputsEnabled := CPAddControlsViewControl("controller", ui.Add("CheckBox", "x" controlsActionX " y" controllerTopY " w330 h28", "Enable direct controller action bindings"))
-global txtControllerStatus := CPAddControlsViewControl("controller", ui.Add("Text", "x" controllerInfoX " y" (controllerTopY + 4) " w" controllerInfoW " h24 cGray", "Action bindings are off. Controller navigation remains available."))
-CPRegisterMutedControl(txtControllerStatus)
-cbControllerInputsEnabled.OnEvent("Click", CPControllerEnabledChanged)
-
-global cbControllerDpadNavigationEnabled := CPAddControlsViewControl("controller", ui.Add("CheckBox", "x" controlsActionX " y" (controllerTopY + 40) " w330 h28", "Use D-pad for control panel navigation"))
-global txtControllerDpadNote := CPAddControlsViewControl("controller", ui.Add("Text", "x" controllerInfoX " y" (controllerTopY + 44) " w" controllerInfoW " h42 cGray", "Turn this off when another app maps the D-pad to arrow keys, to prevent duplicate navigation. A / Cross, B / Circle, and keyboard controls remain available."))
-CPRegisterMutedControl(txtControllerDpadNote)
-cbControllerDpadNavigationEnabled.OnEvent("Click", CPControllerDpadNavigationChanged)
-
-controllerHeaderY := controllerTopY + 92
-CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsActionX " y" controllerHeaderY " w260", "Action"))
-CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsBindingX " y" controllerHeaderY " w240", "Current controller input"))
+controllerBindingX := controlsActionX + 235
+controllerButtonX := controllerBindingX + 220
+controllerOptionsX := controlsActionX + 630
+controllerHeaderY := controllerTopY
 controllerRowY := controllerHeaderY + 28
+
+CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsActionX " y" controllerHeaderY " w225", "Action"))
+CPAddControlsViewControl("controller", ui.Add("Text", "x" controllerBindingX " y" controllerHeaderY " w210", "Current controller input"))
+global txtControllerStatus := CPAddControlsViewControl("controller", ui.Add("Text", "x" controllerOptionsX " y" controllerHeaderY " w350 h20 cGray", "Action bindings are off."))
+CPRegisterMutedControl(txtControllerStatus)
+
+global cbControllerInputsEnabled := CPAddControlsViewControl("controller", ui.Add("CheckBox", "x" controllerOptionsX " y" controllerRowY " w350 h28 +0x2000", "Enable direct controller action bindings"))
+cbControllerInputsEnabled.OnEvent("Click", CPControllerEnabledChanged)
+TooltipBind(cbControllerInputsEnabled, "Enable optional controller buttons for translator actions. The game still receives the same button presses.")
+
+global cbControllerDpadNavigationEnabled := CPAddControlsViewControl("controller", ui.Add("CheckBox", "x" controllerOptionsX " y" (controllerRowY + controlsRowStep) " w350 h28 +0x2000", "Use D-pad for control panel navigation"))
+cbControllerDpadNavigationEnabled.OnEvent("Click", CPControllerDpadNavigationChanged)
+TooltipBind(cbControllerDpadNavigationEnabled, "Turn this off when another app maps the D-pad to arrow keys, to prevent duplicate navigation. A / Cross, B / Circle, and keyboard controls remain available.")
+
+global txtControllerDpadNote := CPAddControlsViewControl("controller", ui.Add("Text", "x" controllerOptionsX " y" (controllerRowY + (controlsRowStep * 2) + 2) " w350 h42 cGray", "Disable D-pad navigation if another app also sends arrow keys. A / Cross and B / Circle remain available."))
+CPRegisterMutedControl(txtControllerDpadNote)
 
 for controllerActionKey in hotkeyActions {
     label := hotkeyLabels[controllerActionKey]
-    lblControllerAction := CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsActionX " y" controllerRowY " w260 h26 +0x200", label))
-    controllerEdit := CPAddControlsViewControl("controller", ui.Add("Edit", "x" controlsBindingX " y" controllerRowY " w240 h28 ReadOnly", "Disabled"))
-    btnControllerAssign := CPAddControlsViewControl("controller", ui.Add("Button", "x" controlsButtonX " y" controllerRowY " w90 h28", "Assign"))
-    btnControllerDisable := CPAddControlsViewControl("controller", ui.Add("Button", "x+6 yp w80 h28", "Disable"))
+    lblControllerAction := CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsActionX " y" controllerRowY " w225 h26 +0x200", label))
+    controllerEdit := CPAddControlsViewControl("controller", ui.Add("Edit", "x" controllerBindingX " y" controllerRowY " w210 h28 ReadOnly", "Disabled"))
+    btnControllerAssign := CPAddControlsViewControl("controller", ui.Add("Button", "x" controllerButtonX " y" controllerRowY " w80 h28", "Assign"))
+    btnControllerDisable := CPAddControlsViewControl("controller", ui.Add("Button", "x+6 yp w75 h28", "Disable"))
 
     CPControllerBindingEdits[controllerActionKey] := controllerEdit
     CPControllerAssignButtons[controllerActionKey] := btnControllerAssign
@@ -7659,9 +8068,6 @@ for controllerActionKey in hotkeyActions {
     btnControllerDisable.OnEvent("Click", CPControllerDisable.Bind(controllerAction))
     controllerRowY += controlsRowStep
 }
-
-txtControllerNote := CPAddControlsViewControl("controller", ui.Add("Text", "x" controlsActionX " y" controllerRowY " w900 h52 cGray", "A / Cross and B / Circle navigate the control panel automatically. D-pad navigation can be disabled above when keyboard-emulation software supplies the arrow keys. Optional action bindings do not consume controller presses; the game still receives them."))
-CPRegisterMutedControl(txtControllerNote)
 
 CPControllerLoadBindings()
 savedControlsView := IniRead(iniPath, "controller_inputs", "view", "keyboard")
@@ -7673,6 +8079,9 @@ tab.UseTab()
 FixAllEditableCombos()
 
 ; --- visual separator above global (non-tab) controls ---
+; An opaque sibling behind the fixed footer prevents vertically scrolled tab
+; controls from painting through the footer area.
+CPFooterFill := ui.Add("Text", "x0 y0 w1 h1 Hidden BackgroundF0F0F0 +0x100 +0x04000000")
 ; SS_ETCHEDHORZ = 0x10 -> draws a 1â€“2 px horizontal etched line
 sepAction := ui.Add("Text", "xm y+6 w1000 h2 0x10")
 btnOv      := ui.Add("Button", "xm y+18 w130",  "Open Translator")
@@ -7681,9 +8090,7 @@ btnAudio  := ui.Add("Button", "x+6 w180", "Audio Translation Off")
 btnExplainerLaunch := ui.Add("Button", "x+6 w140", "Open Explainer")
 btnExplainerClose  := ui.Add("Button", "x+6 w140", "Close Explainer")
 
-bSave     := ui.Add("Button", "xm y+14 w120", "Save")
-try bSave.Enabled := false
-bClose    := ui.Add("Button", "x+8 w120", "Close all")
+bClose    := ui.Add("Button", "xm y+14 w120", "Close all")
 chkTop    := ui.Add("CheckBox", "x+12 yp+6", "Always on top")
 chkDarkMode := ui.Add("CheckBox", "x+18 yp", "Dark mode")
 chkDarkMode.Value := controlDarkMode
@@ -7694,45 +8101,16 @@ slControlOpacity.Value := controlPanelOpacity
 slControlOpacity.OnEvent("Change", CPOnControlPanelOpacityChange)
 lblControlOpacityPct := ui.Add("Text", "x+8 yp+6 w44", controlPanelOpacity "%")
 
-; --- Dirty wiring (manual-save-worthy settings) ---
-; Topmost toggle
-if IsSet(chkTop)
-    chkTop.OnEvent("Click", (*) => MarkDirty())
+; The footer stays pinned to the visible bottom while page content scrolls.
+for footerRegistrationCtrl in [CPFooterFill, sepAction, btnOv, btnOvClose, btnAudio, btnExplainerLaunch
+    , btnExplainerClose, bClose, chkTop, chkDarkMode, txtControlOpacity
+    , slControlOpacity, lblControlOpacityPct]
+    CPRegisterCanvasFixedControl(footerRegistrationCtrl, false, true)
+CPConfigurePreferredPanelHeight()
 
-; Transparency sliders (Translator / Explainer)
-if IsSet(slTrans)
-    slTrans.OnEvent("Change", (c, e) => (HandleTransparencyChange(c),    MarkDirty(), SendOverlayTheme()))
-if IsSet(slTrans_EW)
-    slTrans_EW.OnEvent("Change", (c, e) => (HandleTransparencyChange_EW(c), MarkDirty(), SendOverlayTheme()))
-
-; Theme / font / sizing / borders
-if IsSet(ddlTheme)
-    ddlTheme.OnEvent("Change", (*) => MarkDirty())
-if IsSet(ddlFont)
-    ddlFont.OnEvent("Change", (*) => MarkDirty())
-if IsSet(spnFontSz)
-    spnFontSz.OnEvent("Change", (*) => MarkDirty())
-if IsSet(spnBorder)
-    spnBorder.OnEvent("Change", (*) => MarkDirty())
-
-; Color pickers
-if IsSet(clrBg)
-    clrBg.OnEvent("Change", (*) => MarkDirty())
-if IsSet(clrText)
-    clrText.OnEvent("Change", (*) => MarkDirty())
-
-; --- Paths tab edits: typing should mark the config as dirty ---
-; (These are created in the Paths tab as: ePython, eOverlay, eImg, eAudio, eExplain)
-if IsSet(ePython)
-    ePython.OnEvent("Change", (*) => MarkDirty())
-if IsSet(eOverlay)
-    eOverlay.OnEvent("Change", (*) => MarkDirty())
-if IsSet(eImg)
-    eImg.OnEvent("Change", (*) => MarkDirty())
-if IsSet(eAudio)
-    eAudio.OnEvent("Change", (*) => MarkDirty())
-if IsSet(eExplain)
-    eExplain.OnEvent("Change", (*) => MarkDirty())
+; Only manually typed path values require an explicit save.
+for pathEditControl in [ePython, eOverlay, eImg, eAudio, eExplain]
+    pathEditControl.OnEvent("Change", UpdatePathsDirtyState)
 
 btnAudio.OnEvent("Click", ToggleAudioFromButton)
 btnOv.OnEvent("Click",    LaunchOverlay)
@@ -7740,12 +8118,13 @@ btnOvClose.OnEvent("Click", CloseTranslatorOverlay)
 btnExplainerLaunch.OnEvent("Click", LaunchExplainerOverlay)
 btnExplainerClose.OnEvent("Click",  CloseExplainerOverlay)
 
-bSave.OnEvent("Click", (*) => (UpdateVars(), SaveAll(), ClearDirty(), Toast("Saved"), DbgCP("Manual Save clicked")))
 bClose.OnEvent("Click", ClosePanel)
 
 ClosePanel(*) {
     static closing := false
     if closing
+        return
+    if !ConfirmUnsavedPaths()
         return
     closing := true
 
@@ -7769,7 +8148,10 @@ ClosePanel(*) {
 ; Load persisted Control Panel topmost state from INI and apply it
 chkTop.Value := Integer(IniRead(iniPath, "cfg_control", "winTop", 0)) ? 1 : 0
 ui.Opt(chkTop.Value ? "+AlwaysOnTop" : "-AlwaysOnTop")
-chkTop.OnEvent("Click", (*) => ui.Opt(chkTop.Value ? "+AlwaysOnTop" : "-AlwaysOnTop"))
+chkTop.OnEvent("Click", (*) => (
+    ui.Opt(chkTop.Value ? "+AlwaysOnTop" : "-AlwaysOnTop"),
+    IniWrite(chkTop.Value ? 1 : 0, iniPath, "cfg_control", "winTop")
+))
 
 slTrans.OnEvent("Change", (c, e) => (HandleTransparencyChange(c), UpdateVars(), SaveAll(), SendOverlayTheme()))
 
@@ -7967,8 +8349,8 @@ tab.UseTab()
 CPCreateCustomTabBar()
 CPRefreshThemeBrushes()
 
-ui.OnEvent("Close",  (*) => (SetTimer(_UpdateStatus, 0), SetTimer(UpdateCPFocusRing, 0), SetTimer(UpdateCPActiveTabHighlight, 0), SavePanelBounds(), ExitApp()))
-ui.OnEvent("Escape", (*) => (SetTimer(_UpdateStatus, 0), SetTimer(UpdateCPFocusRing, 0), SetTimer(UpdateCPActiveTabHighlight, 0), SavePanelBounds(), ExitApp()))
+ui.OnEvent("Close",  ExitControlPanel)
+ui.OnEvent("Escape", ExitControlPanel)
 ui.OnEvent("Size",   ResizeUI)
 
 ; wire buttons
@@ -8460,20 +8842,15 @@ UpdateVars(){
     global pythonExe,audioScript,overlayAhk,imgScript,overlayTrans
     global trModel,audioProvider,geminiAudioModel,audioTargetLang
     global imgProvider,imgModel,geminiImgModel
-    global eExplain, explainScript
+    global explainScript
 	global explainProvider, explainOpenAIModel, explainGeminiModel
     global ddlEProv, ddlEOpenAI, ddlEGem
-    global ePython,eAudio,eOverlay,eImg,ddlTR,ddlAProv,ddlA_GM,ddlAudioTarget,ddlProv,ddlIMG,ddlIMG_GM,slTrans
+    global ddlTR,ddlAProv,ddlA_GM,ddlAudioTarget,ddlProv,ddlIMG,ddlIMG_GM,slTrans
 	global ddlFont, edFSize, chkFontBold, fontName, fontSize, fontBold
     global ddlPrompt, promptProfile
     global imgPostproc, directModelOutput, cbDirectModelOutput
 	global debugMode, cbDebug
-    pythonExe        := ePython.Value
-    audioScript      := eAudio.Value
-    overlayAhk       := eOverlay.Value
-    imgScript        := eImg.Value
     overlayTrans     := slTrans.Value
-    explainScript    := eExplain.Value
     trModel          := ddlTR.Text
     audioProvider    := ddlAProv.Text
     geminiAudioModel := ddlA_GM.Text
@@ -8515,6 +8892,65 @@ MoveRowWithButtonsBound(combo, btnAdd, btnDel, rightLimitX, btnH) {
     btnDel.Move(cx + newW + g + btnW + g, cy, btnW, btnH)
 }
 
+CPConfigurePreferredPanelWidth() {
+    global tab, CPTabNaturalWidths, CPPreferredViewportW, defGuiW
+    tab.GetPos(&tabX)
+    naturalTabWidth := 0
+    for tabWidth in CPTabNaturalWidths
+        naturalTabWidth += tabWidth
+    ; This is the exact client width where the custom titles still use their
+    ; natural centered layout; one pixel less activates compact alignment.
+    CPPreferredViewportW := Round(naturalTabWidth + tabX * 2)
+    defGuiW := CPPreferredViewportW
+}
+
+CPConfigurePreferredPanelHeight() {
+    global chkTop_TW, pad, CP_VIEWPORT_MIN_H, CP_CANVAS_MIN_H
+    global CPPreferredViewportH, defGuiH
+
+    chkTop_TW.GetPos(, &toggleY, , &toggleH)
+    footerSpan := pad + (32 * 2 + 10 + 12 + pad) - 4
+    CPPreferredViewportH := Max(CP_VIEWPORT_MIN_H, Round(toggleY + toggleH + 24 + footerSpan))
+    ; The preferred snap height is also the no-scroll design height. A vertical
+    ; scrollbar appears only after the visible client area becomes shorter.
+    CP_CANVAS_MIN_H := CPPreferredViewportH
+    defGuiH := CPPreferredViewportH
+}
+
+CPLayoutControllerOptions(rightEdge) {
+    global controllerOptionsX, controllerTopY
+    global txtControllerStatus, cbControllerInputsEnabled
+    global cbControllerDpadNavigationEnabled, txtControllerDpadNote
+
+    if !(IsSet(txtControllerStatus) && IsSet(cbControllerInputsEnabled)
+        && IsSet(cbControllerDpadNavigationEnabled) && IsSet(txtControllerDpadNote))
+        return
+
+    ; Shrink the right-hand column before allowing the canvas to clip it.
+    ; Multiline checkbox labels and a taller note use the free space below.
+    optionsW := Min(350, Max(160, rightEdge - controllerOptionsX))
+    statusH := (optionsW < 220) ? 38 : 20
+    checkboxH := (optionsW < 300) ? 42 : 28
+    optionGap := (optionsW < 300) ? 4 : 10
+
+    txtControllerStatus.Move(controllerOptionsX, controllerTopY, optionsW, statusH)
+    directY := controllerTopY + statusH + 8
+    cbControllerInputsEnabled.Move(controllerOptionsX, directY, optionsW, checkboxH)
+    dpadY := directY + checkboxH + optionGap
+    cbControllerDpadNavigationEnabled.Move(controllerOptionsX, dpadY, optionsW, checkboxH)
+
+    if (optionsW >= 320)
+        noteLines := 2
+    else if (optionsW >= 250)
+        noteLines := 3
+    else if (optionsW >= 200)
+        noteLines := 4
+    else
+        noteLines := 5
+    noteY := dpadY + checkboxH + 8
+    txtControllerDpadNote.Move(controllerOptionsX, noteY, optionsW, noteLines * 19 + 4)
+}
+
 ResizeUI(gui, minMax, w, h){
     ; --- Prevent flicker & â€œinvisible until hoverâ€ by suspending redraw during bulk moves ---
     hwnd := gui.Hwnd
@@ -8530,12 +8966,15 @@ ResizeUI(gui, minMax, w, h){
     h := Max(CP_CANVAS_MIN_H, viewportH)
 
     global pad, gap
-    global tab, sepAction
+    global tab, CPFooterFill, sepAction
     global tPython,ePython,bPy,tAud,eAudio,bAud,tOv,eOverlay,bOvSel,tImg,eImg,bImgSel,tExplain,eExplain,bExplainSel
     global ddlSpeaker,ddlAProv,ddlA_GM,ddlTR,ddlAudioTarget,ddlProv,ddlIMG,ddlIMG_GM
     global txtAudioHelp,txtAudioTestStatus
-    global btnStart,btnStop,btnAudio,btnOv,btnOvClose,btnExplainerLaunch,btnExplainerClose,btnExplainNow,bSave,bClose,chkTop,chkDarkMode,chkGuess
+    global btnStart,btnStop,btnAudio,btnOv,btnOvClose,btnExplainerLaunch,btnExplainerClose,btnExplainNow,bClose,chkTop,chkDarkMode,chkGuess
     global txtControlOpacity,slControlOpacity,lblControlOpacityPct
+    global controllerOptionsX, controllerTopY
+    global txtControllerStatus, cbControllerInputsEnabled
+    global cbControllerDpadNavigationEnabled, txtControllerDpadNote
     global btnA_GM_Add, btnA_GM_Del, btnTR_Add, btnTR_Del
     global btnIMG_Add, btnIMG_Del, btnIMG_GM_Add, btnIMG_GM_Del
     ; NEW prompt widgets
@@ -8551,12 +8990,15 @@ ResizeUI(gui, minMax, w, h){
     gap2 := 12
     bottomBlockH := btnH*2 + gap1 + gap2 + pad
 
-    tabH := Max(260, h - pad*2 - bottomBlockH)
+    ; Header and footer follow the visible client area. Only page content keeps
+    ; the larger virtual-canvas height and scrolls between these fixed regions.
+    tabH := Max(260, viewportH - pad*2 - bottomBlockH)
     tab.Move(pad, pad, w - pad*2, tabH)
     CPLayoutCustomTabBar(viewportW)
 
     tab.GetPos(&tx,&ty,&tw,&th)
     rightEdge := tx + tw - (pad + 28)
+    CPLayoutControllerOptions(rightEdge)
 
     innerW := (w - pad*2)
     ; reserve enough space so the Edit column starts at a fixed x, regardless of label text width
@@ -8620,8 +9062,10 @@ ResizeUI(gui, minMax, w, h){
     btnPrNew .Move(pcx + pW + g + btnW + g, pcy, btnW, btnH)
     btnPrDel .Move(pcx + pW + g + (btnW+g)*2, pcy, btnW, btnH)
 
-            ; place a thin separator directly under the tab
+    ; Place the sticky footer directly below the visible tab viewport.
     sepY := pad + tabH + 4
+    CPFooterFill.Move(0, sepY, w, Max(1, viewportH - sepY))
+    CPFooterFill.Visible := true
     try sepAction.Move(pad, sepY, w - pad*2, 2)
 
     ; action row always sits just below the separator
@@ -8633,12 +9077,9 @@ ResizeUI(gui, minMax, w, h){
     btnExplainerLaunch.Move(pad + 130 + 140 + 180 + gap*3, yAction, 140, btnH)  ; Open Explainer
     btnExplainerClose.Move(pad + 130 + 140 + 180 + 140 + gap*4, yAction, 140, btnH) ; Close Explainer
 
-    ; Use the virtual canvas height so this row remains at the design bottom
-    ; when the visible window is smaller and scrollbars are present.
-    ySave := h - btnH - pad
+    ySave := viewportH - btnH - pad
 
-    bSave.Move(pad, ySave, 120, btnH)
-    bClose.Move(pad + 120 + 8, ySave, 120, btnH)
+    bClose.Move(pad, ySave, 120, btnH)
     bClose.GetPos(&cx,&cy,&btnW,)
     chkTop.Move(cx + btnW + 12, ySave + 6)
     chkTop.GetPos(&cpTopX, &cpTopY, &cpTopW)
@@ -8651,6 +9092,8 @@ ResizeUI(gui, minMax, w, h){
     lblControlOpacityPct.Move(cpOpacitySliderX + cpOpacitySliderW + 8, ySave + 6, 44)
     CPUpdateComboArrowOverlays()
     CPCanvasFinishLayout(viewportW, viewportH, canvasRestore, false)
+    CPClipScrollableControlsToViewport(false)
+    CPMaintainFooterZOrder()
 
     ; --- Re-enable redraw and force repaint of the whole window and all children ---
     if (hwnd) {
@@ -9269,7 +9712,6 @@ HandleTransparencyChange_EW(sliderCtrl) {
     overlayTrans_EW := val
     pct := Round(val / 255 * 100)
     lblTransPct_EW.Value := pct . "%"
-        SaveAll(), ClearDirty()
     try WinSetTransparent(overlayTrans_EW, "Explainer")
     SendOverlayTheme()
 }
@@ -10066,6 +10508,13 @@ GlossaryChanged(kind) {
             en2enGlossaryProfile := "default"
         IniWrite(en2enGlossaryProfile, iniPath, "cfg", "en2enGlossaryProfile")
     }
+}
+
+TerminologyOverridesChanged(*) {
+    global chkUseTerminologyOverrides, useTerminologyOverrides, iniPath
+    useTerminologyOverrides := chkUseTerminologyOverrides.Value ? 1 : 0
+    IniWrite(useTerminologyOverrides, iniPath, "cfg", "useTerminologyOverrides")
+    EnvSet("USE_TERMINOLOGY_OVERRIDES", useTerminologyOverrides ? "1" : "0")
 }
 
 ; small helper you already use patterns like this across the file:
