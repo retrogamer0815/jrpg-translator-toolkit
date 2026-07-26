@@ -64,7 +64,7 @@ Profile automatically for each game.
     </td>
     <td>
       <a href="docs/media/launchbox-integration.jpg">
-        <img src="docs/media/launchbox-integration.jpg" alt="JRPG Translator Setup entry in LaunchBox and Big Box">
+        <img src="docs/media/launchbox-integration.jpg" alt="Per-game JRPG Translator and JoyToKey setup window in LaunchBox">
       </a>
     </td>
   </tr>
@@ -81,15 +81,19 @@ Profile automatically for each game.
 - Independent Translator and Explainer overlays with configurable colors,
   fonts, borders, transparency, position, and size.
 - Translation and explanation prompts editable from the control panel.
-- Unified Profiles that store prompts, post-processing, terminology overrides,
-  capture target, and both overlays' appearance, position, and size.
+- Unified Profiles that store prompt selections, capture target, terminology
+  settings, D-pad navigation, startup choices, and both overlays' appearance,
+  position, and size.
 - Independent model lists for screenshot translation, live audio, and
   explanations, with API-backed model discovery and manual model-ID entry.
 - Selectable output language for live audio translation.
 - JP-to-target-language and target-language-to-target-language glossary profiles
-  for consistent names, terminology, spelling, and preferred wording.
+  for consistent names, terminology, spelling, and preferred wording, with an
+  immediate per-Profile on/off switch.
 - Configurable keyboard hotkeys, optional direct controller action bindings,
-  spatial controller navigation, and optional dark mode.
+  optional D-pad navigation, and spatial controller focus movement.
+- A resizable control panel with compact scrolling, dark mode, whole-window
+  opacity, and magnetic preferred width and height points.
 - Non-activating overlays that can remain visible without taking focus from the
   game or pausing an emulator.
 - Optional per-game LaunchBox / Big Box integration with JRPG Translator
@@ -113,12 +117,14 @@ needed when using the release package.
 3. Add your API keys in the **API Keys** tab, or set `OPENAI_API_KEY` and/or
    `GEMINI_API_KEY` as Windows user environment variables.
 4. Open the Translator overlay.
-5. Choose a capture region or game window from
-   **Screenshot Translation > Capture**.
+5. In **Screenshot Translation**, choose **Capture...**, then select a region or
+   game window.
 6. Select the provider, model, prompt, and hotkeys you want to use.
 
-The control panel saves settings automatically where appropriate. The **Save**
-button becomes available when a manual save is needed.
+Most control-panel settings save immediately. Manually edited application paths
+and **Debug mode** are saved with **Save paths** in the optional **Paths** tab.
+API keys stored in `Settings/.env` use **Save Keys** in **API Keys**; prompt and
+terminology editors have their own Save controls.
 
 ## Translation Workflows
 
@@ -137,11 +143,14 @@ format useful for playing or studying.
 In the **Audio Translation** tab:
 
 1. Select the Windows playback device.
-2. Choose OpenAI or Gemini and a compatible live translation model.
-3. Select the output language.
-4. Choose **Audio Translation Off** to start translation. The button changes to
-   **Audio Translation On** while the live session is active; choose it again to
-   stop.
+2. Optionally choose **Test Audio** while sound is playing to verify that the
+   selected device is receiving audible output. This test is local and does not
+   make an API request.
+3. Choose OpenAI or Gemini and a compatible live translation model.
+4. Select the output language.
+5. Choose **Audio Translation Off** in the footer to start translation. The
+   button changes to **Audio Translation On** while the live session is active;
+   choose it again to stop.
 
 Audio is streamed directly to the selected live translation model. Translated
 lines appear at the bottom of the Translator overlay while older lines move
@@ -159,13 +168,28 @@ tuned for a learner's level and preferred amount of detail.
 When **Save explanations to textfiles** is enabled, generated explanations are
 also stored in `Settings/Explanations` for use as study material.
 
+### Terminology Overrides
+
+The **Terminology Overrides** tab provides separate JP-to-target-language and
+target-language-to-target-language glossary Profiles. **Use terminology
+overrides** enables or disables both stages immediately for screenshot
+translation, live audio translation, and explanations.
+
+When the option is off, JP-to-target-language entries are not sent to a model
+and local target-language replacements are skipped. The enabled state and both
+selected glossary Profiles are stored in unified Profiles, including Profiles
+applied through LaunchBox / Big Box.
+
 ## Controller Use
 
 The control panel supports an XInput-compatible controller without a keyboard
 mapper:
 
 - The D-pad moves spatially between visible controls and tabs.
-- A / Cross confirms and B / Circle cancels.
+- A / Cross confirms; B / Circle cancels or closes dialogs and text editors.
+- **Use D-pad for control panel navigation** can be turned off when JoyToKey,
+  Steam Input, DS4Windows, or another mapper already sends arrow keys. A / Cross
+  and B / Circle remain available.
 - The **Controls** tab can optionally bind actions such as Screenshot +
   Translate, Explain, and overlay visibility directly to controller buttons.
 - Keyboard hotkeys remain available and can still be mapped through JoyToKey or
@@ -205,6 +229,10 @@ details menu. Per game, it can:
 - start JoyToKey or switch an existing instance to a selected profile; and
 - restore the previous JoyToKey profile when the game exits.
 
+If JRPG Translator is already running, the plugin applies the selected Profile
+without restarting it and leaves the pre-existing instance open when the game
+exits.
+
 The plugin setup window can browse for the Translator executable, JoyToKey
 executable, and JoyToKey profile folder. Big Box uses a controller-native path
 browser, while LaunchBox retains the standard Windows file and folder pickers.
@@ -236,6 +264,7 @@ Settings/
 |-- control.ini
 |-- .env                         # optional local API-key storage
 |-- Screenshots/
+|-- Explanations/                # optional saved study material
 |-- prompts/                     # screenshot translation prompts
 |-- prompts_explain/             # explanation prompts
 |-- glossaries/
@@ -243,10 +272,13 @@ Settings/
 ```
 
 A unified Profile stores the selected screenshot and explanation prompts,
-translation post-processing, terminology profiles, capture region or window,
-and both overlays' size, position, colors, transparency, font, size, and
-weight. Translator and Explainer settings remain independent inside each
-Profile.
+capture region or window, guessed-subject highlighting, speaker-name coloring,
+terminology selections and enabled state, D-pad navigation, overlay startup and
+topmost choices, and both overlays' position, size, colors, transparency, font,
+font size, and weight. Translator and Explainer appearance settings remain
+independent inside each Profile. Screenshot output handling is selected
+automatically from the prompt name and is no longer a normal user-facing
+selector.
 
 The source repository and release include three prompt families for every
 supported output language:
@@ -274,12 +306,13 @@ are ignored by Git.
 | --- | --- |
 | `JRPG Translator.ahk` | Main control panel and workflow orchestration |
 | `bin/overlay.ahk` | Translator and Explainer overlay windows |
-| `bin/overlay.exe` | Compiled Translator and Explainer overlay used by release builds |
+| `bin/overlay.exe` | Compiled overlay included in release packages, not the source repository |
 | `scripts/screenshot_translator.py` | Screenshot vision translation and output formatting |
 | `scripts/live_audio_translator.py` | Direct streaming audio translation |
 | `scripts/explainer.py` | Japanese-learning explanations |
 | `scripts/model_catalog.py` | Provider model discovery, filtering, sorting, and caching |
 | `integrations/launchbox/` | Optional per-game LaunchBox / Big Box and JoyToKey integration |
+| `docs/media/` | Curated screenshots and animation displayed in this README |
 
 Runtime messages and generated overlay text are exchanged through
 `%TEMP%\JRPG_Overlay`.
@@ -296,14 +329,16 @@ py -3.12 -m pip install -r requirements.txt
 ```
 
 Before sharing a build, verify that it does not contain `Settings/.env`, API
-credentials, personal profiles, screenshots, logs, or other local settings.
+credentials, personal Profiles, `Settings/Screenshots`, saved explanations,
+logs, or other local state. The curated showcase files under `docs/media` are
+intentional repository assets.
 
 ## Troubleshooting
 
 - If a request fails, verify the selected model name and confirm that the API
   key has access to that model.
 - If the wrong playback source is translated, refresh and reselect the device
-  in **Audio Translation**.
+  in **Audio Translation**, then use **Test Audio** while sound is playing.
 - If an overlay is missing, use the Open Translator or Open Explainer button and
   check its saved position on connected displays.
 - If source files do not start, confirm that AutoHotkey v2 is being used rather
