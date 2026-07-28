@@ -754,6 +754,90 @@ def filter_jp2en_for_transcript(
     ]
 
 
+def target_body_without_speaker_header(target_block: str) -> str:
+    """Exclude a header that later receives deterministic name normalization."""
+    lines = (target_block or "").replace("\r\n", "\n").split("\n")
+    first_index = next(
+        (index for index, line in enumerate(lines) if line.strip()),
+        None,
+    )
+    if (
+        first_index is not None
+        and NAME_LINE_RE.match(lines[first_index].strip())
+    ):
+        del lines[first_index]
+    return "\n".join(lines)
+
+
+def contains_mixed_japanese_script_word(text: str) -> bool:
+    """Detect malformed words such as Dロス without flagging standalone JP quotes."""
+    def is_japanese_script(char: str) -> bool:
+        codepoint = ord(char)
+        return (
+            0x3040 <= codepoint <= 0x30FF
+            or 0x3400 <= codepoint <= 0x9FFF
+        )
+
+    previous = ""
+    for char in text or "":
+        if (
+            previous
+            and previous.isalpha()
+            and char.isalpha()
+            and is_japanese_script(previous) != is_japanese_script(char)
+            and (is_japanese_script(previous) or is_japanese_script(char))
+        ):
+            return True
+        previous = char
+    return False
+
+
+def unused_glossary_targets_in_output(
+    model_output: str,
+    jp2en: List[Tuple[str, str]],
+) -> List[Tuple[str, str]]:
+    """Find glossary targets used even though their exact JP source is absent."""
+    if not jp2en or not has_transcript_translation_sections(model_output):
+        return []
+
+    jp_block, target_block = split_tt(
+        enforce_transcript_translation(model_output)
+    )
+    transcript_key = jp_glossary_match_key(jp_block)
+    normalized_target = unicodedata.normalize(
+        "NFKC", target_body_without_speaker_header(target_block)
+    ).casefold()
+    conflicts = []
+    for source, target in jp2en:
+        source_key = jp_glossary_match_key(source)
+        target_key = unicodedata.normalize("NFKC", target or "").strip().casefold()
+        if not source_key or not target_key or source_key in transcript_key:
+            continue
+        if re.search(
+            rf"(?<!\w){re.escape(target_key)}(?!\w)",
+            normalized_target,
+        ):
+            conflicts.append((source, target))
+    return conflicts
+
+
+def glossary_output_suspicion_score(
+    model_output: str,
+    jp2en: List[Tuple[str, str]],
+) -> int:
+    """Score only strong signs that the glossary contaminated a translation."""
+    if not has_transcript_translation_sections(model_output):
+        return 0
+    _jp_block, target_block = split_tt(
+        enforce_transcript_translation(model_output)
+    )
+    target_body = target_body_without_speaker_header(target_block)
+    return (
+        len(unused_glossary_targets_in_output(model_output, jp2en))
+        + int(contains_mixed_japanese_script_word(target_body))
+    )
+
+
 def strip_code_fences(s: str) -> str:
     if not s:
         return ""
@@ -1077,8 +1161,10 @@ def translate_images(paths: List[str],
         return f"(Python error) {provider_name} call failed: {e}"
 
     out = strip_code_fences(raw)
+    corrective_retry_used = False
     jp_conflict_name, target_conflict_name = find_speaker_glossary_conflict(out, jp2en)
     if jp_conflict_name and target_conflict_name:
+        corrective_retry_used = True
         first_out = out
         first_jp_block, _first_target_block = split_tt(
             enforce_transcript_translation(first_out)
@@ -1115,6 +1201,34 @@ def translate_images(paths: List[str],
             # A corrective retry must never turn a usable first response into an
             # application error. Fall back to the exact glossary or local romaji.
             out = repair_conflicting_speaker_header(first_out, jp2en)
+
+    # The speaker check above cannot detect inline corruption such as Dロス, nor
+    # an unrelated glossary target inserted into dialogue. Retry these strong
+    # signals once with only entries whose exact source appears in the transcript.
+    if jp2en and not corrective_retry_used:
+        first_suspicion = glossary_output_suspicion_score(out, jp2en)
+        if first_suspicion:
+            first_out = out
+            first_jp_block, _first_target_block = split_tt(
+                enforce_transcript_translation(first_out)
+            )
+            filtered_jp2en = filter_jp2en_for_transcript(
+                jp2en, first_jp_block
+            )
+            try:
+                retry_raw = call_translation_provider(paths, filtered_jp2en)
+                retry_out = strip_code_fences(retry_raw)
+                retry_suspicion = glossary_output_suspicion_score(
+                    retry_out, filtered_jp2en
+                )
+                if (
+                    has_transcript_translation_sections(retry_out)
+                    and retry_suspicion < first_suspicion
+                ):
+                    out = retry_out
+            except Exception:
+                # Keep the usable first response if the optional correction fails.
+                pass
 
     try:
         cache_last_source_images(paths)

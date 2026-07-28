@@ -1456,24 +1456,37 @@ CaptureWindowToBitmap(hwnd) {
 
 ; Save HBITMAP → PNG file, optionally scaled down proportionally
 ; Auto reduces scale until size ≤ targetKB (with a floor so we don't go absurdly tiny)
-SaveBitmapPngUnderKB(hbmp, fullW, fullH, outPath, targetKB := 1400) {
+SaveBitmapPngUnderKB(hbmp, fullW, fullH, outPath, targetKB, &failureReason) {
+    failureReason := ""
     InitGDIPlus()
-    if (!__GDI_Ready)
+    if (!__GDI_Ready) {
+        failureReason := "gdi_unavailable"
         return false
+    }
     static pngClsid := 0
     if (!IsObject(pngClsid)) {
-        if !GetEncoderClsid("image/png", &enc)
+        if !GetEncoderClsid("image/png", &enc) {
+            failureReason := "encode_failed"
             return false
+        }
         pngClsid := enc
     }
 
     scale := 1.0
     minSide := 240
+    smallestBytes := 0
+    smallestW := fullW
+    smallestH := fullH
 
     Loop 10 {
         ; Create a GDI+ image from HBITMAP
         ; If scale < 1, draw into a scaled GDI+ bitmap
-        DllCall("gdiplus\GdipCreateBitmapFromHBITMAP", "Ptr", hbmp, "Ptr", 0, "Ptr*", &src := 0)
+        createStatus := DllCall("gdiplus\GdipCreateBitmapFromHBITMAP"
+            , "Ptr", hbmp, "Ptr", 0, "Ptr*", &src := 0)
+        if (createStatus != 0 || !src) {
+            failureReason := "encode_failed"
+            return false
+        }
 		        ; --- ensure we scale the full image and never crop ---
         ; Some windows (e.g., Firefox fullscreen video) make PrintWindow/BitBlt
         ; produce a bitmap whose size differs from WinGetPos ww/wh.
@@ -1487,9 +1500,15 @@ SaveBitmapPngUnderKB(hbmp, fullW, fullH, outPath, targetKB := 1400) {
         if (scale < 0.999) {
             dstW := Max( Round(fullW * scale), 1 )
             dstH := Max( Round(fullH * scale), 1 )
-            DllCall("gdiplus\GdipGetImageGraphicsContext", "Ptr", src, "Ptr*", &g := 0)
             ; make a new bitmap at target size
-            DllCall("gdiplus\GdipCreateBitmapFromScan0", "Int", dstW, "Int", dstH, "Int", 0, "Int", 0x26200A, "Ptr", 0, "Ptr*", &dst := 0)
+            dstStatus := DllCall("gdiplus\GdipCreateBitmapFromScan0"
+                , "Int", dstW, "Int", dstH, "Int", 0, "Int", 0x26200A
+                , "Ptr", 0, "Ptr*", &dst := 0)
+            if (dstStatus != 0 || !dst) {
+                DllCall("gdiplus\GdipDisposeImage", "Ptr", src)
+                failureReason := "encode_failed"
+                return false
+            }
             DllCall("gdiplus\GdipGetImageGraphicsContext", "Ptr", dst, "Ptr*", &g2 := 0)
             DllCall("gdiplus\GdipSetInterpolationMode", "Ptr", g2, "Int", 7)  ; HighQualityBicubic
             DllCall("gdiplus\GdipDrawImageRectRectI", "Ptr", g2, "Ptr", src, "Int", 0, "Int", 0, "Int", dstW, "Int", dstH, "Int", 0, "Int", 0, "Int", fullW, "Int", fullH, "Int", 2, "Ptr", 0, "Ptr", 0, "Ptr", 0)
@@ -1499,13 +1518,27 @@ SaveBitmapPngUnderKB(hbmp, fullW, fullH, outPath, targetKB := 1400) {
         }
 
         tmp := outPath ".tmp"
-        DllCall("gdiplus\GdipSaveImageToFile", "Ptr", src, "WStr", tmp, "Ptr", pngClsid.Ptr, "Ptr", 0)
+        saveStatus := DllCall("gdiplus\GdipSaveImageToFile"
+            , "Ptr", src, "WStr", tmp, "Ptr", pngClsid.Ptr, "Ptr", 0)
         DllCall("gdiplus\GdipDisposeImage", "Ptr", src)
+        if (saveStatus != 0) {
+            try FileDelete(tmp)
+            failureReason := "encode_failed"
+            return false
+        }
 
         sz := FileExist(tmp) ? FileOpen(tmp, "r").Length : -1
+        if (sz > 0 && (!smallestBytes || sz < smallestBytes)) {
+            smallestBytes := sz
+            smallestW := fullW
+            smallestH := fullH
+        }
         if (sz > 0 && sz <= targetKB * 1024) {
             try FileMove(tmp, outPath, 1)
-            return true
+            if FileExist(outPath)
+                return true
+            failureReason := "encode_failed"
+            return false
         }
         try FileDelete(tmp)
 
@@ -1517,6 +1550,9 @@ SaveBitmapPngUnderKB(hbmp, fullW, fullH, outPath, targetKB := 1400) {
         factor := Max(0.6, Min(factor, 0.9))
         scale := scale * factor
     }
+    smallestKB := smallestBytes > 0 ? Ceil(smallestBytes / 1024.0) : 0
+    failureReason := Format("size_limit|{}|{}|{}|{}"
+        , targetKB, smallestKB, smallestW, smallestH)
     return false
 }
 
@@ -2069,9 +2105,11 @@ FinishWindowCandidate() {
 }
 
 ; Produce a screenshot file from current selection (persisted)
-CaptureOnceToFile(&outPath) {
+CaptureOnceToFile(&outPath, &failureReason) {
     global Cap_Mode, Cap_Rect, Cap_WinTit, Cap_MaxKB, captureDir
     global ControlIni, Cap_RectStr
+    outPath := ""
+    failureReason := ""
 
     ; Always re-sync capture mode + rect from control.ini so that
     ; hotkeys / controller buttons see the latest region/window
@@ -2102,7 +2140,7 @@ CaptureOnceToFile(&outPath) {
 
     InitGDIPlus()
     if (!__GDI_Ready) {
-        showText("GDI+ not available.")
+        failureReason := "gdi_unavailable"
         return false
     }
 
@@ -2116,11 +2154,15 @@ CaptureOnceToFile(&outPath) {
     if (Cap_Mode = "region") {
         x := Cap_Rect["x"], y := Cap_Rect["y"], w := Cap_Rect["w"], h := Cap_Rect["h"]
         if (w <= 0 || h <= 0) {
-            ToolTip("No region set. Use picker."), SetTimer(() => ToolTip(""), -1200)
+            failureReason := "missing_region"
             return false
         }
         hb := CaptureRectToBitmap(x, y, w, h)
-        ok := SaveBitmapPngUnderKB(hb, w, h, outPath, Cap_MaxKB)
+        if (!hb) {
+            failureReason := "capture_failed"
+            return false
+        }
+        ok := SaveBitmapPngUnderKB(hb, w, h, outPath, Cap_MaxKB, &failureReason)
         DllCall("DeleteObject", "Ptr", hb)
         return ok
     } else if (Cap_Mode = "window") {
@@ -2134,21 +2176,63 @@ CaptureOnceToFile(&outPath) {
             SetTitleMatchMode old
         }
         if (!hw) {
-            ToolTip("Window not found. Hover + pick again."), SetTimer(() => ToolTip(""), -1400)
+            failureReason := "window_not_found"
             return false
         }
         WinGetPos , , &ww, &wh, "ahk_id " hw
         hb := CaptureWindowToBitmap(hw)
         if (!hb) {
-            ToolTip("Capture failed"), SetTimer(() => ToolTip(""), -900)
+            failureReason := "capture_failed"
             return false
         }
-        ok := SaveBitmapPngUnderKB(hb, ww, wh, outPath, Cap_MaxKB)
+        ok := SaveBitmapPngUnderKB(hb, ww, wh, outPath, Cap_MaxKB, &failureReason)
         DllCall("DeleteObject", "Ptr", hb)
         return ok
     } else {
-        ToolTip("No capture mode set"), SetTimer(() => ToolTip(""), -1000)
+        failureReason := "missing_target"
         return false
+    }
+}
+
+ShowCaptureFailure(failureReason) {
+    if RegExMatch(failureReason
+        , "^size_limit\|(\d+)\|(\d+)\|(\d+)\|(\d+)$", &sizeMatch) {
+        limitKB := sizeMatch[1]
+        smallestKB := sizeMatch[2]
+        smallestSize := sizeMatch[3] "x" sizeMatch[4]
+        ToolTip("PNG size limit too low.")
+        SetTimer(() => ToolTip(""), -1600)
+        detail := "The screenshot was captured, but it could not be reduced below "
+            . limitKB . " KB without becoming too small.`n`n"
+            . "Increase `"Max PNG size (KB)`" in Screenshot Translation. "
+            . "1400 KB or higher is recommended."
+        if (smallestKB > 0)
+            detail .= "`n`nSmallest attempted PNG: " smallestKB " KB at " smallestSize "."
+        showText(detail)
+        return
+    }
+
+    switch failureReason {
+        case "missing_region", "missing_target":
+            ToolTip("No capture target set.")
+            SetTimer(() => ToolTip(""), -1200)
+            showText("No target set — click “Capture” to pick a region/window.")
+        case "window_not_found":
+            ToolTip("Selected window not found.")
+            SetTimer(() => ToolTip(""), -1400)
+            showText("The selected capture window is no longer available. Reopen it or choose a new target with “Capture”.")
+        case "gdi_unavailable":
+            ToolTip("Screenshot system unavailable.")
+            SetTimer(() => ToolTip(""), -1400)
+            showText("GDI+ is not available, so the screenshot could not be created.")
+        case "encode_failed":
+            ToolTip("PNG creation failed.")
+            SetTimer(() => ToolTip(""), -1400)
+            showText("The screenshot was captured, but the PNG file could not be created.")
+        default:
+            ToolTip("Screenshot capture failed.")
+            SetTimer(() => ToolTip(""), -1400)
+            showText("The configured target could not be captured. Try selecting the region/window again.")
     }
 }
 
@@ -2230,6 +2314,9 @@ catch {
 }
 
 global Overlay, RectOuter, RectInner, RectPanel, OutputCtl, ClickShield, StatusCtl, FocusSink, CtxMenu
+global OverlayMoreCtl, OverlayCloseCtl
+global OverlayHoverControlsVisible := false
+global OverlayHoverLastInsideTick := 0
 LoadOverlayPrivateFonts()
 ; WS_EX_NOACTIVATE keeps the overlay visible/topmost while making it incapable
 ; of taking foreground focus from Big Box, an emulator, or a game.
@@ -2243,6 +2330,7 @@ OnMessage(0x4A,  WM_COPYDATA)     ; WM_COPYDATA
 OnMessage(0x0201, WM_LBUTTONDOWN) ; left down for dragging
 OnMessage(0x0133, PaintEdit)  ; WM_CTLCOLOREDIT
 OnMessage(0x0138, PaintStatic) ; WM_CTLCOLORSTATIC for RectOuter/RectInner/RectPanel
+OnMessage(0x002B, PaintOverlayButtons) ; WM_DRAWITEM for hover menu/close controls
 OnMessage(0x0014, EraseAnyBg)  ; WM_ERASEBKGND (Overlay/Panel/RichEdit/Inner/Outer)
 OnMessage(0x0231, EnterSizeMove) ; WM_ENTERSIZEMOVE
 OnMessage(0x0232, ExitSizeMove)  ; WM_EXITSIZEMOVE
@@ -2280,6 +2368,18 @@ ClickShield := Overlay.AddText("x0 y0 w0 h0 BackgroundTrans")
 ; Small in-window status glyph. Keep its footprint out of the first text line.
 StatusCtl := Overlay.AddText("x0 y0 w24 h24 Center +0x200 +E0x20 Hidden BackgroundTrans", "⌛")
 StatusCtl.SetFont("s13 c" . TXT_COLOR, "Segoe UI Symbol")
+; Borderless hover chrome. These controls start hidden and off-canvas so they
+; cannot reserve space, intercept clicks, or cover text while invisible.
+OverlayMoreCtl := Overlay.AddButton("x-200 y-200 w24 h24 Hidden -Tabstop", "...")
+OverlayCloseCtl := Overlay.AddButton("x-200 y-200 w24 h24 Hidden -Tabstop", "×")
+OverlayMoreCtl.SetFont("s9 c" . TXT_COLOR, "Segoe UI")
+OverlayCloseCtl.SetFont("s11 c" . TXT_COLOR, "Segoe UI")
+SetOverlayButtonOwnerDraw(OverlayMoreCtl)
+SetOverlayButtonOwnerDraw(OverlayCloseCtl)
+OverlayMoreCtl.Enabled := false
+OverlayCloseCtl.Enabled := false
+OverlayMoreCtl.OnEvent("Click", ShowOverlayMenuFromHover)
+OverlayCloseCtl.OnEvent("Click", CloseOverlayFromHover)
 
 ; Background (avoid white)
 EM_SETBKGNDCOLOR := 0x0443
@@ -2314,7 +2414,7 @@ CtxMenu.Add("Clear",     CtxClear)
 CtxMenu.Add()
 CtxMenu.Add("Always on top (toggle" . (__EXPLAIN_MODE ? " — Ctrl+Shift+X" : " — Ctrl+Shift+H") . ")", ToggleTop)
 CtxMenu.Add("Reset window", ResetWindow)
-CtxMenu.Add("Exit", (*) => ExitApp())
+CtxMenu.Add("Close " . __WIN_TITLE . " overlay", (*) => ExitApp())
 Overlay.OnEvent("ContextMenu", ShowContextMenu)
 
 ApplyTheme()
@@ -2351,6 +2451,7 @@ if (__EXPLAIN_MODE) {
 SetTimer(CheckCmdSignals, 120)
 RenderCombined()
 OnResize(Overlay)
+SetTimer(UpdateOverlayHoverControls, 100)
 
 
 WM_COPYDATA(wParam, lParam, msg, hwnd) {
@@ -2468,6 +2569,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
 
 ApplyTheme() {
     global Overlay, RectOuter, RectInner, RectPanel, OutputCtl, StatusCtl, hBrushEdit
+    global OverlayMoreCtl, OverlayCloseCtl
     global BOX_BG, BDR_OUT, BDR_IN, TXT_COLOR, FONT_NAME, FONT_SIZE, FONT_BOLD, BOX_PAD
 
     Overlay.BackColor := BDR_OUT
@@ -2489,6 +2591,10 @@ ApplyTheme() {
     OutputCtl.SetFont(fontOptions, FONT_NAME)
     if (IsSet(StatusCtl) && StatusCtl)
         StatusCtl.SetFont("s13 c" . TXT_COLOR, "Segoe UI Symbol")
+    if (IsSet(OverlayMoreCtl) && OverlayMoreCtl)
+        OverlayMoreCtl.SetFont("s9 c" . TXT_COLOR, "Segoe UI")
+    if (IsSet(OverlayCloseCtl) && OverlayCloseCtl)
+        OverlayCloseCtl.SetFont("s11 c" . TXT_COLOR, "Segoe UI")
 
     OutputCtl.BackColor := BOX_BG
     DllCall("UxTheme\SetWindowTheme", "ptr", OutputCtl.Hwnd, "str", " ", "str", " ")
@@ -2601,6 +2707,7 @@ PaintEdit(wParam, lParam, *) {
 ; Map WM_CTLCOLORSTATIC for our three rectangles so they recolor instantly.
 PaintStatic(wParam, lParam, *) {
     global RectOuter, RectInner, RectPanel, StatusCtl
+    global OverlayMoreCtl, OverlayCloseCtl
     global BDR_OUT, BDR_IN, BOX_BG, TXT_COLOR
     global hBrushOuter, hBrushInner, hBrushPanel
 
@@ -2631,6 +2738,70 @@ if (IsSet(StatusCtl) && StatusCtl && lParam = StatusCtl.Hwnd) {
     return DllCall("gdi32\GetStockObject", "int", 5, "ptr") ; HOLLOW_BRUSH
 }
 
+}
+
+SetOverlayButtonOwnerDraw(overlayButtonControl) {
+    if !(IsSet(overlayButtonControl) && overlayButtonControl && overlayButtonControl.Hwnd)
+        return
+
+    if (A_PtrSize = 8) {
+        overlayButtonStyle := DllCall("user32\GetWindowLongPtrW", "ptr", overlayButtonControl.Hwnd
+            , "int", -16, "ptr") ; GWL_STYLE
+        overlayButtonStyle := (overlayButtonStyle & ~0xF) | 0xB ; clear type, then BS_OWNERDRAW
+        DllCall("user32\SetWindowLongPtrW", "ptr", overlayButtonControl.Hwnd
+            , "int", -16, "ptr", overlayButtonStyle, "ptr")
+    } else {
+        overlayButtonStyle := DllCall("user32\GetWindowLongW", "ptr", overlayButtonControl.Hwnd
+            , "int", -16, "uint")
+        overlayButtonStyle := (overlayButtonStyle & ~0xF) | 0xB
+        DllCall("user32\SetWindowLongW", "ptr", overlayButtonControl.Hwnd
+            , "int", -16, "uint", overlayButtonStyle, "uint")
+    }
+    DllCall("user32\SendMessageW", "ptr", overlayButtonControl.Hwnd
+        , "uint", 0x00F4, "ptr", 0xB, "ptr", 1, "ptr") ; BM_SETSTYLE, redraw
+}
+
+PaintOverlayButtons(wParam, lParam, *) {
+    global OverlayMoreCtl, OverlayCloseCtl, BOX_BG, TXT_COLOR, hBrushPanel
+    if !lParam
+        return
+
+    hwndOffset := A_PtrSize = 8 ? 24 : 20
+    hdcOffset := hwndOffset + A_PtrSize
+    rectOffset := hdcOffset + A_PtrSize
+    hwndItem := NumGet(lParam, hwndOffset, "ptr")
+    if !(IsSet(OverlayMoreCtl) && OverlayMoreCtl
+        && IsSet(OverlayCloseCtl) && OverlayCloseCtl
+        && (hwndItem = OverlayMoreCtl.Hwnd || hwndItem = OverlayCloseCtl.Hwnd))
+        return
+
+    hdc := NumGet(lParam, hdcOffset, "ptr")
+    if !hdc
+        return
+    if (!IsSet(hBrushPanel) || !hBrushPanel)
+        hBrushPanel := MakeBrush(ToHex6(BOX_BG))
+
+    rectPtr := lParam + rectOffset
+    DllCall("user32\FillRect", "ptr", hdc, "ptr", rectPtr, "ptr", hBrushPanel)
+    oldBkMode := DllCall("gdi32\SetBkMode", "ptr", hdc, "int", 1, "int") ; TRANSPARENT
+    oldTextColor := DllCall("gdi32\SetTextColor", "ptr", hdc
+        , "int", ColorToBGR(TXT_COLOR), "int")
+    controlFont := DllCall("user32\SendMessageW", "ptr", hwndItem
+        , "uint", 0x0031, "ptr", 0, "ptr", 0, "ptr") ; WM_GETFONT
+    oldFont := controlFont
+        ? DllCall("gdi32\SelectObject", "ptr", hdc, "ptr", controlFont, "ptr")
+        : 0
+
+    glyph := hwndItem = OverlayMoreCtl.Hwnd ? "..." : "×"
+    DllCall("user32\DrawTextW", "ptr", hdc, "wstr", glyph, "int", -1
+        , "ptr", rectPtr, "uint", 0x0001 | 0x0004 | 0x0020 | 0x0800, "int")
+        ; DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX
+
+    if oldFont
+        DllCall("gdi32\SelectObject", "ptr", hdc, "ptr", oldFont, "ptr")
+    DllCall("gdi32\SetTextColor", "ptr", hdc, "int", oldTextColor)
+    DllCall("gdi32\SetBkMode", "ptr", hdc, "int", oldBkMode)
+    return 1
 }
 
 ; Force background erase for the RichEdit so it never flashes an old/system color.
@@ -2746,6 +2917,7 @@ ShowOverlayStatus(symbol := "⌛") {
         return
     try StatusCtl.Text := symbol
     try StatusCtl.Visible := true
+    LayoutOverlayTopRightControls()
     try DllCall("user32\SetWindowPos", "ptr", StatusCtl.Hwnd, "ptr", 0
         , "int", 0, "int", 0, "int", 0, "int", 0
         , "uint", 0x0001 | 0x0002 | 0x0010) ; NOSIZE|NOMOVE|NOACTIVATE
@@ -2759,6 +2931,7 @@ HideOverlayStatus(*) {
     if !(IsSet(StatusCtl) && StatusCtl)
         return
     try StatusCtl.Visible := false
+    try StatusCtl.Move(-200, -200, 24, 24)
     if (IsSet(OutputCtl) && OutputCtl && OutputCtl.Hwnd)
         try DllCall("user32\RedrawWindow", "ptr", OutputCtl.Hwnd, "ptr", 0, "ptr", 0
             , "uint", 0x0001 | 0x0100) ; INVALIDATE|UPDATENOW
@@ -3052,6 +3225,150 @@ ShowContextMenu(gui, ctrl, *) {
     CtxMenu.Show(mx, my)
 }
 
+ShowOverlayMenuFromHover(*) {
+    global CtxMenu
+    MouseGetPos &mx, &my
+    CtxMenu.Show(mx, my)
+}
+
+CloseOverlayFromHover(*) {
+    global Overlay, SCRIPT_PID
+    HandleGuiClose(SCRIPT_PID, Overlay)
+}
+
+SetOverlayHoverControlsVisible(showControls) {
+    global OverlayMoreCtl, OverlayCloseCtl, OverlayHoverControlsVisible, OutputCtl
+    showControls := showControls ? true : false
+    if (OverlayHoverControlsVisible = showControls)
+        return
+
+    OverlayHoverControlsVisible := showControls
+    if showControls {
+        LayoutOverlayTopRightControls()
+        OverlayMoreCtl.Enabled := true
+        OverlayCloseCtl.Enabled := true
+        OverlayMoreCtl.Visible := true
+        OverlayCloseCtl.Visible := true
+        BringOverlayChromeToFront()
+        for chromeControl in [OverlayMoreCtl, OverlayCloseCtl] {
+            DllCall("user32\SendMessageW", "ptr", chromeControl.Hwnd
+                , "uint", 0x00F4, "ptr", 0xB, "ptr", 1, "ptr") ; BM_SETSTYLE
+            try DllCall("user32\RedrawWindow", "ptr", chromeControl.Hwnd, "ptr", 0, "ptr", 0
+                , "uint", 0x0001 | 0x0004 | 0x0100) ; INVALIDATE|ERASE|UPDATENOW
+            try DllCall("user32\UpdateWindow", "ptr", chromeControl.Hwnd)
+        }
+        ; The first owner-draw pass can be overwritten by the native show cycle.
+        ; Repaint once after that cycle has settled; unlike a polling repaint,
+        ; this keeps the glyph-only appearance without hover-border flicker.
+        SetTimer(RepaintVisibleOverlayChrome, -40)
+    } else {
+        OverlayMoreCtl.Visible := false
+        OverlayCloseCtl.Visible := false
+        OverlayMoreCtl.Enabled := false
+        OverlayCloseCtl.Enabled := false
+        ; Moving hidden chrome off-canvas guarantees that it cannot leave an
+        ; invisible hit target or interfere with RichEdit painting.
+        OverlayMoreCtl.Move(-200, -200, 24, 24)
+        OverlayCloseCtl.Move(-200, -200, 24, 24)
+        LayoutOverlayTopRightControls()
+        if (IsSet(OutputCtl) && OutputCtl && OutputCtl.Hwnd)
+            try DllCall("user32\RedrawWindow", "ptr", OutputCtl.Hwnd, "ptr", 0, "ptr", 0
+                , "uint", 0x0001 | 0x0004 | 0x0100) ; INVALIDATE|ERASE|UPDATENOW
+    }
+}
+
+RepaintVisibleOverlayChrome(*) {
+    global OverlayMoreCtl, OverlayCloseCtl, OverlayHoverControlsVisible
+    if !OverlayHoverControlsVisible
+        return
+
+    BringOverlayChromeToFront()
+    for chromeControl in [OverlayMoreCtl, OverlayCloseCtl] {
+        DllCall("user32\SendMessageW", "ptr", chromeControl.Hwnd
+            , "uint", 0x00F4, "ptr", 0xB, "ptr", 1, "ptr") ; BM_SETSTYLE
+        DllCall("user32\RedrawWindow", "ptr", chromeControl.Hwnd, "ptr", 0, "ptr", 0
+            , "uint", 0x0001 | 0x0004 | 0x0100) ; INVALIDATE|ERASE|UPDATENOW
+        DllCall("user32\UpdateWindow", "ptr", chromeControl.Hwnd)
+    }
+}
+
+UpdateOverlayHoverControls(*) {
+    global Overlay, OverlayHoverControlsVisible, OverlayHoverLastInsideTick
+    if !(IsSet(Overlay) && Overlay && Overlay.Hwnd)
+        return
+
+    pointerInside := false
+    try {
+        cursorPoint := Buffer(8, 0)
+        if DllCall("user32\GetCursorPos", "ptr", cursorPoint.Ptr, "int") {
+            pointerWindow := DllCall("user32\WindowFromPoint"
+                , "int64", NumGet(cursorPoint, 0, "int64"), "ptr")
+            pointerInside := pointerWindow = Overlay.Hwnd
+                || DllCall("user32\IsChild", "ptr", Overlay.Hwnd, "ptr", pointerWindow, "int")
+        }
+    }
+
+    if pointerInside {
+        OverlayHoverLastInsideTick := A_TickCount
+        SetOverlayHoverControlsVisible(true)
+    } else if (OverlayHoverControlsVisible
+        && A_TickCount - OverlayHoverLastInsideTick >= 300) {
+        SetOverlayHoverControlsVisible(false)
+    }
+}
+
+LayoutOverlayTopRightControls(clientW := 0, clientH := 0) {
+    global Overlay, StatusCtl, OverlayMoreCtl, OverlayCloseCtl
+    global OverlayHoverControlsVisible, OUTER_W, INNER_W
+    if !(IsSet(Overlay) && Overlay && Overlay.Hwnd)
+        return
+
+    if (clientW <= 0 || clientH <= 0)
+        Overlay.GetClientPos(, , &clientW, &clientH)
+
+    controlW := 24
+    controlH := 24
+    gap := 2
+    inset := Max(0, OUTER_W + INNER_W)
+    topY := inset + 2
+    rightX := Max(controlW, clientW - inset - 4)
+
+    if (OverlayHoverControlsVisible
+     && IsSet(OverlayMoreCtl) && OverlayMoreCtl
+     && IsSet(OverlayCloseCtl) && OverlayCloseCtl) {
+        closeX := Max(0, rightX - controlW)
+        moreX := Max(0, closeX - controlW - gap)
+        OverlayMoreCtl.Move(moreX, topY, controlW, controlH)
+        OverlayCloseCtl.Move(closeX, topY, controlW, controlH)
+        statusX := Max(0, moreX - controlW - gap)
+    } else {
+        statusX := Max(0, rightX - controlW)
+    }
+
+    if (IsSet(StatusCtl) && StatusCtl) {
+        statusVisible := false
+        try statusVisible := StatusCtl.Visible
+        if statusVisible
+            StatusCtl.Move(statusX, topY, controlW, controlH)
+        else
+            StatusCtl.Move(-200, -200, controlW, controlH)
+    }
+}
+
+BringOverlayChromeToFront() {
+    global StatusCtl, OverlayMoreCtl, OverlayCloseCtl
+    static SWP_KEEP_GEOMETRY := 0x0001 | 0x0002 | 0x0010 ; NOSIZE|NOMOVE|NOACTIVATE
+
+    if (IsSet(StatusCtl) && StatusCtl && StatusCtl.Visible)
+        try DllCall("user32\SetWindowPos", "ptr", StatusCtl.Hwnd, "ptr", 0
+            , "int", 0, "int", 0, "int", 0, "int", 0, "uint", SWP_KEEP_GEOMETRY)
+    for chromeControl in [OverlayMoreCtl, OverlayCloseCtl] {
+        if (IsSet(chromeControl) && chromeControl && chromeControl.Visible)
+            try DllCall("user32\SetWindowPos", "ptr", chromeControl.Hwnd, "ptr", 0
+                , "int", 0, "int", 0, "int", 0, "int", 0, "uint", SWP_KEEP_GEOMETRY)
+    }
+}
+
 ResetWindow(*) {
     global Overlay
     Overlay.Show("NA x120 y120 w900 h500")
@@ -3198,7 +3515,7 @@ RegisterOverlayWheelHotkeys() {
 ; === OnResize layout ===
 OnResize(guiObj, minmax := "", w := 0, h := 0) {
     global OUTER_W, INNER_W, BOX_PAD
-    global RectOuter, RectInner, RectPanel, OutputCtl, ClickShield, StatusCtl
+    global RectOuter, RectInner, RectPanel, OutputCtl, ClickShield
     global BOX_BG, hBrushEdit, RESIZE_LOCK
     global __OcrText, __AudioText
 
@@ -3230,13 +3547,8 @@ OnResize(guiObj, minmax := "", w := 0, h := 0) {
             , "int", 0, "int", 0, "int", 0, "int", 0
             , "uint", 0x0001 | 0x0002 | 0x0010) ; NOSIZE|NOMOVE|NOACTIVATE
     }
-    if (IsSet(StatusCtl) && StatusCtl) {
-        sw := 24, sh := 24
-        StatusCtl.Move(px + pw - sw - 4, py + 2, sw, sh)
-        DllCall("user32\SetWindowPos", "ptr", StatusCtl.Hwnd, "ptr", 0
-            , "int", 0, "int", 0, "int", 0, "int", 0
-            , "uint", 0x0001 | 0x0002 | 0x0010) ; NOSIZE|NOMOVE|NOACTIVATE
-    }
+    LayoutOverlayTopRightControls(w, h)
+    BringOverlayChromeToFront()
 
     if (!RESIZE_LOCK) {
         try {
@@ -3439,16 +3751,10 @@ ExportGlossaryEnv()
 }
 
 oneshotTranslate(*) {
-    global Cap_Mode, captureDir
+    global captureDir
     InitGDIPlus()
     if (!__GDI_Ready) {
         showText("GDI+ not available.")
-        return
-    }
-
-    ; ensure we actually have a selection
-    if (Cap_Mode != "region" && Cap_Mode != "window") {
-        ToolTip("Pick region or window first (Ctrl+Alt+F3 or via Control Panel)."), SetTimer(() => ToolTip(""), -1400)
         return
     }
 
@@ -3456,10 +3762,10 @@ oneshotTranslate(*) {
     ShowOverlayStatus()
 
     local f := ""
-    ok := CaptureOnceToFile(&f)
+    local captureFailure := ""
+    ok := CaptureOnceToFile(&f, &captureFailure)
     if (!ok || f = "") {
-        ToolTip("No target set."), SetTimer(() => ToolTip(""), -1200)
-        showText("No target set — click “Capture” to pick a region/window.")
+        ShowCaptureFailure(captureFailure)
         return
     }
     ; silent mode: no notification needed, but keep a short toast for sanity
@@ -3506,18 +3812,11 @@ FlushBufferedScreenshots(*) {
 TakeScreenshotOnly(*) {
     global ShotBuf
 
-    ; Make sure there is a configured selection (region/window)
-    if (Cap_Mode != "region" && Cap_Mode != "window") {
-        ToolTip("Pick region or window first (Ctrl+Alt+F3 or via Control Panel).")
-        SetTimer(() => ToolTip(""), -1400)
-        return
-    }
-
     local f := ""
-    ok := CaptureOnceToFile(&f)
+    local captureFailure := ""
+    ok := CaptureOnceToFile(&f, &captureFailure)
     if (!ok || f = "") {
-        ToolTip("No screenshot.")
-        SetTimer(() => ToolTip(""), -1200)
+        ShowCaptureFailure(captureFailure)
         return
     }
 

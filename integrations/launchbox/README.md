@@ -12,6 +12,8 @@ Current behavior:
 - Detects JoyToKey `.cfg` profiles and stores an optional per-game profile.
 - Lets users browse for the JRPG Translator executable, JoyToKey executable,
   and JoyToKey profiles folder from the per-game setup window.
+- Provides an `Open JRPG Translator...` button for first-time configuration
+  and for bringing an already-running control panel forward.
 - Stores LaunchBox-local paths relatively so a portable LaunchBox installation
   can be moved without editing the plugin configuration.
 - Supports arrow, Enter, Space, and Escape navigation.

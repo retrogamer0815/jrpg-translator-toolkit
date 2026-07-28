@@ -2,6 +2,10 @@
 #SingleInstance Off
 #Warn
 #NoTrayIcon
+;@Ahk2Exe-SetVersion 0.9.3.0
+;@Ahk2Exe-SetName JRPG Translator
+;@Ahk2Exe-SetDescription JRPG Translator
+;@Ahk2Exe-SetCopyright Copyright (c) 2025 retrogamer0815
 ; =; === Taskbar grouping: shared AppUserModelID ===
 DllCall("shell32\SetCurrentProcessExplicitAppUserModelID", "wstr", "JRPGTranslator", "int")
 
@@ -10,6 +14,9 @@ DllCall("shell32\SetCurrentProcessExplicitAppUserModelID", "wstr", "JRPGTranslat
 global CP_BACKGROUND_START := false
 global CP_START_PROFILE := ""
 global CP_START_TRANSLATOR := false
+global APP_VERSION := "0.9.3-dev"
+global PROJECT_URL := "https://github.com/retrogamer0815/jrpg-translator-toolkit"
+global BUG_REPORT_URL := PROJECT_URL "/issues/new"
 for __cpIndex, __cpArg in A_Args {
     __cpArgLower := StrLower(__cpArg)
     if (__cpArgLower = "--background") {
@@ -968,7 +975,8 @@ CPApplyThemeToControl(cpThemeHwnd, darkMode := -1) {
         }
         if (cpThemeClass = "ComboBox")
             CPThemeComboParts(cpThemeHwnd, darkMode)
-    } else if (cpThemeClass = "msctls_trackbar32" || cpThemeClass = "msctls_updown32" || cpThemeClass = "SysTabControl32") {
+    } else if (cpThemeClass = "msctls_trackbar32" || cpThemeClass = "msctls_updown32"
+        || cpThemeClass = "SysTabControl32" || cpThemeClass = "SysListView32") {
         if darkMode {
             try DllCall("uxtheme\SetWindowTheme", "ptr", cpThemeHwnd, "wstr", "DarkMode_Explorer", "ptr", 0)
         } else {
@@ -3349,24 +3357,31 @@ ResolvePath(p) {
 ; =========================
 ; Audio state helper
 ; =========================
-AudioIsRunning() {
+AudioIsRunning(allowRecoveryScan := false) {
     global gPidAudio
     if (gPidAudio && ProcessExist(gPidAudio))
         return true
 
-    pids := AudioPidsByScript()
-    if (pids.Length) {
-        gPidAudio := pids[1]
-        return true
+    if gPidAudio
+        gPidAudio := 0
+
+    ; WMI is only needed to adopt a process which this instance did not launch,
+    ; such as one left behind by an earlier crash. Normal status polling relies
+    ; exclusively on the PID returned by Run().
+    if allowRecoveryScan {
+        pids := AudioPidsByScript()
+        if (pids.Length) {
+            gPidAudio := pids[1]
+            return true
+        }
     }
 
-    gPidAudio := 0
     return false
 }
 
-UpdateStatus(){
+UpdateStatus(allowRecoveryScan := false){
     global btnAudio
-    running := AudioIsRunning()
+    running := AudioIsRunning(allowRecoveryScan)
     if (IsSet(btnAudio) && IsObject(btnAudio))
         btnAudio.Text := running ? "Audio Translation On" : "Audio Translation Off"
 }
@@ -3971,6 +3986,7 @@ ExplainNow(*) {
 
     cmd := Format('cmd /c chcp 65001>nul & "{1}" "{2}" 1>"{3}" 2>"{4}"', px, ex, outFile, errFile)
     DbgCP("ExplainNow -> " cmd)
+    Toast("Generating explanation…")
     SignalExplainerBusy()
     exitCode := RunWait(cmd, , "Hide")
     out := (FileExist(outFile) ? Trim(FileRead(outFile, "UTF-8")) : "")
@@ -5388,13 +5404,15 @@ StartAudio(*) {
             started := true
             break
         }
-        ; trust WMI if it already sees our script path
+    }
+
+    ; Run() normally provides the definitive PID. Query WMI only once as a
+    ; recovery fallback for unusual launcher/process hand-off behavior.
+    if !started {
         pids := AudioPidsByScript()
         if (pids.Length) {
-            if (!gPidAudio)
-                gPidAudio := pids[1]
+            gPidAudio := pids[1]
             started := true
-            break
         }
     }
 
@@ -5450,17 +5468,30 @@ StartAudio(*) {
 
 AudioPidsByScript() {
     global audioScript
+    static queryInProgress := false
     ap := ResolvePath(audioScript)
     apL := StrLower(StrReplace(ap, "/", "\"))   ; normalize & lower
     out := []
+    if queryInProgress
+        return out
+
+    queryInProgress := true
+    previousCritical := A_IsCritical
+    Critical(50)
     try {
         wm := ComObjGet("winmgmts:")
-        for p in wm.ExecQuery("Select ProcessId,CommandLine from Win32_Process Where Name='python.exe'") {
+        processes := wm.ExecQuery("Select ProcessId,CommandLine from Win32_Process Where Name='python.exe'")
+        for p in processes {
             cmd := p.CommandLine ? p.CommandLine : ""
             cmdL := StrLower(StrReplace(cmd, "/", "\"))  ; normalize & lower
             if (InStr(cmdL, apL) && !InStr(cmdL, "--list-speakers"))
                 out.Push(p.ProcessId)
         }
+    } catch as ex {
+        DbgCP("AudioPidsByScript WMI query failed: " ex.Message)
+    } finally {
+        queryInProgress := false
+        Critical(previousCritical)
     }
     return out
 }
@@ -5515,23 +5546,30 @@ StopAudio(*) {
     global gPidAudio, gJustStoppedUntil, gLastAction
     gLastAction := "stop"
     gJustStoppedUntil := A_TickCount + 5000
-    if (gPidAudio && ProcessExist(gPidAudio)) {
-        try ProcessClose(gPidAudio)
-    }
+
+    ; Capture the known PID and perform at most one recovery scan. The wait loop
+    ; below checks these PIDs directly instead of repeatedly querying WMI.
+    knownPids := Map()
+    if (gPidAudio && ProcessExist(gPidAudio))
+        knownPids[gPidAudio] := true
     for pid in AudioPidsByScript() {
-        try ProcessClose(pid)
+        knownPids[pid] := true
     }
+    for pid, _ in knownPids
+        try ProcessClose(pid)
 
     stopped := false
     Loop 20 {
-        primaryAlive := gPidAudio && ProcessExist(gPidAudio)
-        remaining := AudioPidsByScript()
-        if (!primaryAlive && !remaining.Length) {
+        remainingAlive := false
+        for pid, _ in knownPids {
+            if ProcessExist(pid) {
+                remainingAlive := true
+                try ProcessClose(pid)
+            }
+        }
+        if !remainingAlive {
             stopped := true
             break
-        }
-        for pid in remaining {
-            try ProcessClose(pid)
         }
         Sleep(50)
     }
@@ -7152,14 +7190,15 @@ GameProfileApply(name, announce := true) {
     else
         GameProfileAppendWarning(&warnings, "Explanation prompt '" candidate "' was not found; the current prompt was kept.")
 
-    glossaryList := ListGlossaryProfiles()
+    jpGlossaryList := ListGlossaryProfiles("jp")
     candidate := Trim(IniRead(path, "terminology", "jp2tlProfile", jp2enGlossaryProfile))
-    if ArrHas(glossaryList, candidate)
+    if ArrHas(jpGlossaryList, candidate)
         jp2enGlossaryProfile := candidate
     else
         GameProfileAppendWarning(&warnings, "JP -> TL glossary '" candidate "' was not found; the current selection was kept.")
+    enGlossaryList := ListGlossaryProfiles("en")
     candidate := Trim(IniRead(path, "terminology", "tl2tlProfile", en2enGlossaryProfile))
-    if ArrHas(glossaryList, candidate)
+    if ArrHas(enGlossaryList, candidate)
         en2enGlossaryProfile := candidate
     else
         GameProfileAppendWarning(&warnings, "TL -> TL glossary '" candidate "' was not found; the current selection was kept.")
@@ -7858,41 +7897,45 @@ ui.Add("Text", "xm y+4 w0 h0")  ; spacer
 ; --- Help text (what these two glossaries do & how to use them)
 txtGlossaryHelp1 := ui.Add("Text", "xm y+8 cGray w760"
   , 'Japanese terms often have multiple translations (e.g., 宰相 can mean "Chancellor" or "Prime Minister"), and names may vary in spelling. Set fixed rules here to ensure a consistent translation for your chosen Target Language (TL) throughout your playthrough.')
-txtGlossaryHelp2 := ui.Add("Text", "xm y+20 cGray w760"
-  , "JP -> TL glossary: Maps specific Japanese terms to fixed terms in the target language during translation, stabilizing names and terminology. Example: エステル -> Estelle (to avoid inconsistent interpretations like Esuteru).")
-txtGlossaryHelp3 := ui.Add("Text", "xm y+2 cGray w760"
-  , "TL -> TL glossary: Rewrites translated output afterward for aliases, preferred wording, spelling, or capitalization, useful if you struggle with Japanese text input. Example: Esuteru -> Estelle.")
-txtGlossaryHelp4 := ui.Add("Text", "xm y+20 cGray w760"
-  , 'How to use: Choose a profile from the menu. Click "Edit" to add one "source -> target" mapping per line. "Add" makes a new profile, for example for one game; "Delete" removes it. Changes apply to the next screenshot translation.')
 
-; --- Row 1: Japanese -> target-language glossary
-for cpMutedGlossaryCtrl in [txtGlossaryHelp1, txtGlossaryHelp2, txtGlossaryHelp3, txtGlossaryHelp4]
-    CPRegisterMutedControl(cpMutedGlossaryCtrl)
 chkUseTerminologyOverrides := ui.Add("CheckBox", "xm y+20", "Use terminology overrides")
 chkUseTerminologyOverrides.Value := useTerminologyOverrides
 chkUseTerminologyOverrides.OnEvent("Click", TerminologyOverridesChanged)
 
-ui.Add("Text", "xm y+16", "JP -> TL glossary:")
-ddlJPG := ui.Add("DropDownList", "x+m w260 0x210", [])   ; filled by RefreshGlossaryProfilesList
-btnJPG_Edit := ui.Add("Button", "x+6 w70", "Edit")
-btnJPG_New  := ui.Add("Button", "x+6 w70", "Add")
-btnJPG_Del  := ui.Add("Button", "x+6 w70", "Delete")
+txtGlossaryHelp2 := ui.Add("Text", "xm y+20 cGray w760"
+  , "TL -> TL glossary: Corrects matching words or phrases locally after the model returns its translation; these entries are never sent to the model. Add incorrect or inconsistent outputs as you encounter them while playing, or enter known and likely variants in advance. Example: Esuteru -> Estelle.")
 
-; --- Row 2: target-language -> target-language glossary
-ui.Add("Text", "xm y+12", "TL -> TL glossary:")
-ddlENG := ui.Add("DropDownList", "x+m w260 0x210", [])
-btnENG_Edit := ui.Add("Button", "x+6 w70", "Edit")
-btnENG_New  := ui.Add("Button", "x+6 w70", "Add")
-btnENG_Del  := ui.Add("Button", "x+6 w70", "Delete")
+; --- Row 1: target-language -> target-language glossary
+ui.Add("Text", "xm y+12 w112", "TL -> TL profile:")
+ddlENG := ui.Add("DropDownList", "x+m w210 0x210", [])
+btnENG_Edit := ui.Add("Button", "x+6 w125", "Manage Entries...")
+btnENG_New  := ui.Add("Button", "x+6 w105", "New Profile...")
+btnENG_Del  := ui.Add("Button", "x+6 w110", "Delete Profile...")
+
+txtGlossaryHelp3 := ui.Add("Text", "xm y+20 cGray w760"
+  , "JP -> TL glossary: Sends exact Japanese-to-target-language mappings to the model as additional instructions. This can stabilize known names and terms, but results depend on the model and the complexity of the selected prompt. A model may ignore a rule or apply it unexpectedly, including to unrelated or similar-sounding names. Example: エステル -> Estelle.")
+
+; --- Row 2: Japanese -> target-language glossary
+ui.Add("Text", "xm y+12 w112", "JP -> TL profile:")
+ddlJPG := ui.Add("DropDownList", "x+m w210 0x210", [])   ; filled by RefreshGlossaryProfilesList
+btnJPG_Edit := ui.Add("Button", "x+6 w125", "Manage Entries...")
+btnJPG_New  := ui.Add("Button", "x+6 w105", "New Profile...")
+btnJPG_Del  := ui.Add("Button", "x+6 w110", "Delete Profile...")
+
+txtGlossaryHelp4 := ui.Add("Text", "xm y+20 cGray w760"
+  , 'How to use: Choose an independent profile for each glossary type. "Manage Entries..." opens its terminology table; "New Profile..." creates only that glossary type, and "Delete Profile..." removes only that type. Changes apply to the next screenshot translation.')
+
+for cpMutedGlossaryCtrl in [txtGlossaryHelp1, txtGlossaryHelp2, txtGlossaryHelp3, txtGlossaryHelp4]
+    CPRegisterMutedControl(cpMutedGlossaryCtrl)
 
 ; wire up events
-btnJPG_Edit.OnEvent("Click", (*) => OpenGlossaryEditor("jp"))
-btnJPG_New .OnEvent("Click", (*) => NewGlossaryProfile())
-btnJPG_Del .OnEvent("Click", (*) => DeleteGlossaryProfile())
+btnJPG_Edit.OnEvent("Click", (*) => OpenGlossaryManager("jp"))
+btnJPG_New .OnEvent("Click", (*) => NewGlossaryProfile("jp"))
+btnJPG_Del .OnEvent("Click", (*) => DeleteGlossaryProfile("jp"))
 
-btnENG_Edit.OnEvent("Click", (*) => OpenGlossaryEditor("en"))
-btnENG_New .OnEvent("Click", (*) => NewGlossaryProfile())
-btnENG_Del .OnEvent("Click", (*) => DeleteGlossaryProfile())
+btnENG_Edit.OnEvent("Click", (*) => OpenGlossaryManager("en"))
+btnENG_New .OnEvent("Click", (*) => NewGlossaryProfile("en"))
+btnENG_Del .OnEvent("Click", (*) => DeleteGlossaryProfile("en"))
 
 ddlJPG.OnEvent("Change", (*) => GlossaryChanged("jp"))
 ddlENG.OnEvent("Change", (*) => GlossaryChanged("en"))
@@ -8177,30 +8220,41 @@ ddlPrompt.OnEvent("Change", (*) => (UpdateVars(), SaveAll()))
 tab.UseTab(9)
 ui.Add("Text", "xm y+4 w0 h0")  ; spacer
 
-; Master toggle: default OFF (use Windows env). If .env exists, reflect that.
-cbApiInApp := ui.Add("CheckBox", "xm y+6", "Enter API Keys in JRPG Translator (.env)")
-
-; Info panel (storage & instructions)
+; Recommended section: keep secrets outside the app's plain-text .env file.
 ui.SetFont("w600")
-ui.Add("Text", "xm y+10", "About storing your API keys")
+ui.Add("Text", "xm y+10", "Recommended: Store API keys in Windows")
 ui.SetFont("w400")
 txtApiHelp1 := ui.Add("Text"
     , "xm y+4 w740 cGray"
-    , "If this box is ticked, your keys are stored in a .env file in the JRPG Translator Settings folder. This file is plain text (convenient, but not secure)."
+    , "Windows user environment variables keep your keys outside JRPG Translator's plain-text .env file. The app reads GEMINI_API_KEY and OPENAI_API_KEY automatically."
 )
 txtApiHelp2 := ui.Add("Text"
     , "xm y+6 w740 cGray"
-    , "Recommended: Keep keys in Windows environment variables and leave the box unticked. The app will read GEMINI_API_KEY and OPENAI_API_KEY from Windows."
+    , "Click the button below. Under 'User variables', click 'New...' and add GEMINI_API_KEY with your Gemini key, then OPENAI_API_KEY with your OpenAI key. Confirm with OK and restart JRPG Translator."
 )
 txtApiHelp3 := ui.Add("Text"
-    , "xm y+8 w740 cGray"
-    , "How to store the keys in Windows: Click Start -> Search for and select 'Edit the system environment variables' -> In the 'Advanced' tab click 'Environment Variables...' -> Under 'User variables' click 'New...' -> Name: GEMINI_API_KEY (or OPENAI_API_KEY) -> Value: your key -> OK. Restart apps."
+    , "xm y+6 w740 cGray"
+    , "(Alternatively, click Start, search for and select 'Edit the system environment variables', open the 'Advanced' tab, and click 'Environment Variables...'.)"
 )
 
-for cpMutedApiCtrl in [txtApiHelp1, txtApiHelp2, txtApiHelp3]
+btnOpenEnvVars := ui.Add("Button", "xm y+12 w250", "Open Windows Environment Variables...")
+
+; Alternative section: direct in-app entry.
+ui.SetFont("w600")
+ui.Add("Text", "xm y+24", "Alternative: Store API keys directly in JRPG Translator")
+ui.SetFont("w400")
+txtApiHelp4 := ui.Add("Text"
+    , "xm y+4 w740 cGray"
+    , "This convenient method stores the keys as plain text in Settings\.env. Leave it disabled to use the more secure Windows method above."
+)
+
+; Master toggle: default OFF (use Windows env). If .env exists, reflect that.
+cbApiInApp := ui.Add("CheckBox", "xm y+12", "Enter API Keys in JRPG Translator (.env)")
+
+for cpMutedApiCtrl in [txtApiHelp1, txtApiHelp2, txtApiHelp3, txtApiHelp4]
     CPRegisterMutedControl(cpMutedApiCtrl)
 
-ui.Add("Text", "xm y+16 w200", "Gemini API key:")
+ui.Add("Text", "xm y+14 w200", "Gemini API key:")
 eGemini := ui.Add("Edit", "x+m w420 Password")
 
 ui.Add("Text", "xm y+10 w200", "OpenAI API key:")
@@ -8210,6 +8264,92 @@ eOpenAI := ui.Add("Edit", "x+m w420 Password")
 btnSaveEnv  := ui.Add("Button", "xm y+14 w120", "Save Keys")
 btnDelEnv   := ui.Add("Button", "x+8 w120", "Delete .env")
 
+; About is intentionally placed at the bottom of this normally visible tab
+; instead of adding more permanent width to the responsive footer.
+btnAbout := ui.Add("Button", "xm y+34 w120", "About...")
+
+OpenWindowsEnvironmentVariables(*) {
+    try Run('"' A_WinDir '\System32\rundll32.exe" sysdm.cpl,EditEnvironmentVariables')
+    catch as ex
+        MsgBox("Could not open Windows Environment Variables:`n" ex.Message,
+            "API Keys", "OK Icon!")
+}
+
+btnOpenEnvVars.OnEvent("Click", OpenWindowsEnvironmentVariables)
+
+OpenAboutUrl(url, description, *) {
+    try Run(url)
+    catch as ex
+        MsgBox("Could not open " description ":`n" ex.Message,
+            "About JRPG Translator", "OK Icon!")
+}
+
+AboutVersionInfo() {
+    global APP_VERSION, PROJECT_URL
+    return "JRPG Translator " APP_VERSION "`r`n"
+        . "Windows: " A_OSVersion " (" (A_Is64bitOS ? "64-bit" : "32-bit") ")`r`n"
+        . "Application: " (A_PtrSize = 8 ? "64-bit" : "32-bit")
+        . (A_IsCompiled ? " compiled executable" : " source script") "`r`n"
+        . "AutoHotkey runtime: " A_AhkVersion "`r`n"
+        . "Project: " PROJECT_URL
+}
+
+CopyAboutVersionInfo(*) {
+    try {
+        A_Clipboard := AboutVersionInfo()
+        ClipWait(0.5)
+        Toast("Version information copied")
+    } catch as ex {
+        MsgBox("Could not copy version information:`n" ex.Message,
+            "About JRPG Translator", "OK Icon!")
+    }
+}
+
+CloseAboutDialog(dlg, *) {
+    try dlg.Destroy()
+}
+
+ShowAboutDialog(*) {
+    global ui, APP_VERSION, PROJECT_URL, BUG_REPORT_URL
+
+    dlg := Gui("+Owner" ui.Hwnd " +AlwaysOnTop +OwnDialogs", "About JRPG Translator")
+    dlg.MarginX := 20
+    dlg.MarginY := 18
+    dlg.SetFont("s10", "Segoe UI")
+
+    dlg.SetFont("s16 Bold")
+    dlg.Add("Text", "xm w540", "JRPG Translator")
+    dlg.SetFont("s10 Norm")
+    dlg.Add("Text", "xm y+8 w540", "Version " APP_VERSION)
+    dlg.SetFont("s10 Bold")
+    dlg.Add("Text", "xm y+14 w540", "Created by retrogamer0815")
+    dlg.SetFont("s10 Norm")
+    dlg.Add("Text", "xm y+6 w540", "MIT License")
+    dlg.Add("Text", "xm y+16 w540",
+        "Bug reports and source code are available on GitHub.")
+    dlg.SetFont("s10 Bold")
+    dlg.Add("Text", "xm y+6 w540", "Contact/update news: @retr0gamer42 on X")
+    dlg.SetFont("s10 Norm")
+
+    btnReportBug := dlg.Add("Button", "xm y+20 w130", "Report a Bug...")
+    btnGitHub := dlg.Add("Button", "x+10 yp w110", "Open GitHub")
+    btnCopyVersion := dlg.Add("Button", "x+10 yp w150", "Copy Version Info")
+    btnCloseAbout := dlg.Add("Button", "x+10 yp w100 Default", "Close")
+
+    btnReportBug.OnEvent("Click", OpenAboutUrl.Bind(BUG_REPORT_URL, "the bug-report page"))
+    btnGitHub.OnEvent("Click", OpenAboutUrl.Bind(PROJECT_URL, "GitHub"))
+    btnCopyVersion.OnEvent("Click", CopyAboutVersionInfo)
+    closeCallback := CloseAboutDialog.Bind(dlg)
+    btnCloseAbout.OnEvent("Click", closeCallback)
+    dlg.OnEvent("Escape", closeCallback)
+    dlg.OnEvent("Close", closeCallback)
+
+    dlg.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(dlg)
+    try btnReportBug.Focus()
+}
+
+btnAbout.OnEvent("Click", ShowAboutDialog)
 
 ; Helper to parse simple KEY=VALUE lines
 ParseEnvLine(str, key) {
@@ -8349,7 +8489,7 @@ tab.UseTab()
 CPCreateCustomTabBar()
 CPRefreshThemeBrushes()
 
-ui.OnEvent("Close",  ExitControlPanel)
+ui.OnEvent("Close",  ClosePanel)
 ui.OnEvent("Escape", ExitControlPanel)
 ui.OnEvent("Size",   ResizeUI)
 
@@ -8366,11 +8506,12 @@ btnIMG_Del    .OnEvent("Click", (*) => DeleteModel(model_openai_img,"openai_img"
 btnIMG_GM_Add .OnEvent("Click", (*) => AddModelInteractive(model_gemini_img, "gemini_img", ddlIMG_GM, "gemini", "screenshot"))
 btnIMG_GM_Del .OnEvent("Click", (*) => DeleteModel(model_gemini_img,"gemini_img",   ddlIMG_GM))
 
-; initial paint + status, then start timer
+; Initial status gets one WMI recovery scan. The repeating timer uses only the
+; tracked PID and therefore performs no background process enumeration.
 LoadFontsIntoCombo()
 LoadFontsIntoCombo_EW()
 Repaint()
-_UpdateStatus()
+UpdateStatus(true)
 SetTimer(_UpdateStatus, 1000)
 
 ; During background initialization, keep the temporary native window out of the
@@ -10335,16 +10476,30 @@ GlossaryEN2ENPath(name) {
     return GlossaryProfileDir(name) "\en2en.txt"
 }
 
-ListGlossaryProfiles() {
+GlossaryPath(kind, name) {
+    return (kind = "jp") ? GlossaryJP2ENPath(name) : GlossaryEN2ENPath(name)
+}
+
+GlossaryKindLabel(kind) {
+    return (kind = "jp") ? "JP -> TL" : "TL -> TL"
+}
+
+GlossaryHeader(kind) {
+    return "# Managed by JRPG Translator - " GlossaryKindLabel(kind)
+        . " terminology overrides`r`n"
+}
+
+ListGlossaryProfiles(kind := "jp") {
     global glossariesDir
     out := []
+    fileName := (kind = "jp") ? "jp2en.txt" : "en2en.txt"
 
-    ; collect folder names that contain either file
+    ; Each glossary type has its own profile list. Existing folders that contain
+    ; both files remain valid and simply appear in both lists.
     if DirExist(glossariesDir) {
         Loop Files glossariesDir "\*", "D" {
             prof := A_LoopFileName
-            if FileExist(glossariesDir "\" prof "\jp2en.txt")
-             || FileExist(glossariesDir "\" prof "\en2en.txt")
+            if FileExist(glossariesDir "\" prof "\" fileName)
                 out.Push(prof)
         }
     }
@@ -10371,9 +10526,8 @@ RefreshGlossaryProfilesList(selJP := "", selEN := "") {
     SendMessage(0x14B, 0, 0, ddlJPG.Hwnd) ; CB_RESETCONTENT
     SendMessage(0x14B, 0, 0, ddlENG.Hwnd)
 
-    lst := ListGlossaryProfiles()
-    ddlJPG.Add(lst)
-    ddlENG.Add(lst)
+    ddlJPG.Add(ListGlossaryProfiles("jp"))
+    ddlENG.Add(ListGlossaryProfiles("en"))
 
     if (selJP != "")
         ddlJPG.Text := selJP
@@ -10387,23 +10541,143 @@ RefreshGlossaryProfilesList(selJP := "", selEN := "") {
         ddlENG.Text := "default"
 }
 
-OpenGlossaryEditor(kind := "jp") {
+GlossaryReadDocument(path) {
+    doc := Map("entries", [], "metadata", [], "malformed", [])
+    if !FileExist(path)
+        return doc
+
+    text := ""
+    try text := FileRead(path, "UTF-8")
+    catch {
+        try text := FileRead(path)
+    }
+
+    separators := ["->", Chr(0x2192), "â†’", "`t", ":", "="]
+    for rawLine in StrSplit(text, "`n", "`r") {
+        line := Trim(StrReplace(rawLine, Chr(0xFEFF), ""))
+        if (line = "") {
+            doc["metadata"].Push("")
+            continue
+        }
+        if (SubStr(line, 1, 1) = "#") {
+            doc["metadata"].Push(rawLine)
+            continue
+        }
+
+        source := ""
+        target := ""
+        for separator in separators {
+            separatorPos := InStr(line, separator)
+            if !separatorPos
+                continue
+            source := Trim(SubStr(line, 1, separatorPos - 1))
+            target := Trim(SubStr(line, separatorPos + StrLen(separator)))
+            break
+        }
+
+        if (source != "" && target != "")
+            doc["entries"].Push(Map("source", source, "target", target))
+        else
+            doc["malformed"].Push(rawLine)
+    }
+    return doc
+}
+
+GlossaryCloneEntries(entries) {
+    cloned := []
+    for entry in entries
+        cloned.Push(Map("source", entry["source"], "target", entry["target"]))
+    return cloned
+}
+
+GlossaryNormalizeSource(source) {
+    return StrLower(Trim(source))
+}
+
+GlossaryDuplicateSummary(entries) {
+    seen := Map()
+    duplicates := []
+    for rowIndex, entry in entries {
+        key := GlossaryNormalizeSource(entry["source"])
+        if seen.Has(key)
+            duplicates.Push("'" entry["source"] "' (rows " seen[key] " and " rowIndex ")")
+        else
+            seen[key] := rowIndex
+    }
+    return duplicates
+}
+
+GlossaryValidateEntries(entries, allowDuplicates := false) {
+    seen := Map()
+    for rowIndex, entry in entries {
+        source := Trim(entry["source"])
+        target := Trim(entry["target"])
+        if (source = "" || target = "")
+            return "Both fields are required (row " rowIndex ")."
+        if InStr(source, "`r") || InStr(source, "`n")
+         || InStr(target, "`r") || InStr(target, "`n")
+            return "Entries must stay on one line (row " rowIndex ")."
+        if InStr(source, "->") || InStr(source, Chr(0x2192))
+         || InStr(source, "â†’") || InStr(source, "`t")
+            return "The source field cannot contain an arrow or tab separator (row " rowIndex ")."
+
+        key := GlossaryNormalizeSource(source)
+        if seen.Has(key) && !allowDuplicates
+            return "Duplicate source '" source "' in rows " seen[key] " and " rowIndex "."
+        seen[key] := rowIndex
+    }
+    return ""
+}
+
+GlossaryBuildText(doc, entries, kind) {
+    metadata := []
+    hasComment := false
+    for line in doc["metadata"] {
+        cleanLine := RTrim(line, "`r`n")
+        metadata.Push(cleanLine)
+        if (SubStr(Trim(cleanLine), 1, 1) = "#")
+            hasComment := true
+    }
+    while (metadata.Length && Trim(metadata[-1]) = "")
+        metadata.Pop()
+    if !hasComment
+        metadata.InsertAt(1, RTrim(GlossaryHeader(kind), "`r`n"))
+
+    output := ""
+    for line in metadata
+        output .= line "`r`n"
+    if (metadata.Length && entries.Length)
+        output .= "`r`n"
+    for entry in entries
+        output .= Trim(entry["source"]) " -> " Trim(entry["target"]) "`r`n"
+    return output
+}
+
+GlossaryEnsureFile(kind, profile) {
+    path := GlossaryPath(kind, profile)
+    if FileExist(path)
+        return path
+    if !DirExist(GlossaryProfileDir(profile))
+        DirCreate(GlossaryProfileDir(profile))
+    SaveTextAtomic(path, GlossaryHeader(kind), false)
+    return path
+}
+
+OpenRawGlossaryEditor(kind := "jp", profile := "") {
     global ddlJPG, ddlENG
-    prof := (kind = "jp") ? Trim(ddlJPG.Text) : Trim(ddlENG.Text)
+    prof := Trim(profile)
+    if (prof = "")
+        prof := (kind = "jp") ? Trim(ddlJPG.Text) : Trim(ddlENG.Text)
     if (prof = "")
         prof := "default"
 
-    title := (kind = "jp") ? "Edit JP -> TL Glossary - " prof : "Edit TL -> TL Glossary - " prof
-    path  := (kind = "jp") ? GlossaryJP2ENPath(prof) : GlossaryEN2ENPath(prof)
-
-    ; ensure the profile folder exists (only when editing/saving), but do NOT auto-create other profiles
-    if !DirExist(GlossaryProfileDir(prof))
-        DirCreate(GlossaryProfileDir(prof))
+    title := "Repair raw " GlossaryKindLabel(kind) " glossary - " prof
+    path := GlossaryEnsureFile(kind, prof)
 
     txt := ""
-    try txt := FileExist(path) ? FileRead(path, "UTF-8") : "# One mapping per line: JP -> TL (or TL -> TL)`r`n"
+    try txt := FileRead(path, "UTF-8")
 
-   g := Gui("+Resize", title)
+    g := Gui("+Resize", title)
     edGloss := g.Add("Edit", "xm ym w700 h420 WantTab WantReturn Wrap", txt)
     btnSave  := g.Add("Button", "xm y+8 w100", "Save")
     btnClose := g.Add("Button", "x+8 yp w100", "Close")
@@ -10424,51 +10698,406 @@ OpenGlossaryEditor(kind := "jp") {
     CPShowTextEditorDialog(g, edGloss)
 }
 
-NewGlossaryProfile(*) {
+GlossaryManagerRegistry() {
+    static registry := Map()
+    return registry
+}
+
+GlossaryManagerRegister(state) {
+    static messageRegistered := false
+    if !messageRegistered {
+        OnMessage(0x0100, GlossaryManagerOnKeyDown) ; WM_KEYDOWN
+        messageRegistered := true
+    }
+    GlossaryManagerRegistry()[state["gui"].Hwnd] := state
+}
+
+GlossaryManagerRefresh(state, preferredRow := 0) {
+    lv := state["list"]
+    lv.Delete()
+    for entry in state["entries"]
+        lv.Add("", entry["source"], entry["target"])
+
+    lv.ModifyCol(1, state["kind"] = "jp" ? 280 : 300)
+    lv.ModifyCol(2, "AutoHdr")
+    hasEntries := state["entries"].Length > 0
+    state["editButton"].Enabled := hasEntries
+    state["deleteButton"].Enabled := hasEntries
+
+    duplicates := GlossaryDuplicateSummary(state["entries"])
+    status := state["entries"].Length " entr" (state["entries"].Length = 1 ? "y" : "ies")
+    if duplicates.Length
+        status .= "  |  Duplicate sources: " duplicates.Length
+    state["status"].Text := status
+
+    if hasEntries {
+        row := preferredRow ? Min(preferredRow, state["entries"].Length) : 1
+        lv.Modify(row, "Select Focus Vis")
+    }
+}
+
+GlossaryManagerResize(state, guiObj, minMax, width, height) {
+    if (minMax = -1)
+        return
+    listHeight := Max(170, height - 150)
+    state["list"].Move(, , Max(480, width - 32), listHeight)
+    buttonY := height - 52
+    state["addButton"].Move(16, buttonY, 100, 32)
+    state["editButton"].Move(126, buttonY, 100, 32)
+    state["deleteButton"].Move(236, buttonY, 100, 32)
+    state["closeButton"].Move(Max(346, width - 116), buttonY, 100, 32)
+}
+
+GlossaryManagerClose(state, *) {
+    registry := GlossaryManagerRegistry()
+    guiHwnd := state["gui"].Hwnd
+    if registry.Has(guiHwnd)
+        registry.Delete(guiHwnd)
+    try state["gui"].Destroy()
+}
+
+GlossaryManagerOnKeyDown(wParam, lParam, msg, hwnd) {
+    registry := GlossaryManagerRegistry()
+    focusedHwnd := DllCall("user32\GetFocus", "ptr")
+    if !focusedHwnd
+        return
+    rootHwnd := DllCall("user32\GetAncestor", "ptr", focusedHwnd, "uint", 2, "ptr") ; GA_ROOT
+    if !registry.Has(rootHwnd)
+        return
+
+    state := registry[rootHwnd]
+    lv := state["list"]
+    if (focusedHwnd = lv.Hwnd) {
+        selectedRow := lv.GetNext()
+        if (wParam = 0x0D || wParam = 0x71) { ; Enter or F2
+            if selectedRow
+                GlossaryManagerEdit(state)
+            else
+                GlossaryManagerAdd(state)
+            return 0
+        }
+        if (wParam = 0x2D) { ; Insert
+            GlossaryManagerAdd(state)
+            return 0
+        }
+        if (wParam = 0x2E && selectedRow) { ; Delete
+            GlossaryManagerDelete(state)
+            return 0
+        }
+        if (wParam = 0x28
+            && (!state["entries"].Length || selectedRow = state["entries"].Length)) {
+            state["addButton"].Focus()
+            return 0
+        }
+        return
+    }
+
+    buttons := [state["addButton"], state["editButton"], state["deleteButton"], state["closeButton"]]
+    buttonIndex := 0
+    for index, buttonCtrl in buttons {
+        if (buttonCtrl.Hwnd = focusedHwnd) {
+            buttonIndex := index
+            break
+        }
+    }
+    if !buttonIndex
+        return
+    if (wParam = 0x26) { ; Up returns to the table
+        lv.Focus()
+        return 0
+    }
+    if (wParam = 0x25 || wParam = 0x27) {
+        direction := (wParam = 0x25) ? -1 : 1
+        nextIndex := buttonIndex + direction
+        while (nextIndex >= 1 && nextIndex <= buttons.Length
+            && !buttons[nextIndex].Enabled)
+            nextIndex += direction
+        if (nextIndex >= 1 && nextIndex <= buttons.Length)
+            buttons[nextIndex].Focus()
+        return 0
+    }
+}
+
+GlossaryOwnedMessage(ownerHwnd, message, title := "Terminology overrides"
+    , buttons := "ok", icon := "warning") {
+    ; MsgBox ownership can be lost when a GUI event passes through a shared
+    ; helper. Use the native owner handle explicitly and make this short-lived
+    ; message topmost so it cannot fall behind the control panel or entry dialog.
+    if !ownerHwnd || !DllCall("user32\IsWindow", "ptr", ownerHwnd, "int")
+        ownerHwnd := DllCall("user32\GetForegroundWindow", "ptr")
+
+    flags := 0x00010000 | 0x00040000 ; MB_SETFOREGROUND | MB_TOPMOST
+    if (buttons = "yesno")
+        flags |= 0x00000004 ; MB_YESNO
+    if (icon = "error")
+        flags |= 0x00000010 ; MB_ICONERROR
+    else if (icon = "info")
+        flags |= 0x00000040 ; MB_ICONINFORMATION
+    else
+        flags |= 0x00000030 ; MB_ICONWARNING
+
+    return DllCall("user32\MessageBoxW"
+        , "ptr", ownerHwnd
+        , "wstr", message
+        , "wstr", title
+        , "uint", flags
+        , "int")
+}
+
+GlossaryManagerWriteCandidate(state, candidateEntries, preferredRow := 0
+    , allowRemainingDuplicates := false, ownerHwnd := 0) {
+    validationError := GlossaryValidateEntries(candidateEntries, allowRemainingDuplicates)
+    if (validationError != "") {
+        GlossaryOwnedMessage(ownerHwnd, validationError)
+        return false
+    }
+
+    try SaveTextAtomic(
+        state["path"],
+        GlossaryBuildText(state["doc"], candidateEntries, state["kind"])
+    )
+    catch as ex {
+        GlossaryOwnedMessage(ownerHwnd,
+            "Could not save the glossary:`n`n" ex.Message,
+            "Terminology overrides", "ok", "error")
+        return false
+    }
+
+    state["entries"] := candidateEntries
+    GlossaryManagerRefresh(state, preferredRow)
+    Toast("Saved " GlossaryKindLabel(state["kind"]) " entries for '" state["profile"] "'")
+    return true
+}
+
+GlossaryEntryDialogClose(dialogState, managerGui, dialogGui, *) {
+    if dialogState["closed"]
+        return
+    dialogState["closed"] := true
+    try managerGui.Opt("-Disabled")
+    try dialogGui.Destroy()
+    try managerGui.Show()
+}
+
+GlossaryEntryDialogAccept(state, rowIndex, sourceEdit, targetEdit
+    , dialogState, managerGui, dialogGui, *) {
+    source := Trim(sourceEdit.Value)
+    target := Trim(targetEdit.Value)
+    candidateEntries := GlossaryCloneEntries(state["entries"])
+    newEntry := Map("source", source, "target", target)
+    if rowIndex
+        candidateEntries[rowIndex] := newEntry
+    else
+        candidateEntries.Push(newEntry)
+
+    preferredRow := rowIndex ? rowIndex : candidateEntries.Length
+    originalDuplicateCount := GlossaryDuplicateSummary(state["entries"]).Length
+    candidateDuplicateCount := GlossaryDuplicateSummary(candidateEntries).Length
+    allowRemainingDuplicates := rowIndex && originalDuplicateCount
+        && candidateDuplicateCount < originalDuplicateCount
+    if !GlossaryManagerWriteCandidate(
+        state, candidateEntries, preferredRow, allowRemainingDuplicates, dialogGui.Hwnd)
+        return
+    GlossaryEntryDialogClose(dialogState, managerGui, dialogGui)
+}
+
+GlossaryEntryDialog(state, rowIndex := 0) {
+    global ui
+    managerGui := state["gui"]
+    isEdit := rowIndex > 0
+    sourceValue := isEdit ? state["entries"][rowIndex]["source"] : ""
+    targetValue := isEdit ? state["entries"][rowIndex]["target"] : ""
+    kindLabel := GlossaryKindLabel(state["kind"])
+    title := (isEdit ? "Edit " : "Add ") kindLabel " entry"
+
+    try managerGui.Opt("+Disabled")
+    ; Own the editor directly to the control panel so its dark-mode brushes and
+    ; controller-navigation owner-chain handling are identical to other dialogs.
+    dlg := Gui("+Owner" ui.Hwnd " +AlwaysOnTop +OwnDialogs", title)
+    dlg.MarginX := 18
+    dlg.MarginY := 16
+    dlg.SetFont("s10", "Segoe UI")
+    sourceLabel := (state["kind"] = "jp") ? "Japanese source term:" : "Translation output to replace:"
+    dlg.Add("Text", "xm w500", sourceLabel)
+    sourceEdit := dlg.Add("Edit", "xm y+6 w500", sourceValue)
+    dlg.Add("Text", "xm y+14 w500", "Target-language replacement:")
+    targetEdit := dlg.Add("Edit", "xm y+6 w500", targetValue)
+    hint := dlg.Add("Text", "xm y+12 w500 cGray",
+        "Both fields are required. Matching uses the complete source text you enter.")
+    CPRegisterMutedControl(hint)
+    btnSave := dlg.Add("Button", "xm y+16 w120 Default", isEdit ? "Save" : "Add")
+    btnCancel := dlg.Add("Button", "x+10 yp w120", "Cancel")
+    dialogState := Map("closed", false)
+
+    btnSave.OnEvent("Click", GlossaryEntryDialogAccept.Bind(
+        state, rowIndex, sourceEdit, targetEdit, dialogState, managerGui, dlg))
+    closeCallback := GlossaryEntryDialogClose.Bind(dialogState, managerGui, dlg)
+    btnCancel.OnEvent("Click", closeCallback)
+    dlg.OnEvent("Escape", closeCallback)
+    dlg.OnEvent("Close", closeCallback)
+    dlg.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(dlg)
+    try sourceEdit.Focus()
+}
+
+GlossaryManagerAdd(state, *) {
+    GlossaryEntryDialog(state)
+}
+
+GlossaryManagerEdit(state, listCtrl := 0, eventRow := 0, *) {
+    row := eventRow
+    if !row
+        row := state["list"].GetNext()
+    if !row {
+        if !state["entries"].Length
+            GlossaryManagerAdd(state)
+        else
+            GlossaryOwnedMessage(state["gui"].Hwnd, "Select an entry to edit.")
+        return
+    }
+    GlossaryEntryDialog(state, row)
+}
+
+GlossaryManagerDelete(state, *) {
+    row := state["list"].GetNext()
+    if !row {
+        GlossaryOwnedMessage(state["gui"].Hwnd, "Select an entry to delete.")
+        return
+    }
+    entry := state["entries"][row]
+    if (GlossaryOwnedMessage(state["gui"].Hwnd,
+        "Delete this entry?`n`n" entry["source"] "  ->  " entry["target"],
+        "Terminology overrides", "yesno") != 6) ; IDYES
+        return
+
+    candidateEntries := GlossaryCloneEntries(state["entries"])
+    candidateEntries.RemoveAt(row)
+    ; Deleting is always allowed to reduce or remove duplicate legacy rows.
+    GlossaryManagerWriteCandidate(state, candidateEntries, row, true, state["gui"].Hwnd)
+}
+
+OpenGlossaryManager(kind := "jp") {
+    global ui, ddlJPG, ddlENG
+    profile := (kind = "jp") ? Trim(ddlJPG.Text) : Trim(ddlENG.Text)
+    if (profile = "")
+        profile := "default"
+    path := GlossaryEnsureFile(kind, profile)
+    doc := GlossaryReadDocument(path)
+
+    if doc["malformed"].Length {
+        preview := ""
+        for index, line in doc["malformed"] {
+            if (index > 4) {
+                preview .= "`n..."
+                break
+            }
+            preview .= "`n" line
+        }
+        answer := GlossaryOwnedMessage(ui.Hwnd,
+            doc["malformed"].Length " line(s) could not be read as terminology pairs."
+            . "`n`nTable editing is disabled to avoid losing those lines."
+            . "`nOpen the raw repair editor now?`n" preview,
+            "Terminology overrides", "yesno")
+        if (answer = 6) ; IDYES
+            OpenRawGlossaryEditor(kind, profile)
+        return
+    }
+
+    title := GlossaryKindLabel(kind) " terminology - " profile
+    g := Gui("+Resize +Owner" ui.Hwnd " +OwnDialogs", title)
+    g.MarginX := 16
+    g.MarginY := 14
+    g.SetFont("s10", "Segoe UI")
+    description := (kind = "jp")
+        ? "Exact Japanese terms sent to the translation model and their requested output."
+        : "Translation outputs corrected locally after the model responds."
+    g.Add("Text", "xm w748", description)
+    columns := (kind = "jp")
+        ? ["Japanese source", "Target-language replacement"]
+        : ["Translation output", "Local replacement"]
+    lv := g.Add("ListView", "xm y+10 w748 h350 Grid -Multi", columns)
+    status := g.Add("Text", "xm y+7 w500 cGray", "")
+    CPRegisterMutedControl(status)
+    btnAdd := g.Add("Button", "xm y+10 w100", "Add...")
+    btnEdit := g.Add("Button", "x+10 yp w100", "Edit...")
+    btnDelete := g.Add("Button", "x+10 yp w100", "Delete")
+    btnClose := g.Add("Button", "x+312 yp w100", "Close")
+
+    state := Map(
+        "kind", kind, "profile", profile, "path", path, "doc", doc,
+        "entries", doc["entries"], "gui", g, "list", lv, "status", status,
+        "addButton", btnAdd, "editButton", btnEdit,
+        "deleteButton", btnDelete, "closeButton", btnClose
+    )
+
+    btnAdd.OnEvent("Click", GlossaryManagerAdd.Bind(state))
+    btnEdit.OnEvent("Click", GlossaryManagerEdit.Bind(state))
+    btnDelete.OnEvent("Click", GlossaryManagerDelete.Bind(state))
+    btnClose.OnEvent("Click", GlossaryManagerClose.Bind(state))
+    lv.OnEvent("DoubleClick", GlossaryManagerEdit.Bind(state))
+    lv.OnEvent("ItemFocus", (*) => (
+        state["editButton"].Enabled := state["list"].GetNext() > 0,
+        state["deleteButton"].Enabled := state["list"].GetNext() > 0
+    ))
+    g.OnEvent("Escape", GlossaryManagerClose.Bind(state))
+    g.OnEvent("Close", GlossaryManagerClose.Bind(state))
+    g.OnEvent("Size", GlossaryManagerResize.Bind(state))
+
+    GlossaryManagerRegister(state)
+    GlossaryManagerRefresh(state)
+    g.Opt("+MinSize620x340")
+    g.Show("w780 h500 Center")
+    CPApplyOwnedDialogTheme(g)
+    try lv.Focus()
+}
+
+NewGlossaryProfile(kind := "jp", *) {
     global ddlJPG, ddlENG, iniPath, jp2enGlossaryProfile, en2enGlossaryProfile
-    ib := CPThemedInputBox("Enter a name for the new glossary profile:", "New glossary")
+    kindLabel := GlossaryKindLabel(kind)
+    ib := CPThemedInputBox(
+        "Enter a name for the new " kindLabel " profile:",
+        "New " kindLabel " profile")
     if (ib.Result = "Cancel")
         return
     name := Trim(ib.Value)
     if (name = "") {
-        MsgBox("Please enter a non-empty name.", "New glossary", "OK Icon!")
+        MsgBox("Please enter a non-empty name.", "New " kindLabel " profile", "OK Icon!")
         return
     }
     name := RegExReplace(name, '[\\/:*?"<>|]+', "_")
     if RegExMatch(name, 'i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$')
         name := "_" name
 
-    dir := GlossaryProfileDir(name)
-    if DirExist(dir) {
-        if (MsgBox("Profile '" name "' already exists.`nOpen editors?", "New glossary", "YesNo Icon!")="Yes") {
-            RefreshGlossaryProfilesList(name, name)
-            OpenGlossaryEditor("jp")
-            OpenGlossaryEditor("en")
+    path := GlossaryPath(kind, name)
+    if FileExist(path) {
+        if (MsgBox(kindLabel " profile '" name "' already exists.`nOpen its entries?",
+            "New " kindLabel " profile", "YesNo Icon!") = "Yes") {
+            if (kind = "jp")
+                jp2enGlossaryProfile := name
+            else
+                en2enGlossaryProfile := name
+            IniWrite(name, iniPath, "cfg",
+                kind = "jp" ? "jp2enGlossaryProfile" : "en2enGlossaryProfile")
+            RefreshGlossaryProfilesList(jp2enGlossaryProfile, en2enGlossaryProfile)
+            OpenGlossaryManager(kind)
         }
         return
     }
 
-    ; create both partner files so both rows immediately have it
-    DirCreate(dir)
-    FileAppend("# One mapping per line: JP -> TL`r`n", GlossaryJP2ENPath(name), "UTF-8")
-    FileAppend("# One mapping per line: TL -> TL`r`n", GlossaryEN2ENPath(name), "UTF-8")
-
-    ; select it in BOTH rows and persist
-    RefreshGlossaryProfilesList(name, name)
-    jp2enGlossaryProfile := name
-    en2enGlossaryProfile := name
-    IniWrite(jp2enGlossaryProfile, iniPath, "cfg", "jp2enGlossaryProfile")
-    IniWrite(en2enGlossaryProfile, iniPath, "cfg", "en2enGlossaryProfile")
-
-    OpenGlossaryEditor("jp")
-    OpenGlossaryEditor("en")
+    GlossaryEnsureFile(kind, name)
+    if (kind = "jp") {
+        jp2enGlossaryProfile := name
+        IniWrite(jp2enGlossaryProfile, iniPath, "cfg", "jp2enGlossaryProfile")
+    } else {
+        en2enGlossaryProfile := name
+        IniWrite(en2enGlossaryProfile, iniPath, "cfg", "en2enGlossaryProfile")
+    }
+    RefreshGlossaryProfilesList(jp2enGlossaryProfile, en2enGlossaryProfile)
+    OpenGlossaryManager(kind)
 }
 
-DeleteGlossaryProfile(*) {
+DeleteGlossaryProfile(kind := "jp", *) {
     global ddlJPG, ddlENG, iniPath, jp2enGlossaryProfile, en2enGlossaryProfile
-    name := Trim(ddlJPG.Text)
-    if (name = "")
-        name := Trim(ddlENG.Text)
+    name := (kind = "jp") ? Trim(ddlJPG.Text) : Trim(ddlENG.Text)
     if (name = "") {
         MsgBox("No profile selected.",, "OK Icon!")
         return
@@ -10477,22 +11106,36 @@ DeleteGlossaryProfile(*) {
         MsgBox("The 'default' profile cannot be deleted.",, "OK Icon!")
         return
     }
-    if (MsgBox("Delete glossary profile '" name "' (both files)?",, "YesNo Icon!")!="Yes")
+    kindLabel := GlossaryKindLabel(kind)
+    if (MsgBox("Delete the " kindLabel " profile '" name "'?"
+        . "`n`nThe other glossary type will not be changed.",
+        "Delete " kindLabel " profile", "YesNo Icon!") != "Yes")
         return
 
-    ; delete the entire folder for this profile
     dir := GlossaryProfileDir(name)
-    try DirDelete(dir, true)
+    path := GlossaryPath(kind, name)
+    try FileDelete(path)
+    catch as ex {
+        MsgBox("Could not delete the profile:`n`n" ex.Message,
+            "Delete " kindLabel " profile", "OK Icon!")
+        return
+    }
+    partnerPath := GlossaryPath(kind = "jp" ? "en" : "jp", name)
+    if !FileExist(partnerPath) {
+        ; No active glossary remains in this profile folder.
+        try DirDelete(dir, true)
+    }
 
-    ; if you just deleted the selected one, fall back to 'default' and persist
-    if (jp2enGlossaryProfile = name)
+    if (kind = "jp") {
         jp2enGlossaryProfile := "default"
-    if (en2enGlossaryProfile = name)
+        IniWrite(jp2enGlossaryProfile, iniPath, "cfg", "jp2enGlossaryProfile")
+    } else {
         en2enGlossaryProfile := "default"
-    IniWrite(jp2enGlossaryProfile, iniPath, "cfg", "jp2enGlossaryProfile")
-    IniWrite(en2enGlossaryProfile, iniPath, "cfg", "en2enGlossaryProfile")
+        IniWrite(en2enGlossaryProfile, iniPath, "cfg", "en2enGlossaryProfile")
+    }
 
     RefreshGlossaryProfilesList(jp2enGlossaryProfile, en2enGlossaryProfile)
+    Toast("Deleted " kindLabel " profile '" name "'")
 }
 
 GlossaryChanged(kind) {

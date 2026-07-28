@@ -27,6 +27,7 @@ namespace JrpgTranslator.LaunchBox
         private readonly CheckBox _joyToKeyEnabled;
         private readonly ComboBox _translatorProfile;
         private readonly Button _refreshTranslatorProfiles;
+        private readonly Button _openTranslator;
         private readonly ComboBox _joyToKeyProfile;
         private readonly Button _refreshJoyToKeyProfiles;
         private readonly Button _browseTranslator;
@@ -58,10 +59,10 @@ namespace JrpgTranslator.LaunchBox
             _nativeControllerNavigationEnabled = IsBigBoxHost();
 
             Title = "JRPG Translator Setup";
-            Width = 760;
-            Height = 780;
-            MinWidth = 680;
-            MinHeight = 690;
+            Width = 840;
+            Height = 900;
+            MinWidth = 720;
+            MinHeight = 800;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             ResizeMode = ResizeMode.CanResize;
             ShowInTaskbar = false;
@@ -72,7 +73,7 @@ namespace JrpgTranslator.LaunchBox
             FontFamily = new FontFamily("Segoe UI");
             FontSize = 18;
 
-            Grid root = new Grid { Margin = new Thickness(28) };
+            Grid root = new Grid { Margin = new Thickness(28, 24, 28, 24) };
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -97,7 +98,7 @@ namespace JrpgTranslator.LaunchBox
                 Text = "Choose what should be prepared automatically whenever this game is launched.",
                 Foreground = MutedForeground,
                 TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 0, 0, 22)
+                Margin = new Thickness(0, 0, 0, 18)
             };
             Grid.SetRow(introduction, 1);
             root.Children.Add(introduction);
@@ -105,7 +106,7 @@ namespace JrpgTranslator.LaunchBox
             StackPanel options = new StackPanel
             {
                 Background = PanelBackground,
-                Margin = new Thickness(0, 0, 0, 18)
+                Margin = new Thickness(0, 0, 0, 14)
             };
             Grid.SetRow(options, 2);
             root.Children.Add(options);
@@ -128,6 +129,35 @@ namespace JrpgTranslator.LaunchBox
                 Margin = new Thickness(54, 0, 18, 12)
             };
             options.Children.Add(_translatorProfileStatus);
+
+            Grid openTranslatorRow = new Grid
+            {
+                Margin = new Thickness(54, 0, 18, 12)
+            };
+            openTranslatorRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            openTranslatorRow.ColumnDefinitions.Add(new ColumnDefinition
+            {
+                Width = new GridLength(1, GridUnitType.Star)
+            });
+            options.Children.Add(openTranslatorRow);
+
+            _openTranslator = MakeButton("Open JRPG Translator…", 224);
+            _openTranslator.VerticalAlignment = VerticalAlignment.Top;
+            _openTranslator.Click += OpenTranslatorClicked;
+            openTranslatorRow.Children.Add(_openTranslator);
+
+            TextBlock openTranslatorHelp = new TextBlock
+            {
+                Text = "First time? Open JRPG Translator to configure API keys and settings. "
+                    + "During games, its control panel stays hidden; show it with your configured "
+                    + "controller button or keyboard hotkey.",
+                Foreground = MutedForeground,
+                TextWrapping = TextWrapping.Wrap,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(16, 0, 0, 0)
+            };
+            Grid.SetColumn(openTranslatorHelp, 1);
+            openTranslatorRow.Children.Add(openTranslatorHelp);
 
             _joyToKeyEnabled = MakeCheckBox("Use JoyToKey with this game", game.JoyToKeyEnabled);
             _joyToKeyEnabled.Margin = new Thickness(18, 10, 18, 14);
@@ -177,32 +207,33 @@ namespace JrpgTranslator.LaunchBox
             _browseProfiles.Click += BrowseProfilesClicked;
             locationButtons.Children.Add(_browseProfiles);
 
+            StackPanel statusPanel = new StackPanel();
+            Grid.SetRow(statusPanel, 3);
+            root.Children.Add(statusPanel);
+
             _readiness = new TextBlock
             {
                 Foreground = MutedForeground,
                 TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 0, 0, 12),
+                Margin = new Thickness(0, 0, 0, 8),
                 Text = BuildReadinessText()
             };
-            Grid.SetRow(_readiness, 3);
-            root.Children.Add(_readiness);
+            statusPanel.Children.Add(_readiness);
 
             TextBlock stageNotice = new TextBlock
             {
-                Text = "JRPG Translator and the selected JoyToKey profile are prepared automatically for this game, then closed or restored after the game exits.",
+                Text = "Plugin-started tools are closed or restored automatically after the game exits.",
                 Foreground = MutedForeground,
                 FontStyle = FontStyles.Italic,
-                TextWrapping = TextWrapping.Wrap,
-                VerticalAlignment = VerticalAlignment.Top
+                TextWrapping = TextWrapping.Wrap
             };
-            Grid.SetRow(stageNotice, 4);
-            root.Children.Add(stageNotice);
+            statusPanel.Children.Add(stageNotice);
 
             StackPanel buttons = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
                 HorizontalAlignment = HorizontalAlignment.Left,
-                Margin = new Thickness(0, 22, 0, 0)
+                Margin = new Thickness(0, 18, 0, 0)
             };
             Grid.SetRow(buttons, 5);
             root.Children.Add(buttons);
@@ -222,6 +253,7 @@ namespace JrpgTranslator.LaunchBox
             {
                 new Control[] { _translatorEnabled },
                 new Control[] { _translatorProfile, _refreshTranslatorProfiles },
+                new Control[] { _openTranslator },
                 new Control[] { _joyToKeyEnabled },
                 new Control[] { _joyToKeyProfile, _refreshJoyToKeyProfiles },
                 new Control[] { _browseTranslator, _browseJoyToKey, _browseProfiles },
@@ -339,6 +371,40 @@ namespace JrpgTranslator.LaunchBox
             _configuration.TranslatorExecutable = MakeLaunchBoxRelative(selected);
             RefreshTranslatorProfiles(_translatorProfile.Text);
             UpdatePathStatus();
+        }
+
+        private void OpenTranslatorClicked(object sender, RoutedEventArgs e)
+        {
+            string executable = PluginPaths.ResolveTranslatorExecutable(_configuration);
+            if (!File.Exists(executable))
+            {
+                MessageBox.Show(
+                    this,
+                    "JRPG Translator.exe was not found. Use \"Translator EXE...\" below to select it.",
+                    "JRPG Translator Setup",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = executable,
+                    WorkingDirectory = Path.GetDirectoryName(executable) ?? string.Empty,
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception exception)
+            {
+                MessageBox.Show(
+                    this,
+                    "JRPG Translator could not be opened:\n\n" + exception.Message,
+                    "JRPG Translator Setup",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
         }
 
         private void BrowseJoyToKeyClicked(object sender, RoutedEventArgs e)

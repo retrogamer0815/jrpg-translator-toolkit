@@ -4,6 +4,7 @@ import configparser
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
 import time
@@ -339,6 +340,67 @@ def atomic_write_text(path, text):
         pass
 
 
+def _exception_chain(error):
+    """Yield an exception and its explicit/implicit causes without looping."""
+    seen = set()
+    current = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _is_retryable_connection_error(error):
+    """Return True only for failures that may recover without user changes."""
+    for current in _exception_chain(error):
+        if isinstance(current, (socket.gaierror, TimeoutError, ConnectionError, OSError)):
+            return True
+
+        error_name = type(current).__name__
+        if error_name in {
+            "ConnectionClosed",
+            "ConnectionClosedError",
+            "ConnectionClosedOK",
+            "ProxyError",
+        }:
+            return True
+
+        # WebSocket handshake errors caused by a busy or temporarily unavailable
+        # service can recover. Authentication and bad-request responses cannot.
+        if error_name == "InvalidStatus":
+            response = getattr(current, "response", None)
+            status = getattr(response, "status_code", None)
+            if status is None:
+                status = getattr(current, "status_code", None)
+            if isinstance(status, int):
+                return status in {408, 425, 429} or 500 <= status < 600
+
+    return False
+
+
+def _connection_retry_message(error, provider_label, delay_seconds):
+    dns_failure = any(
+        isinstance(current, socket.gaierror)
+        for current in _exception_chain(error)
+    )
+    if dns_failure:
+        reason = f"{provider_label} address not found (DNS/network)"
+    elif isinstance(error, ConnectionError) and str(error).endswith("connection closed."):
+        reason = f"{provider_label} connection closed"
+    else:
+        reason = f"{provider_label} connection interrupted"
+    return f"Live audio: {reason}. Retrying in {delay_seconds} s..."
+
+
+def _mark_audio_connection_ready():
+    """Remove a temporary connection warning once setup has succeeded."""
+    try:
+        atomic_write_text(AUDIO_TXT, "")
+    except Exception:
+        pass
+    write_error("")
+
+
 def _pick_speaker():
     if SPEAKER_NAME:
         wanted = SPEAKER_NAME.lower()
@@ -526,6 +588,7 @@ async def run_openai(speaker):
             },
         }
         await ws.send(json.dumps(setup))
+        _mark_audio_connection_ready()
 
         def make_event(chunk):
             return {
@@ -599,6 +662,7 @@ async def run_gemini(speaker):
         await ws.send(json.dumps(setup))
         setup_ack = _decode_ws_text(await ws.recv())
         log("gemini setup: " + setup_ack[:500])
+        _mark_audio_connection_ready()
 
         def make_event(chunk):
             return {
@@ -629,6 +693,50 @@ async def run_gemini(speaker):
             sender.cancel()
 
 
+async def run_audio_with_reconnect(speaker):
+    """Keep live audio alive across temporary DNS and connection failures."""
+    if AUDIO_PROVIDER == "gemini":
+        provider_label = "Gemini"
+        provider_runner = run_gemini
+    else:
+        provider_label = "OpenAI"
+        provider_runner = run_openai
+
+    retry_number = 0
+    while True:
+        connected_at = time.monotonic()
+        try:
+            await provider_runner(speaker)
+            error = ConnectionError(f"{provider_label} connection closed.")
+            detail = str(error)
+        except Exception as caught:
+            if not _is_retryable_connection_error(caught):
+                raise
+            error = caught
+            detail = traceback.format_exc()
+
+        # A connection that stayed healthy for a while gets a fresh, short
+        # retry sequence if it later drops.
+        if time.monotonic() - connected_at >= 30:
+            retry_number = 0
+        delay_seconds = min(2 ** retry_number, 30)
+        retry_number += 1
+
+        status = _connection_retry_message(
+            error, provider_label, delay_seconds
+        )
+        write_error(
+            "Temporary live-audio connection failure. "
+            "JRPG Translator is retrying automatically.\n\n" + detail
+        )
+        try:
+            atomic_write_text(AUDIO_TXT, status)
+        except Exception:
+            pass
+        print(status, file=sys.stderr)
+        await asyncio.sleep(delay_seconds)
+
+
 async def main_async():
     try:
         atomic_write_text(AUDIO_TXT, "")
@@ -645,10 +753,9 @@ async def main_async():
     print(f"Overlay  : {AUDIO_TXT}")
     if AUDIO_PROVIDER == "gemini":
         print(f"Model    : {GEMINI_AUDIO_MODEL}")
-        await run_gemini(speaker)
     else:
         print(f"Model    : {TRANSLATE_MODEL}")
-        await run_openai(speaker)
+    await run_audio_with_reconnect(speaker)
 
 
 def main():

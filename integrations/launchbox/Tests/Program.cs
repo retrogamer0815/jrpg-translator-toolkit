@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Xml.Serialization;
+using System.Windows;
 using JrpgTranslator.LaunchBox;
 using Unbroken.LaunchBox.Plugins;
 
@@ -70,6 +71,12 @@ internal static class Program
         GameSetupWindow setupWindow = new GameSetupWindow(restored, game.Clone());
         Require(string.Equals(setupWindow.Title, "JRPG Translator Setup", StringComparison.Ordinal),
             "The setup window did not initialize correctly.");
+        FrameworkElement content = (FrameworkElement)setupWindow.Content;
+        content.Measure(new Size(setupWindow.Width, double.PositiveInfinity));
+        Require(content.DesiredSize.Height <= setupWindow.Height - 36,
+            "The setup window's default height is too small for its content: "
+                + content.DesiredSize.Height + " required, "
+                + (setupWindow.Height - 36) + " available.");
 
         IGameMenuItemPlugin menuItem = new GameSetupMenuItem();
         Require(menuItem.ShowInLaunchBox && menuItem.ShowInBigBox,
