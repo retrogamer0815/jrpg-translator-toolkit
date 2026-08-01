@@ -17,6 +17,8 @@ global CP_START_TRANSLATOR := false
 global APP_VERSION := "0.9.3"
 global PROJECT_URL := "https://github.com/retrogamer0815/jrpg-translator-toolkit"
 global BUG_REPORT_URL := PROJECT_URL "/issues/new"
+global WRITTEN_GUIDE_URL := PROJECT_URL "#quick-start"
+global BEGINNER_VIDEO_URL := "https://youtu.be/pdZ0fBS8COc"
 for __cpIndex, __cpArg in A_Args {
     __cpArgLower := StrLower(__cpArg)
     if (__cpArgLower = "--background") {
@@ -63,6 +65,7 @@ global CPFontSizeAdjustSyncing := false
 global CPMaxPngAdjustState := Map("active", false)
 global CPMaxPngAdjustSyncing := false
 global CPControllerColorDialogState := Map("active", false)
+global CPWelcomeDialog := 0
 
 CloseControlPanelMutex(*) {
     global __CP_MUTEX
@@ -1228,7 +1231,8 @@ SetGuiAndTrayIcon(guiObj, icoPath) {
         DllCall("SendMessage", "ptr", hwnd, "uint", 0x0080, "ptr", 0, "ptr", hSmall) ; WM_SETICON, ICON_SMALL
     OnExit((*) => (
         hBig   && DllCall("DestroyIcon","ptr",hBig),
-        hSmall && DllCall("DestroyIcon","ptr",hSmall)
+        hSmall && DllCall("DestroyIcon","ptr",hSmall),
+        0 ; a nonzero OnExit return cancels shutdown and leaves a hidden process
     ))
     return true
 }
@@ -8485,6 +8489,88 @@ CloseAboutDialog(dlg, *) {
     try dlg.Destroy()
 }
 
+SaveWelcomeGuidePreference(dontShowAgain) {
+    global iniPath
+    try IniWriteRetry(dontShowAgain.Value ? 1 : 0, iniPath, "cfg_control", "welcomeGuideDismissed")
+}
+
+CloseWelcomeGuide(dlg, dontShowAgain, *) {
+    global CPWelcomeDialog
+    SaveWelcomeGuidePreference(dontShowAgain)
+    try dlg.Destroy()
+    CPWelcomeDialog := 0
+}
+
+OpenWelcomeApiKeys(dlg, dontShowAgain, *) {
+    global CPWelcomeDialog, ui, btnOpenEnvVars
+    SaveWelcomeGuidePreference(dontShowAgain)
+    try dlg.Destroy()
+    CPWelcomeDialog := 0
+    try ui.Show()
+    try WinActivate("ahk_id " ui.Hwnd)
+    CPSelectCustomTab(9)
+    try btnOpenEnvVars.Focus()
+}
+
+ShowWelcomeDialog(manual := false, *) {
+    global ui, iniPath, CPWelcomeDialog, BEGINNER_VIDEO_URL, WRITTEN_GUIDE_URL
+
+    if (IsObject(CPWelcomeDialog) && CPWelcomeDialog.Hwnd) {
+        try CPWelcomeDialog.Show()
+        try WinActivate("ahk_id " CPWelcomeDialog.Hwnd)
+        return
+    }
+
+    dismissed := Integer(IniRead(iniPath, "cfg_control", "welcomeGuideDismissed", 0)) != 0
+    dlg := Gui("+Owner" ui.Hwnd " +AlwaysOnTop +OwnDialogs", "Welcome to JRPG Translator")
+    CPWelcomeDialog := dlg
+    dlg.MarginX := 20
+    dlg.MarginY := 18
+    dlg.SetFont("s10", "Segoe UI")
+
+    dlg.SetFont("s17 Bold")
+    dlg.Add("Text", "xm w640", "Welcome to JRPG Translator")
+    dlg.SetFont("s10 Norm")
+    dlg.Add("Text", "xm y+10 w640",
+        "Complete these basics before starting your first game:")
+    dlg.Add("Text", "xm y+12 w640",
+        "1. Add at least one API key.`n"
+        . "2. Choose your translation and explanation models and prompts.`n"
+        . "3. Select a screenshot capture region or game window.`n"
+        . "4. Configure keyboard shortcuts or direct controller inputs.`n"
+        . "5. Save the finished setup as a Profile for the LaunchBox plugin.")
+
+    dlg.Add("Text", "xm y+14 w640 cGray",
+        "The LaunchBox plugin normally starts JRPG Translator with its control panel hidden. "
+        . "Show it again at any time with your configured controller button or keyboard hotkey.")
+
+    dontShowAgain := dlg.Add("CheckBox", "xm y+16 Checked", "Don't show this welcome guide again")
+    if manual
+        dontShowAgain.Value := dismissed ? 1 : 0
+
+    btnWelcomeApiKeys := dlg.Add("Button", "xm y+20 w135", "Open API Keys")
+    btnWelcomeVideo := dlg.Add("Button", "x+10 yp w170", "Watch Beginner Guide")
+    btnWelcomeDocs := dlg.Add("Button", "x+10 yp w155", "Open Written Guide")
+    btnWelcomeContinue := dlg.Add("Button", "x+10 yp w110 Default", "Continue")
+
+    btnWelcomeApiKeys.OnEvent("Click", OpenWelcomeApiKeys.Bind(dlg, dontShowAgain))
+    btnWelcomeVideo.OnEvent("Click", OpenAboutUrl.Bind(BEGINNER_VIDEO_URL, "the beginner guide"))
+    btnWelcomeDocs.OnEvent("Click", OpenAboutUrl.Bind(WRITTEN_GUIDE_URL, "the written guide"))
+    closeCallback := CloseWelcomeGuide.Bind(dlg, dontShowAgain)
+    btnWelcomeContinue.OnEvent("Click", closeCallback)
+    dlg.OnEvent("Escape", closeCallback)
+    dlg.OnEvent("Close", closeCallback)
+
+    dlg.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(dlg)
+    try btnWelcomeApiKeys.Focus()
+}
+
+OpenWelcomeFromAbout(aboutDlg, *) {
+    try aboutDlg.Destroy()
+    SetTimer(ShowWelcomeDialog.Bind(true), -1)
+}
+
 ShowAboutDialog(*) {
     global ui, APP_VERSION, PROJECT_URL, BUG_REPORT_URL
 
@@ -8507,11 +8593,13 @@ ShowAboutDialog(*) {
     dlg.Add("Text", "xm y+6 w540", "Contact/update news: @retr0gamer42 on X")
     dlg.SetFont("s10 Norm")
 
-    btnReportBug := dlg.Add("Button", "xm y+20 w130", "Report a Bug...")
+    btnWelcomeGuide := dlg.Add("Button", "xm y+20 w180", "Open Welcome Guide...")
+    btnReportBug := dlg.Add("Button", "xm y+10 w130", "Report a Bug...")
     btnGitHub := dlg.Add("Button", "x+10 yp w110", "Open GitHub")
     btnCopyVersion := dlg.Add("Button", "x+10 yp w150", "Copy Version Info")
     btnCloseAbout := dlg.Add("Button", "x+10 yp w100 Default", "Close")
 
+    btnWelcomeGuide.OnEvent("Click", OpenWelcomeFromAbout.Bind(dlg))
     btnReportBug.OnEvent("Click", OpenAboutUrl.Bind(BUG_REPORT_URL, "the bug-report page"))
     btnGitHub.OnEvent("Click", OpenAboutUrl.Bind(PROJECT_URL, "GitHub"))
     btnCopyVersion.OnEvent("Click", CopyAboutVersionInfo)
@@ -8522,7 +8610,7 @@ ShowAboutDialog(*) {
 
     dlg.Show("AutoSize Center")
     CPApplyOwnedDialogTheme(dlg)
-    try btnReportBug.Focus()
+    try btnWelcomeGuide.Focus()
 }
 
 btnAbout.OnEvent("Click", ShowAboutDialog)
@@ -8786,6 +8874,12 @@ ClearAllComboSelections(*) {
 }
 
 SetGuiAndTrayIcon(ui, A_ScriptDir "\icon.ico")
+
+; A normal first launch presents the compact setup guide. Background launches
+; from LaunchBox/Big Box remain completely silent and hidden.
+if (!CP_BACKGROUND_START
+ && !Integer(IniRead(iniPath, "cfg_control", "welcomeGuideDismissed", 0)))
+    SetTimer(ShowWelcomeDialog.Bind(false), -350)
 
 ; =========================
 ; Helpers (GUI)
