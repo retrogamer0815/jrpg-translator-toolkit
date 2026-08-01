@@ -180,6 +180,12 @@ and local target-language replacements are skipped. The enabled state and both
 selected glossary Profiles are stored in unified Profiles, including Profiles
 applied through LaunchBox / Big Box.
 
+Each glossary type has an independent profile list. **Manage Entries...** opens
+a two-column table where mappings can be added, edited, or deleted without
+manually maintaining `source -> replacement` lines. TL -> TL entries are applied
+locally to correct model output; JP -> TL entries are additional instructions
+sent to the selected model.
+
 ## Controller Use
 
 The control panel supports an XInput-compatible controller without a keyboard
@@ -236,6 +242,8 @@ exits.
 The plugin setup window can browse for the Translator executable, JoyToKey
 executable, and JoyToKey profile folder. Big Box uses a controller-native path
 browser, while LaunchBox retains the standard Windows file and folder pickers.
+The setup window also provides **Open JRPG Translator...** for first-time API,
+hotkey, capture, and overlay configuration before using background launches.
 See
 [`integrations/launchbox/README.md`](integrations/launchbox/README.md) for build,
 packaging, and installation instructions.
@@ -251,6 +259,10 @@ GEMINI_API_KEY=your_key
 
 The control panel can alternatively store keys in `Settings/.env`. This is a
 plain-text file: do not commit it, upload it, or include it in shared archives.
+
+The **API Keys** tab can open Windows Environment Variables directly. If a
+selected provider has no configured key, the relevant overlay identifies the
+missing OpenAI or Gemini key instead of leaving a loading indicator active.
 
 Screenshots and audio sent for translation are processed by the selected API
 provider. Review the provider's current data and privacy terms before use.
@@ -335,6 +347,8 @@ intentional repository assets.
 
 ## Troubleshooting
 
+- If an overlay reports a missing API key, add it through **API Keys** or set the
+  provider's Windows user environment variable and restart JRPG Translator.
 - If a request fails, verify the selected model name and confirm that the API
   key has access to that model.
 - If the wrong playback source is translated, refresh and reselect the device

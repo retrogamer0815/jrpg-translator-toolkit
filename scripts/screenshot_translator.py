@@ -163,6 +163,13 @@ if PROVIDER == "openai":
         file_var="OPENAI_API_KEY_FILE",
     )
     if not OPENAI_API_KEY:
+        atomic_write_text(
+            OCR_TXT,
+            "OpenAI API key missing.\n\n"
+            "Add it in the API Keys tab, or set OPENAI_API_KEY in Windows "
+            "Environment Variables and restart JRPG Translator.",
+        )
+        atomic_write_text(OCR_DONE, str(time.time_ns()))
         print("Missing OPENAI_API_KEY (or *_LOCAL / _FILE).", file=sys.stderr)
         sys.exit(1)
 
@@ -185,6 +192,14 @@ if PROVIDER == "gemini":
         file_var="GEMINI_API_KEY_FILE",
     )
     if not GEMINI_API_KEY:
+        atomic_write_text(
+            OCR_TXT,
+            "Gemini API key missing.\n\n"
+            "Add it in the API Keys tab, or set GEMINI_API_KEY (or "
+            "GOOGLE_API_KEY) in Windows Environment Variables and restart "
+            "JRPG Translator.",
+        )
+        atomic_write_text(OCR_DONE, str(time.time_ns()))
         print("Missing GEMINI_API_KEY/GOOGLE_API_KEY (or *_LOCAL / _FILE).", file=sys.stderr)
         sys.exit(1)
 

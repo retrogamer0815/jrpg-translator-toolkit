@@ -14,7 +14,7 @@ DllCall("shell32\SetCurrentProcessExplicitAppUserModelID", "wstr", "JRPGTranslat
 global CP_BACKGROUND_START := false
 global CP_START_PROFILE := ""
 global CP_START_TRANSLATOR := false
-global APP_VERSION := "0.9.3-dev"
+global APP_VERSION := "0.9.3"
 global PROJECT_URL := "https://github.com/retrogamer0815/jrpg-translator-toolkit"
 global BUG_REPORT_URL := PROJECT_URL "/issues/new"
 for __cpIndex, __cpArg in A_Args {
@@ -2096,6 +2096,53 @@ CPForwardIfComboOpen(keyName) {
     return true
 }
 
+CPNavControlsViewTab(dir) {
+    global rbControlsKeyboard, rbControlsController
+    global hkEdits, CPControllerBindingEdits, hotkeyActions
+    if (dir != "Left" && dir != "Right" && dir != "Down")
+        return false
+    if !(IsSet(rbControlsKeyboard) && rbControlsKeyboard
+        && IsSet(rbControlsController) && rbControlsController)
+        return false
+
+    focusedHwnd := CPFocusedHwnd()
+    if (focusedHwnd != rbControlsKeyboard.Hwnd
+        && focusedHwnd != rbControlsController.Hwnd)
+        return false
+
+    if (dir = "Down") {
+        inputMap := focusedHwnd = rbControlsKeyboard.Hwnd
+            ? hkEdits : CPControllerBindingEdits
+        for actionKey in hotkeyActions {
+            if !inputMap.Has(actionKey)
+                continue
+            inputCtrl := inputMap[actionKey]
+            if (inputCtrl && inputCtrl.Hwnd
+                && DllCall("user32\IsWindowVisible", "ptr", inputCtrl.Hwnd, "int")) {
+                CPSetFocusHwnd(inputCtrl.Hwnd)
+                return true
+            }
+        }
+        ; Do not let a missing view control unexpectedly drop focus into the
+        ; global footer; remain on the active view tab instead.
+        return true
+    }
+
+    ; Windows normally moves within a radio group with Left/Right, but the
+    ; control-panel navigation hotkeys intercept those keys first. Switch the
+    ; view explicitly so keyboard arrows and native controller D-pad input
+    ; follow the same predictable two-tab behavior.
+    if (focusedHwnd = rbControlsKeyboard.Hwnd && dir = "Right") {
+        CPSetControlsView("controller", true)
+        CPSetFocusHwnd(rbControlsController.Hwnd)
+    } else if (focusedHwnd = rbControlsController.Hwnd && dir = "Left") {
+        CPSetControlsView("keyboard", true)
+        CPSetFocusHwnd(rbControlsKeyboard.Hwnd)
+    }
+    ; Consume both boundary directions so focus cannot fall out of this row.
+    return true
+}
+
 CPFontSizeAdjustActive() {
     global CPFontSizeAdjustState
     return IsObject(CPFontSizeAdjustState)
@@ -2411,6 +2458,9 @@ CPNavMove(dir, *) {
         return
 
     if CPForwardIfComboOpen(dir)
+        return
+
+    if CPNavControlsViewTab(dir)
         return
 
     curHwnd := CPFocusedHwnd()
@@ -3313,6 +3363,118 @@ EnsureOverlayDir(){
         DirCreate(overlayDir)
 }
 
+CPNormalizeApiSecret(value) {
+    value := Trim(value)
+    if (StrLen(value) >= 2) {
+        firstChar := SubStr(value, 1, 1)
+        lastChar := SubStr(value, -1)
+        if ((firstChar = Chr(34) && lastChar = Chr(34))
+          || (firstChar = "'" && lastChar = "'"))
+            value := SubStr(value, 2, StrLen(value) - 2)
+    }
+    return Trim(value)
+}
+
+CPDotEnvValue(cpEnvText, keyName) {
+    if (cpEnvText = "")
+        return ""
+    if RegExMatch(cpEnvText, "im)^\x{FEFF}?\s*" keyName "\s*=\s*(.*)$", &keyMatch)
+        return CPNormalizeApiSecret(keyMatch[1])
+    return ""
+}
+
+CPApiKeyConfigured(provider) {
+    global envPath
+    provider := StrLower(Trim(provider))
+    if (provider = "gemini") {
+        keyNames := ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_LOCAL_KEY", "GOOGLE_LOCAL_KEY"]
+        fileVarName := "GEMINI_API_KEY_FILE"
+    } else if (provider = "openai") {
+        keyNames := ["OPENAI_API_KEY", "OPENAI_LOCAL_KEY", "OPENAI_API_KEY_LOCAL", "OPENAI_KEY"]
+        fileVarName := "OPENAI_API_KEY_FILE"
+    } else {
+        return true
+    }
+
+    cpEnvText := ""
+    for candidateEnvPath in [envPath, A_ScriptDir "\.env"] {
+        if FileExist(candidateEnvPath) {
+            try cpEnvText := FileRead(candidateEnvPath, "UTF-8")
+            break
+        }
+    }
+
+    for keyName in keyNames {
+        if (CPNormalizeApiSecret(EnvGet(keyName)) != ""
+          || CPDotEnvValue(cpEnvText, keyName) != "")
+            return true
+    }
+
+    keyFile := CPNormalizeApiSecret(EnvGet(fileVarName))
+    if (keyFile = "")
+        keyFile := CPDotEnvValue(cpEnvText, fileVarName)
+    if (keyFile != "") {
+        keyFile := ResolvePath(keyFile)
+        if FileExist(keyFile) {
+            try if (Trim(FileRead(keyFile, "UTF-8")) != "")
+                return true
+        }
+    }
+    return false
+}
+
+CPMissingApiKeyText(provider) {
+    provider := StrLower(Trim(provider))
+    if (provider = "gemini")
+        return "Gemini API key missing.`n`nAdd it in the API Keys tab, or set GEMINI_API_KEY (or GOOGLE_API_KEY) in Windows Environment Variables and restart JRPG Translator."
+    return "OpenAI API key missing.`n`nAdd it in the API Keys tab, or set OPENAI_API_KEY in Windows Environment Variables and restart JRPG Translator."
+}
+
+CPAtomicWriteOverlayMessage(path, text) {
+    tmpPath := path ".tmp"
+    try {
+        if FileExist(tmpPath)
+            FileDelete(tmpPath)
+        FileAppend(text, tmpPath, "UTF-8")
+        FileMove(tmpPath, path, true)
+        return true
+    } catch as ex {
+        try if FileExist(tmpPath)
+            FileDelete(tmpPath)
+        DbgCP("Could not write overlay message: " ex.Message)
+        return false
+    }
+}
+
+CPShowMissingApiKey(provider, target := "translator") {
+    global overlayDir
+    title := (target = "explainer") ? "Explainer" : "Translator"
+    hwnd := CPOverlayWindowHwnd(title)
+    if !hwnd {
+        if (target = "explainer")
+            LaunchExplainerOverlay()
+        else
+            LaunchOverlay()
+        hwnd := CPOverlayWindowHwnd(title)
+    }
+    if hwnd
+        try ShowWindowNoActivate(hwnd)
+
+    EnsureOverlayDir()
+    targetName := (target = "explainer") ? "explainer" : "translator"
+    payloadPath := overlayDir "\message." targetName ".txt"
+    signalPath := overlayDir "\cmd.show_" targetName "_message"
+    if CPAtomicWriteOverlayMessage(payloadPath, CPMissingApiKeyText(provider)) {
+        try {
+            if FileExist(signalPath)
+                FileDelete(signalPath)
+            FileAppend("", signalPath, "UTF-8")
+        } catch as ex {
+            DbgCP("Could not signal overlay message: " ex.Message)
+        }
+    }
+}
+
 SignalExplainerBusy() {
     global overlayDir
     oldMode := A_TitleMatchMode
@@ -3940,7 +4102,14 @@ ExplainNow(*) {
         MsgBox("Set valid paths for python.exe and explainer script first.`n`npythonExe:`n" px "`n`nexplainer:`n" ex, "Missing", 48)
         return
     }
-	
+
+    prov := StrLower(Trim(explainProvider))
+    if !CPApiKeyConfigured(prov) {
+        CPShowMissingApiKey(prov, "explainer")
+        DbgCP("ExplainNow blocked: " prov " API key is missing")
+        return
+    }
+
 	; Use the selected EXPLAIN profile
     p := ExplainProfilePath(Trim(ddlEPr.Text))
     if FileExist(p)
@@ -3953,7 +4122,6 @@ ExplainNow(*) {
         EnvSet "JRPG_DEBUG", (debugMode ? "1" : "0")
 
     ; Provider/model for explainer: use Explanation tab
-    prov := StrLower(Trim(explainProvider))
     EnvSet("EXPLAIN_PROVIDER", prov)
     if (prov = "gemini") {
         modelToSet := explainGeminiModel
@@ -5367,8 +5535,16 @@ StartAudio(*) {
     geminiAudioModel := tGModel
     audioTargetLang  := tLang
 
-    EnvSet("AUDIO_PROVIDER", (StrLower(audioProvider) = "gemini") ? "gemini" : "openai")
-    EnvSet("TEXT_PROVIDER",  (StrLower(audioProvider) = "gemini") ? "gemini" : "openai")
+    selectedAudioProvider := (StrLower(audioProvider) = "gemini") ? "gemini" : "openai"
+    if !CPApiKeyConfigured(selectedAudioProvider) {
+        CPShowMissingApiKey(selectedAudioProvider, "translator")
+        DbgCP("StartAudio blocked: " selectedAudioProvider " API key is missing")
+        UpdateStatus()
+        return false
+    }
+
+    EnvSet("AUDIO_PROVIDER", selectedAudioProvider)
+    EnvSet("TEXT_PROVIDER",  selectedAudioProvider)
     EnvSet("TRANSLATE_MODEL", trModel)
     EnvSet("GEMINI_AUDIO_MODEL", geminiAudioModel)
     EnvSet("TARGET_LANGUAGE_CODE", AudioTargetCode(audioTargetLang))
@@ -7569,7 +7745,7 @@ ddlPrompt.OnEvent("Change", (*) => (UpdateVars(), SaveAll(), ApplyShotSettings()
 chkDel.GetPos(&delX, &delY, , &delH)
 leftBaseY := delY + delH + 16  ; spacing under the delete checkbox
 
-ui.Add("Text", Format("xm y{} w160", leftBaseY), "Max PNG size (KB):")
+ui.Add("Text", Format("xm y{} w160", leftBaseY), "Maximum PNG size (KB):")
 eCapMax := ui.Add("Edit", "x+m yp w80 Number", capMaxKB)
 txtCapMaxHint := ui.Add("Text", "x+8 yp w44 h23 Hidden Center Border +0x200", "A")
 eCapMax.OnEvent("Change", (*) => SetCapMaxKBFromUI(eCapMax.Value))
@@ -7705,7 +7881,7 @@ twControlW := 280
 twSwatchW := 84
 twSwatchX := twLabelX + twLabelW + pad + twControlW - twSwatchW
 
-ui.Add("Text", "x" twLabelX " y+10 w" twLabelW, "Overlay Transparency:")
+ui.Add("Text", "x" twLabelX " y+10 w" twLabelW, "Overlay Opacity:")
 slTrans := ui.Add("Slider", "x+m w" twControlW " Range0-255 ToolTip")
 lblTransPct := ui.Add("Text", "x+m", "100%")
 
@@ -7849,7 +8025,7 @@ ewControlW := twControlW
 ewSwatchW := twSwatchW
 ewSwatchX := twSwatchX
 
-ui.Add("Text", "x" ewLabelX " y+10 w" ewLabelW, "Overlay Transparency:")
+ui.Add("Text", "x" ewLabelX " y+10 w" ewLabelW, "Overlay Opacity:")
 slTrans_EW := ui.Add("Slider", "x+m w" ewControlW " Range0-255 ToolTip")
 lblTransPct_EW := ui.Add("Text", "x+m", "100%")
 
@@ -8264,9 +8440,9 @@ eOpenAI := ui.Add("Edit", "x+m w420 Password")
 btnSaveEnv  := ui.Add("Button", "xm y+14 w120", "Save Keys")
 btnDelEnv   := ui.Add("Button", "x+8 w120", "Delete .env")
 
-; About is intentionally placed at the bottom of this normally visible tab
-; instead of adding more permanent width to the responsive footer.
-btnAbout := ui.Add("Button", "xm y+34 w120", "About...")
+; Keep About in the same visible action row, but far enough left that its full
+; width remains inside the preferred magnetic-snap width at scaled DPIs.
+btnAbout := ui.Add("Button", "x670 yp w120", "About...")
 
 OpenWindowsEnvironmentVariables(*) {
     try Run('"' A_WinDir '\System32\rundll32.exe" sysdm.cpl,EditEnvironmentVariables')

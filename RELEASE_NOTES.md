@@ -1,63 +1,93 @@
-# JRPG Translator v0.9.2
+# JRPG Translator v0.9.3
 
-Version 0.9.2 is a usability and reliability update for the controller-first
-0.9 workflow. It makes the control panel behave naturally at smaller sizes,
-finishes the Terminology Overrides on/off workflow, and prevents unrelated
-glossary names from appearing as translated speakers.
+Version 0.9.3 expands terminology management and improves the controller-first
+workflow while adding clearer feedback and stronger recovery behavior across
+screenshot, live-audio, and explanation requests.
 
 ## Highlights
 
-### Better compact-window behavior
+### Terminology tables and independent profiles
 
-The control panel now has preferred horizontal and vertical resize points. When
-resizing close to either point, the corresponding edge settles into the ideal
-size without moving the window elsewhere on screen.
+Terminology overrides no longer need to be maintained as raw
+`source -> replacement` text during normal use. **Manage Entries...** opens a
+two-column table with Add, Edit, and Delete actions and validation for malformed
+or duplicate entries. A raw repair editor remains available for files that
+cannot be represented safely in the table.
 
-The footer keeps its proper height and opaque background while moving over the
-scrollable tab content as the window becomes shorter. A vertical scrollbar
-appears only after shrinking below the preferred height. Narrow windows wrap
-controller guidance instead of clipping it, and squeezed top-level tabs no
-longer appear a second time below the tab row.
+JP -> TL and TL -> TL profiles are now managed independently. The revised tab
+puts local TL -> TL correction first and explains that it is useful for fixing
+model output over time. JP -> TL guidance now makes clear that those mappings
+are model instructions and can be affected by the model and prompt complexity.
 
-### Safer terminology overrides
+### Safer screenshot output
 
-The Terminology Overrides tab now includes **Use terminology overrides**. Turning
-it off prevents JP -> TL entries from being sent to translation or explanation
-models and prevents local TL -> TL replacement. The setting takes effect
-immediately and is stored in Profiles, including Profiles selected through the
-LaunchBox / Big Box integration.
+Screenshot translation now detects strong signs of glossary contamination,
+including unrelated glossary targets and mixed Latin/Japanese words such as a
+partially translated name. It can retry once using only exact glossary sources
+found in the transcript while retaining the original usable result as a safe
+fallback.
 
-JP -> TL instructions now define every entry as a strict conditional exact
-match. Screenshot translations also validate translated speaker headers against
-the Japanese transcript. If a target belonging to a different Japanese source
-is detected, the request is retried once with only glossary entries actually
-present in the transcript.
+A capture that cannot be reduced below **Maximum PNG size** now receives its
+own explanation instead of the misleading `No target set` message. The overlay
+also reports the smallest attempted PNG and recommends a practical limit.
 
-### Controller-only editing
+### Easier-to-close overlays
 
-Controller B / Circle can close prompt and terminology text editors, so small
-changes no longer require reaching for a mouse just to leave the editor.
+The control-panel title-bar X now closes the complete application, matching
+**Close all**. Translator and Explainer overlays gain discreet borderless
+`...` and `×` controls when the pointer enters the window, and their context
+menus name the specific overlay being closed.
 
-Translation-only prompts now format speaker headers consistently, improving
-speaker-name color detection.
+### Clearer request and API-key feedback
 
-### Cleaner saving behavior
+Explanation requests show **Generating explanation...** immediately, followed
+by the existing completion or failure message.
 
-The manual **Save** button now lives in the optional Paths tab, where it remains
-available for manually edited paths and Debug mode. The footer's **Always on
-top** setting saves automatically, and redundant dirty-state handling has been
-removed.
+When the selected provider has no API key, screenshot translation, audio
+translation, and explanations now stop before launching their worker and show a
+clear OpenAI- or Gemini-specific message in the appropriate overlay. Worker-level
+fallbacks provide the same result when a Python script is launched separately.
 
-### Additional fixes
+The API Keys tab now recommends Windows Environment Variables first, opens the
+Windows editor directly, and separates optional in-app `.env` storage into its
+own section. A new About dialog provides version, author, license, project and
+bug-report links, contact information, and copyable diagnostics.
 
-- Reorganized Controller inputs to fit the preferred control-panel height.
-- Fixed footer transparency and control-order artifacts while resizing.
-- Fixed an artifact covering part of the Audio Translation output-language
-  dropdown.
+### Live-audio resilience
+
+Temporary DNS, network, WebSocket, rate-limit, and service-availability failures
+now reconnect automatically with bounded backoff. Authentication and other
+configuration errors still fail immediately.
+
+Audio-process status no longer performs a WMI/COM scan every second. Normal
+monitoring uses the process ID returned at launch, with WMI retained only as a
+one-time recovery fallback. This prevents the AutoHotkey memory error observed
+after the program was left unattended.
+
+### Controller and interface refinements
+
+- Left/Right now switches between **Keyboard inputs** and **Controller inputs**
+  using either keyboard arrows or the controller D-pad.
+- Down from **Keyboard inputs** enters the first shortcut field instead of
+  skipping the entire shortcut list.
+- Both overlay sliders now use the label **Opacity**.
+- **Maximum PNG size** is aligned more clearly, and **About...** remains visible
+  at the preferred magnetic-snap size.
+
+### LaunchBox / Big Box and documentation
+
+The per-game setup window now includes **Open JRPG Translator...** with concise
+first-time guidance. It helps users configure API keys, hotkeys, capture, and
+overlay settings before relying on hidden background launches. The window was
+resized and rearranged so its final explanatory lines remain visible.
+
+The repository README now includes a visual showcase for screenshot
+translation, transcripts with kanji readings, explanations, live audio, and
+LaunchBox integration, with an updated plugin screenshot.
 
 ## Included source
 
-The repository contains the AutoHotkey control panel and overlay, Python
+The repository contains the AutoHotkey control panel and overlays, Python
 translation scripts, bundled multilingual prompts, and LaunchBox / Big Box
 plugin source. Personal API keys, Profiles, runtime settings, compiled
 executables, backups, logs, screenshots, and generated user data are not

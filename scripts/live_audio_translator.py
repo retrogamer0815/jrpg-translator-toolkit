@@ -767,7 +767,22 @@ def main():
         detail = traceback.format_exc()
         write_error(detail)
         try:
-            atomic_write_text(AUDIO_TXT, "Live audio error - see audio_error.txt")
+            if "OPENAI_API_KEY missing" in detail:
+                overlay_error = (
+                    "OpenAI API key missing.\n\n"
+                    "Add it in the API Keys tab, or set OPENAI_API_KEY in Windows "
+                    "Environment Variables and restart JRPG Translator."
+                )
+            elif "GEMINI_API_KEY or GOOGLE_API_KEY missing" in detail:
+                overlay_error = (
+                    "Gemini API key missing.\n\n"
+                    "Add it in the API Keys tab, or set GEMINI_API_KEY (or "
+                    "GOOGLE_API_KEY) in Windows Environment Variables and restart "
+                    "JRPG Translator."
+                )
+            else:
+                overlay_error = "Live audio error - see audio_error.txt"
+            atomic_write_text(AUDIO_TXT, overlay_error)
         except Exception:
             pass
         print(detail, file=sys.stderr)

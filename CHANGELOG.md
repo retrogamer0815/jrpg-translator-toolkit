@@ -2,6 +2,104 @@
 
 All notable changes to JRPG Translator are documented here.
 
+## 0.9.3 - 2026-08-02
+
+This release expands terminology management, improves controller-only setup,
+makes borderless overlays easier to close, and adds clearer recovery and error
+feedback across screenshot, audio, and explanation workflows.
+
+### Terminology override management
+
+- Replaced raw-text editing as the normal workflow with a two-column terminology
+  table showing the detected/model output on the left and its replacement on the
+  right.
+- Added dedicated Add, Edit, and Delete actions with validation for empty,
+  malformed, and duplicate source entries.
+- Kept a raw repair editor available when an existing glossary contains lines
+  that cannot be represented safely in the table.
+- Separated JP -> TL and TL -> TL profile creation and deletion. Each glossary
+  type now has its own independent profile list instead of implicitly creating
+  or removing the other type.
+- Renamed the profile controls to make Manage Entries, New Profile, and Delete
+  Profile behavior explicit.
+- Reordered the tab to present local TL -> TL correction first and explain that
+  these entries can be collected during play or added preemptively.
+- Clarified that JP -> TL mappings are sent to the selected model and may be
+  ignored or applied unexpectedly depending on the model and prompt complexity.
+- Made terminology warnings and validation messages owned dialogs so they remain
+  above the manager and entry windows.
+
+### Screenshot translation safeguards
+
+- Added local detection for malformed mixed-script output such as partially
+  translated names containing both Latin and Japanese characters.
+- Detects a JP -> TL target used in dialogue when its exact Japanese source is
+  absent from the transcript.
+- Suspicious glossary-influenced output is retried once with only exact glossary
+  sources found in the transcript; the original usable response remains the
+  fallback if the corrective request fails.
+- Distinguished a missing capture target from a PNG size limit that is too low.
+  The overlay now gives a dedicated explanation and recommends increasing the
+  configured limit instead of incorrectly reporting that no target was set.
+- Improved progressive PNG reduction and reports the smallest attempted image
+  when the configured limit still cannot be reached safely.
+
+### Overlay access and request feedback
+
+- The control-panel title-bar X now performs the same complete shutdown as
+  Close all, preventing hidden overlays from being left running accidentally.
+- Added discreet borderless `...` and `×` controls that appear when the pointer
+  enters either overlay, without adding a title bar or disturbing overlay text.
+- Renamed the context-menu exit action to identify the Translator or Explainer
+  overlay it closes.
+- Added a `Generating explanation...` notification as soon as an explanation
+  request is accepted, followed by the existing completion or failure feedback.
+- Missing OpenAI or Gemini keys now produce a provider-specific message in the
+  appropriate overlay for screenshot translation, live audio, and explanations.
+  Requests are stopped before a worker starts, and Python-level fallbacks cover
+  independently launched scripts.
+
+### Live audio reliability
+
+- Added automatic reconnection with bounded backoff for temporary DNS, network,
+  WebSocket, rate-limit, and service-availability failures.
+- Authentication and other configuration failures remain immediate errors
+  instead of being retried indefinitely.
+- Replaced per-second WMI/COM process scans with direct PID tracking. WMI is now
+  used only as a one-time recovery fallback, preventing the AutoHotkey memory
+  failure seen after leaving the application unattended.
+
+### API setup and application information
+
+- Reorganized API Keys into a recommended Windows Environment Variables section
+  and a clearly separated optional in-app `.env` section.
+- Added a button that opens the Windows Environment Variables editor directly
+  and updated the accompanying setup instructions.
+- Added an About dialog with the application version, author, license, GitHub
+  and bug-report links, X contact, and copyable diagnostic version information.
+
+### Controller and interface refinements
+
+- Keyboard/controller arrows and the controller D-pad can now switch between
+  Keyboard inputs and Controller inputs in the Controls tab.
+- Pressing Down on Keyboard inputs now enters the first shortcut field instead
+  of skipping the shortcut list and jumping to the footer.
+- Standardized both overlay sliders on the term `Opacity` and expanded `Max PNG
+  size` to `Maximum PNG size` for clearer alignment.
+- Moved About into the API action row so it remains visible at the preferred
+  magnetic-snap width and height.
+
+### LaunchBox / Big Box integration and documentation
+
+- Added `Open JRPG Translator...` to the per-game setup window for first-time
+  API, hotkey, capture, and overlay configuration, and for bringing an existing
+  control panel forward.
+- Added concise first-time guidance beside the button and enlarged/rearranged
+  the setup window so all explanatory text remains visible.
+- Added a visual README showcase for screenshot translation, transcripts with
+  kanji readings, explanations, live audio translation, and LaunchBox setup,
+  including an updated plugin screenshot.
+
 ## 0.9.2 - 2026-07-26
 
 This maintenance release improves compact-window behavior, finishes the

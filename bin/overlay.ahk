@@ -525,6 +525,73 @@ ResolvePath(p) {
     return base "\" expanded
 }
 
+OverlayNormalizeApiSecret(value) {
+    value := Trim(value)
+    if (StrLen(value) >= 2) {
+        firstChar := SubStr(value, 1, 1)
+        lastChar := SubStr(value, -1)
+        if ((firstChar = Chr(34) && lastChar = Chr(34))
+          || (firstChar = "'" && lastChar = "'"))
+            value := SubStr(value, 2, StrLen(value) - 2)
+    }
+    return Trim(value)
+}
+
+OverlayDotEnvValue(envBody, keyName) {
+    if (envBody = "")
+        return ""
+    if RegExMatch(envBody, "im)^\x{FEFF}?\s*" keyName "\s*=\s*(.*)$", &keyMatch)
+        return OverlayNormalizeApiSecret(keyMatch[1])
+    return ""
+}
+
+OverlayApiKeyConfigured(provider) {
+    global APP_ROOT
+    provider := StrLower(Trim(provider))
+    if (provider = "gemini") {
+        keyNames := ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_LOCAL_KEY", "GOOGLE_LOCAL_KEY"]
+        fileVarName := "GEMINI_API_KEY_FILE"
+    } else if (provider = "openai") {
+        keyNames := ["OPENAI_API_KEY", "OPENAI_LOCAL_KEY", "OPENAI_API_KEY_LOCAL", "OPENAI_KEY"]
+        fileVarName := "OPENAI_API_KEY_FILE"
+    } else {
+        return true
+    }
+
+    envBody := ""
+    for candidateEnvPath in [APP_ROOT "\Settings\.env", APP_ROOT "\.env"] {
+        if FileExist(candidateEnvPath) {
+            try envBody := FileRead(candidateEnvPath, "UTF-8")
+            break
+        }
+    }
+
+    for keyName in keyNames {
+        if (OverlayNormalizeApiSecret(EnvGet(keyName)) != ""
+          || OverlayDotEnvValue(envBody, keyName) != "")
+            return true
+    }
+
+    keyFile := OverlayNormalizeApiSecret(EnvGet(fileVarName))
+    if (keyFile = "")
+        keyFile := OverlayDotEnvValue(envBody, fileVarName)
+    if (keyFile != "") {
+        keyFile := ResolvePath(keyFile)
+        if FileExist(keyFile) {
+            try if (Trim(FileRead(keyFile, "UTF-8")) != "")
+                return true
+        }
+    }
+    return false
+}
+
+OverlayMissingApiKeyText(provider) {
+    provider := StrLower(Trim(provider))
+    if (provider = "gemini")
+        return "Gemini API key missing.`n`nAdd it in the API Keys tab, or set GEMINI_API_KEY (or GOOGLE_API_KEY) in Windows Environment Variables and restart JRPG Translator."
+    return "OpenAI API key missing.`n`nAdd it in the API Keys tab, or set OPENAI_API_KEY in Windows Environment Variables and restart JRPG Translator."
+}
+
 ; --- Private fonts from .\fonts (FR_PRIVATE, process-local) ---------------------
 LoadPrivateFonts(){
     static loaded := false
@@ -2204,7 +2271,7 @@ ShowCaptureFailure(failureReason) {
         SetTimer(() => ToolTip(""), -1600)
         detail := "The screenshot was captured, but it could not be reduced below "
             . limitKB . " KB without becoming too small.`n`n"
-            . "Increase `"Max PNG size (KB)`" in Screenshot Translation. "
+            . "Increase `"Maximum PNG size (KB)`" in Screenshot Translation. "
             . "1400 KB or higher is recommended."
         if (smallestKB > 0)
             detail .= "`n`nSmallest attempted PNG: " smallestKB " KB at " smallestSize "."
@@ -3662,6 +3729,7 @@ redefineRegion(*) {
 
 flushTranslate(files := unset) {
     global ShotBuf, pythonExe, translatorPy, ControlIni
+    global deleteAfterUse, deleteDelayMs
     local fileList, n
 
     px := ResolvePath(pythonExe)
@@ -3690,11 +3758,21 @@ flushTranslate(files := unset) {
         return
     }
 
+    provider := StrLower(Trim(IniRead(ControlIni, "cfg", "imgProvider", "openai")))
+    if !OverlayApiKeyConfigured(provider) {
+        if (IsSet(files) && deleteAfterUse) {
+            filesToDelete := fileList.Clone()
+            SetTimer(() => DeleteFiles(filesToDelete), -deleteDelayMs)
+        }
+        showText(OverlayMissingApiKeyText(provider))
+        Dbg("Translation blocked: " provider " API key is missing")
+        return
+    }
+
     ToolTip()
     ShowOverlayStatus()
 	; === Re-read Control Panel settings just-in-time and export to env ===
 ; Read the same keys the Control Panel writes into control.ini
-provider       := IniRead(ControlIni, "cfg", "imgProvider",       "openai")
 imgModel       := IniRead(ControlIni, "cfg", "imgModel",          "gpt-4o")
 geminiImgModel := IniRead(ControlIni, "cfg", "geminiImgModel",    "gemini-2.5-flash")
 promptProfile  := IniRead(ControlIni, "cfg", "promptProfile",     "default")
@@ -3932,6 +4010,10 @@ global __CMD_ONESHOT_TRANSLATE := OVERLAY_TEMP_DIR "\cmd.oneshot_translate"
 global __CMD_TAKE_SCREENSHOT := OVERLAY_TEMP_DIR "\cmd.take_screenshot"
 global __CMD_SCREENSHOT_TRANSLATION := OVERLAY_TEMP_DIR "\cmd.screenshot_translation"
 global __CMD_EXPLAIN_START := OVERLAY_TEMP_DIR "\cmd.explain_start"
+global __CMD_SHOW_TRANSLATOR_MESSAGE := OVERLAY_TEMP_DIR "\cmd.show_translator_message"
+global __CMD_SHOW_EXPLAINER_MESSAGE := OVERLAY_TEMP_DIR "\cmd.show_explainer_message"
+global __TRANSLATOR_MESSAGE_FILE := OVERLAY_TEMP_DIR "\message.translator.txt"
+global __EXPLAINER_MESSAGE_FILE := OVERLAY_TEMP_DIR "\message.explainer.txt"
 ; ------------------------------------------
 
 CheckHotkeyReload() {
@@ -3946,7 +4028,8 @@ CheckHotkeyReload() {
 CheckCmdSignals() {
     global __CMD_TOGGLE_EXPL, __CMD_TOGGLE_TRANSLATOR, __CMD_RECAPTURE_REGION
     global __CMD_ONESHOT_TRANSLATE, __CMD_TAKE_SCREENSHOT, __CMD_SCREENSHOT_TRANSLATION
-    global __CMD_EXPLAIN_START
+    global __CMD_EXPLAIN_START, __CMD_SHOW_TRANSLATOR_MESSAGE, __CMD_SHOW_EXPLAINER_MESSAGE
+    global __TRANSLATOR_MESSAGE_FILE, __EXPLAINER_MESSAGE_FILE
     global __EXPLAIN_MODE
     ; Only Explainer reacts to this command
     if (__EXPLAIN_MODE && FileExist(__CMD_TOGGLE_EXPL)) {
@@ -3957,12 +4040,22 @@ CheckCmdSignals() {
         try FileDelete(__CMD_EXPLAIN_START)
         try ShowOverlayStatus()
     }
+    if (__EXPLAIN_MODE && FileExist(__CMD_SHOW_EXPLAINER_MESSAGE)) {
+        try FileDelete(__CMD_SHOW_EXPLAINER_MESSAGE)
+        try if FileExist(__EXPLAINER_MESSAGE_FILE)
+            showText(FileRead(__EXPLAINER_MESSAGE_FILE, "UTF-8"))
+    }
     ; Only Translator reacts to screenshot commands
     if (__EXPLAIN_MODE)
         return
     if FileExist(__CMD_TOGGLE_TRANSLATOR) {
         try FileDelete(__CMD_TOGGLE_TRANSLATOR)
         try ToggleTop()
+    }
+    if FileExist(__CMD_SHOW_TRANSLATOR_MESSAGE) {
+        try FileDelete(__CMD_SHOW_TRANSLATOR_MESSAGE)
+        try if FileExist(__TRANSLATOR_MESSAGE_FILE)
+            showText(FileRead(__TRANSLATOR_MESSAGE_FILE, "UTF-8"))
     }
     if FileExist(__CMD_RECAPTURE_REGION) {
         try FileDelete(__CMD_RECAPTURE_REGION)

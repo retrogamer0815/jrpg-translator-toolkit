@@ -542,6 +542,21 @@ try:
         raise RuntimeError(f"Unknown provider: {PROVIDER}")
 
 except Exception as e:
+    error_text = str(e)
+    if "Missing OPENAI_API_KEY" in error_text:
+        atomic_write_text(
+            EXPLAINER_TXT,
+            "OpenAI API key missing.\n\n"
+            "Add it in the API Keys tab, or set OPENAI_API_KEY in Windows "
+            "Environment Variables and restart JRPG Translator.",
+        )
+    elif "Missing GEMINI_API_KEY/GOOGLE_API_KEY" in error_text:
+        atomic_write_text(
+            EXPLAINER_TXT,
+            "Gemini API key missing.\n\n"
+            "Add it in the API Keys tab, or set GEMINI_API_KEY (or GOOGLE_API_KEY) "
+            "in Windows Environment Variables and restart JRPG Translator.",
+        )
     print(f"(Python error) Explain call failed: {e}", file=sys.stderr)
     sys.exit(1)
 
