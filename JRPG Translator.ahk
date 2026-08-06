@@ -2,7 +2,7 @@
 #SingleInstance Off
 #Warn
 #NoTrayIcon
-;@Ahk2Exe-SetVersion 0.9.3.0
+;@Ahk2Exe-SetVersion 0.9.4.0
 ;@Ahk2Exe-SetName JRPG Translator
 ;@Ahk2Exe-SetDescription JRPG Translator
 ;@Ahk2Exe-SetCopyright Copyright (c) 2025 retrogamer0815
@@ -14,7 +14,9 @@ DllCall("shell32\SetCurrentProcessExplicitAppUserModelID", "wstr", "JRPGTranslat
 global CP_BACKGROUND_START := false
 global CP_START_PROFILE := ""
 global CP_START_TRANSLATOR := false
-global APP_VERSION := "0.9.3"
+global CP_STUDY_START_MODE := ""
+global CP_STUDY_ONLY_PROCESS := false
+global APP_VERSION := "0.9.4-dev"
 global PROJECT_URL := "https://github.com/retrogamer0815/jrpg-translator-toolkit"
 global BUG_REPORT_URL := PROJECT_URL "/issues/new"
 global WRITTEN_GUIDE_URL := PROJECT_URL "#quick-start"
@@ -25,6 +27,14 @@ for __cpIndex, __cpArg in A_Args {
         CP_BACKGROUND_START := true
     } else if (__cpArgLower = "--open-translator") {
         CP_START_TRANSLATOR := true
+    } else if (__cpArgLower = "--study-library") {
+        CP_STUDY_START_MODE := "library"
+        CP_STUDY_ONLY_PROCESS := true
+        CP_BACKGROUND_START := true
+    } else if (__cpArgLower = "--study-reader") {
+        CP_STUDY_START_MODE := "reader"
+        CP_STUDY_ONLY_PROCESS := true
+        CP_BACKGROUND_START := true
     } else if (__cpArgLower = "--profile" && __cpIndex < A_Args.Length) {
         CP_START_PROFILE := A_Args[__cpIndex + 1]
     } else if RegExMatch(__cpArg, "i)^--profile=(.*)$", &__cpProfileMatch) {
@@ -66,6 +76,8 @@ global CPMaxPngAdjustState := Map("active", false)
 global CPMaxPngAdjustSyncing := false
 global CPControllerColorDialogState := Map("active", false)
 global CPWelcomeDialog := 0
+global CPStudyLibraryState := 0
+global CPStudyReaderState := 0
 
 CloseControlPanelMutex(*) {
     global __CP_MUTEX
@@ -104,8 +116,22 @@ SendControlPanelCopyData(hwnd, payload) {
         , "ptr", 0, "ptr", cpCopyData.Ptr, "ptr")
 }
 
+SendControlPanelCopyDataWithRetry(hwnd, payload, timeoutMs := 10000) {
+    if !hwnd
+        return false
+    cpDeadline := A_TickCount + timeoutMs
+    loop {
+        if SendControlPanelCopyData(hwnd, payload)
+            return true
+        if (A_TickCount >= cpDeadline || !WinExist("ahk_id " hwnd))
+            return false
+        Sleep(60)
+    }
+}
+
 if (__CP_ALREADY_RUNNING) {
-    if (!CP_BACKGROUND_START || CP_START_PROFILE != "") {
+    if (!CP_BACKGROUND_START || CP_START_PROFILE != ""
+        || CP_STUDY_START_MODE != "") {
         __cpOldDhw := A_DetectHiddenWindows
         __cpOldTitleMode := A_TitleMatchMode
         try {
@@ -114,8 +140,18 @@ if (__CP_ALREADY_RUNNING) {
             __cpExistingHwnd := WinExist("JRPG Translator")
             if (__cpExistingHwnd) {
                 if (CP_START_PROFILE != "")
-                    SendControlPanelCopyData(__cpExistingHwnd, "apply_profile=" CP_START_PROFILE)
-                if (!CP_BACKGROUND_START) {
+                    SendControlPanelCopyDataWithRetry(
+                        __cpExistingHwnd, "apply_profile=" CP_START_PROFILE
+                    )
+                if (CP_STUDY_START_MODE = "library") {
+                    SendControlPanelCopyDataWithRetry(
+                        __cpExistingHwnd, "open_study_library"
+                    )
+                } else if (CP_STUDY_START_MODE = "reader") {
+                    SendControlPanelCopyDataWithRetry(
+                        __cpExistingHwnd, "open_study_reader"
+                    )
+                } else if (!CP_BACKGROUND_START) {
                     DllCall("user32\ShowWindow", "ptr", __cpExistingHwnd, "int", 5) ; SW_SHOW
                     try WinActivate("ahk_id " __cpExistingHwnd)
                 }
@@ -155,6 +191,12 @@ ArrIndexOf(arr, needle) {
 ; --- Explanations archive folder (global) ---
 explainsDir := A_ScriptDir "\Settings\Explanations"
 DirCreate(explainsDir)
+; Keep the original folder as the non-migrating Default library. Additional
+; libraries live beside it and are selected through the Study Library window.
+studyLibraryDefaultDir := A_ScriptDir "\Settings\Study Library"
+studyLibrariesRoot := A_ScriptDir "\Settings\Study Libraries"
+studyLibrariesArchiveRoot := A_ScriptDir "\Settings\Study Libraries Archive"
+studyLibraryDir := studyLibraryDefaultDir
 
 ; --- Feature flag for the new "Explanation Window" tab ---
 global CP_ENABLE_EXPLAINER_DESIGN := true
@@ -232,6 +274,16 @@ global CPThemeBrushWindow := 0
 global CPThemeBrushSurface := 0
 global CPThemeBrushFocus := 0
 global CPThemeMutedHwnds := Map()
+global CPThemedDialogHwnds := Map()
+global CPStudyThemedComboHwnds := Map()
+global CPStudyThemedHeaderHwnds := Map()
+global CPStudyThemedListHwnds := Map()
+global CPStudyComboSubclassCallback := 0
+global CPStudyHeaderSubclassCallback := 0
+global CPStudyListSubclassCallback := 0
+global CPStudyVisualOverlays := Map()
+global CPStudyTransparentHwnds := Map()
+global CPStudyTransparentCallback := 0
 global CPThemeColorSwatchHwnds := Map()
 global CPColorFocusFrame := []
 global CPControllerColorGradientSliders := Map()
@@ -258,6 +310,10 @@ global CPCanvasFixedXHwnds := Map()
 global CPCanvasFixedYHwnds := Map()
 global CPCanvasClipStates := Map()
 global CPCanvasSiblingClipHwnds := Map()
+global CPCanvasPendingScrollX := 0
+global CPCanvasPendingScrollY := 0
+global CPCanvasPendingScrollValid := false
+global CPCanvasScrollFlushScheduled := false
 global CPPreferredViewportW := CP_CANVAS_MIN_W
 global CPPreferredViewportH := CP_CANVAS_MIN_H
 global CPWindowWidthSnapActive := false
@@ -306,12 +362,78 @@ CPCanvasDirectControls() {
     return controls
 }
 
-CPCanvasMoveChildren(dx, dy, redraw := true, manageRedraw := true) {
+CPCanvasMoveChildrenDeferred(dx, dy) {
+    global ui, CPCanvasFixedXHwnds, CPCanvasFixedYHwnds
+
+    movableControls := []
+    for ctrl in CPCanvasDirectControls() {
+        ctrlDx := CPCanvasFixedXHwnds.Has(ctrl.Hwnd) ? 0 : dx
+        ctrlDy := CPCanvasFixedYHwnds.Has(ctrl.Hwnd) ? 0 : dy
+        if (ctrlDx || ctrlDy)
+            movableControls.Push(Map("ctrl", ctrl, "dx", ctrlDx, "dy", ctrlDy))
+    }
+    if !movableControls.Length
+        return true
+
+    dpi := 96
+    try dpi := Max(96, DllCall("user32\GetDpiForWindow", "ptr", ui.Hwnd, "uint"))
+    scale := dpi / 96
+    for entry in movableControls {
+        ctrl := entry["ctrl"]
+        rect := Buffer(16, 0)
+        if !DllCall("user32\GetWindowRect", "ptr", ctrl.Hwnd, "ptr", rect.Ptr, "int")
+            return false
+        point := Buffer(8, 0)
+        NumPut("int", NumGet(rect, 0, "int"), point, 0)
+        NumPut("int", NumGet(rect, 4, "int"), point, 4)
+        if !DllCall("user32\ScreenToClient", "ptr", ui.Hwnd, "ptr", point.Ptr, "int")
+            return false
+
+        entry["x"] := NumGet(point, 0, "int") + Round(entry["dx"] * scale)
+        entry["y"] := NumGet(point, 4, "int") + Round(entry["dy"] * scale)
+    }
+
+    deferred := DllCall("user32\BeginDeferWindowPos", "int", movableControls.Length, "ptr")
+    if !deferred
+        return false
+
+    static SWP_NOSIZE := 0x0001, SWP_NOZORDER := 0x0004, SWP_NOREDRAW := 0x0008
+    static SWP_NOACTIVATE := 0x0010, SWP_NOOWNERZORDER := 0x0200
+    moveFlags := SWP_NOSIZE | SWP_NOZORDER | SWP_NOREDRAW | SWP_NOACTIVATE | SWP_NOOWNERZORDER
+
+    for entry in movableControls {
+        ctrl := entry["ctrl"]
+        deferred := DllCall("user32\DeferWindowPos", "ptr", deferred, "ptr", ctrl.Hwnd
+            , "ptr", 0, "int", entry["x"], "int", entry["y"], "int", 0, "int", 0
+            , "uint", moveFlags, "ptr")
+        if !deferred
+            return false
+    }
+    return DllCall("user32\EndDeferWindowPos", "ptr", deferred, "int") != 0
+}
+
+CPCanvasMoveChildren(dx, dy, redraw := true, manageRedraw := true, updateNow := true) {
     global ui, CPCanvasFixedXHwnds, CPCanvasFixedYHwnds
     if (!dx && !dy)
         return
 
     hwnd := ui.Hwnd
+    ; WinSetTransparent makes the control panel a layered window. Suspending
+    ; redraw for that entire top-level surface exposes intermediate compositor
+    ; frames, so move its children as one deferred, non-redrawing batch instead.
+    exStyle := hwnd ? DllCall("user32\GetWindowLongPtr", "ptr", hwnd, "int", -20, "ptr") : 0
+    if (hwnd && manageRedraw && (exStyle & 0x00080000)
+        && CPCanvasMoveChildrenDeferred(dx, dy)) {
+        CPClipScrollableControlsToViewport(false)
+        if redraw {
+            redrawFlags := 0x0001 | 0x0004 | 0x0080 ; INVALIDATE|ERASE|ALLCHILDREN
+            if updateNow
+                redrawFlags |= 0x0100 ; UPDATENOW
+            DllCall("user32\RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0, "uint", redrawFlags)
+        }
+        return
+    }
+
     if (hwnd && manageRedraw)
         DllCall("user32\SendMessage", "ptr", hwnd, "uint", 0x000B, "ptr", 0, "ptr", 0) ; WM_SETREDRAW
     try {
@@ -329,8 +451,12 @@ CPCanvasMoveChildren(dx, dy, redraw := true, manageRedraw := true) {
     } finally {
         if (hwnd && manageRedraw) {
             DllCall("user32\SendMessage", "ptr", hwnd, "uint", 0x000B, "ptr", 1, "ptr", 0)
-            if redraw
-                DllCall("user32\RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0, "uint", 0x0001 | 0x0004 | 0x0080 | 0x0100)
+            if redraw {
+                redrawFlags := 0x0001 | 0x0004 | 0x0080 ; INVALIDATE|ERASE|ALLCHILDREN
+                if updateNow
+                    redrawFlags |= 0x0100 ; UPDATENOW
+                DllCall("user32\RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0, "uint", redrawFlags)
+            }
         }
     }
 }
@@ -439,7 +565,7 @@ CPCanvasGetScrollInfo(bar) {
     )
 }
 
-CPCanvasScrollTo(newX, newY, redraw := true, manageRedraw := true) {
+CPCanvasScrollTo(newX, newY, redraw := true, manageRedraw := true, updateNow := true) {
     global CPCanvasScrollX, CPCanvasScrollY, CPCanvasScrollMaxX, CPCanvasScrollMaxY
     global CPCanvasViewportW, CPCanvasViewportH, CP_CANVAS_MIN_W, CP_CANVAS_MIN_H
 
@@ -449,10 +575,55 @@ CPCanvasScrollTo(newX, newY, redraw := true, manageRedraw := true) {
     dy := CPCanvasScrollY - newY
     CPCanvasSetScrollInfo(0, CP_CANVAS_MIN_W, CPCanvasViewportW, newX)
     CPCanvasSetScrollInfo(1, CP_CANVAS_MIN_H, CPCanvasViewportH, newY)
-    CPCanvasMoveChildren(dx, dy, redraw, manageRedraw)
+    CPCanvasMoveChildren(dx, dy, redraw, manageRedraw, updateNow)
     CPCanvasScrollX := newX
     CPCanvasScrollY := newY
     return (dx || dy)
+}
+
+CPCanvasQueueScrollTo(newX, newY) {
+    global CPCanvasPendingScrollX, CPCanvasPendingScrollY, CPCanvasPendingScrollValid
+    global CPCanvasScrollFlushScheduled
+
+    CPCanvasPendingScrollX := newX
+    CPCanvasPendingScrollY := newY
+    CPCanvasPendingScrollValid := true
+    if !CPCanvasScrollFlushScheduled {
+        CPCanvasScrollFlushScheduled := true
+        SetTimer(CPCanvasFlushQueuedScroll, -16)
+    }
+}
+
+CPCanvasFlushQueuedScroll(*) {
+    global CPCanvasPendingScrollX, CPCanvasPendingScrollY, CPCanvasPendingScrollValid
+    global CPCanvasScrollFlushScheduled
+
+    CPCanvasScrollFlushScheduled := false
+    if !CPCanvasPendingScrollValid
+        return
+    newX := CPCanvasPendingScrollX
+    newY := CPCanvasPendingScrollY
+    CPCanvasPendingScrollValid := false
+    ; Let Windows combine paints while the thumb is moving instead of erasing and
+    ; repainting the complete control panel for every one-pixel track message.
+    CPCanvasScrollTo(newX, newY, true, true, false)
+}
+
+CPCanvasCancelQueuedScroll(flush := false) {
+    global CPCanvasPendingScrollX, CPCanvasPendingScrollY, CPCanvasPendingScrollValid
+    global CPCanvasScrollFlushScheduled
+
+    if CPCanvasScrollFlushScheduled
+        SetTimer(CPCanvasFlushQueuedScroll, 0)
+    CPCanvasScrollFlushScheduled := false
+    if (flush && CPCanvasPendingScrollValid) {
+        newX := CPCanvasPendingScrollX
+        newY := CPCanvasPendingScrollY
+        CPCanvasPendingScrollValid := false
+        CPCanvasScrollTo(newX, newY)
+        return
+    }
+    CPCanvasPendingScrollValid := false
 }
 
 CPCanvasResetForLayout(manageRedraw := true) {
@@ -482,8 +653,19 @@ CPCanvasFinishLayout(viewW, viewH, restorePos, manageRedraw := true) {
 CPOnCanvasScroll(wParam, lParam, msg, hwnd) {
     global ui, CPCanvasScrollX, CPCanvasScrollY, CPCanvasScrollMaxX, CPCanvasScrollMaxY
     global CPCanvasViewportW, CPCanvasViewportH
-    if !(IsSet(ui) && ui && hwnd = ui.Hwnd) || lParam
+    if !(IsSet(ui) && ui && hwnd = ui.Hwnd)
         return
+
+    ; A standard window scrollbar reports lParam=0. Some themed/DPI layouts can
+    ; route the same notification through a ScrollBar child instead. Accept that
+    ; child, but continue ignoring trackbars and other controls which also emit
+    ; WM_HSCROLL/WM_VSCROLL notifications.
+    if lParam {
+        scrollClass := ""
+        try scrollClass := WinGetClass("ahk_id " lParam)
+        if (scrollClass != "ScrollBar")
+            return
+    }
 
     bar := (msg = 0x0114) ? 0 : 1
     code := wParam & 0xFFFF
@@ -502,9 +684,21 @@ CPOnCanvasScroll(wParam, lParam, msg, hwnd) {
         case 4, 5: nextPos := info["track"]         ; SB_THUMBPOSITION / SB_THUMBTRACK
         case 6: nextPos := 0                        ; SB_TOP / SB_LEFT
         case 7: nextPos := maximum                  ; SB_BOTTOM / SB_RIGHT
+        case 8:                                      ; SB_ENDSCROLL
+            CPCanvasCancelQueuedScroll(true)
+            return 0
         default: return 0
     }
 
+    if (code = 5) {
+        if (bar = 0)
+            CPCanvasQueueScrollTo(nextPos, CPCanvasScrollY)
+        else
+            CPCanvasQueueScrollTo(CPCanvasScrollX, nextPos)
+        return 0
+    }
+
+    CPCanvasCancelQueuedScroll(false)
     if (bar = 0)
         CPCanvasScrollTo(nextPos, CPCanvasScrollY)
     else
@@ -521,12 +715,7 @@ CPOnCanvasMouseWheel(wParam, lParam, msg, hwnd) {
     if !WinActive("ahk_id " ui.Hwnd)
         return
 
-    focusedHwnd := CPFocusRingTargetHwnd(CPFocusedHwnd())
-    if (focusedHwnd && CPComboDropped(focusedHwnd))
-        return
-    focusedClass := ""
-    try focusedClass := WinGetClass("ahk_id " focusedHwnd)
-    if (focusedClass = "msctls_trackbar32")
+    if !CPMouseWheelOverCanvas()
         return
 
     delta := (wParam >> 16) & 0xFFFF
@@ -536,6 +725,39 @@ CPOnCanvasMouseWheel(wParam, lParam, msg, hwnd) {
         return
     CPCanvasScrollTo(CPCanvasScrollX, CPCanvasScrollY - (delta / 120) * 48)
     return 0
+}
+
+CPMouseWheelOverCanvas(*) {
+    global ui, CPCanvasScrollMaxY
+    if !(IsSet(ui) && ui && ui.Hwnd && CPCanvasScrollMaxY > 0)
+        return false
+    if !WinActive("ahk_id " ui.Hwnd)
+        return false
+
+    mouseWindow := 0
+    mouseControl := 0
+    try MouseGetPos(,, &mouseWindow, &mouseControl, 2)
+    if (!mouseWindow || (mouseWindow != ui.Hwnd
+        && !DllCall("user32\IsChild", "ptr", ui.Hwnd, "ptr", mouseWindow, "int")))
+        return false
+
+    hoveredHwnd := mouseControl ? mouseControl : mouseWindow
+    hoveredClass := ""
+    try hoveredClass := WinGetClass("ahk_id " hoveredHwnd)
+    if (hoveredClass = "msctls_trackbar32")
+        return false
+    if (hoveredHwnd && CPComboDropped(hoveredHwnd))
+        return false
+
+    focusedHwnd := CPFocusRingTargetHwnd(CPFocusedHwnd())
+    if (focusedHwnd && CPComboDropped(focusedHwnd))
+        return false
+    return true
+}
+
+CPMouseWheelHotkey(direction, *) {
+    global CPCanvasScrollX, CPCanvasScrollY
+    CPCanvasScrollTo(CPCanvasScrollX, CPCanvasScrollY + direction * 48)
 }
 
 CPEnsureFocusedControlVisible(*) {
@@ -753,11 +975,11 @@ CPColorRef(hexColor) {
 
 CPDestroyThemeBrushes(*) {
     global CPThemeBrushWindow, CPThemeBrushSurface, CPThemeBrushFocus
-    if CPThemeBrushWindow
+    if IsSet(CPThemeBrushWindow) && CPThemeBrushWindow
         try DllCall("gdi32\DeleteObject", "ptr", CPThemeBrushWindow)
-    if CPThemeBrushSurface
+    if IsSet(CPThemeBrushSurface) && CPThemeBrushSurface
         try DllCall("gdi32\DeleteObject", "ptr", CPThemeBrushSurface)
-    if CPThemeBrushFocus
+    if IsSet(CPThemeBrushFocus) && CPThemeBrushFocus
         try DllCall("gdi32\DeleteObject", "ptr", CPThemeBrushFocus)
     CPThemeBrushWindow := 0
     CPThemeBrushSurface := 0
@@ -925,6 +1147,7 @@ CPThemeComboParts(cpComboHwnd, darkMode) {
     for cpPartHwnd in [NumGet(cpComboInfo, cpItemOffset, "ptr"), NumGet(cpComboInfo, cpListOffset, "ptr")] {
         if !cpPartHwnd
             continue
+        CPAllowDarkModeForWindow(cpPartHwnd, darkMode)
         if darkMode {
             try DllCall("uxtheme\SetWindowTheme", "ptr", cpPartHwnd, "wstr", "DarkMode_Explorer", "ptr", 0)
         } else {
@@ -934,8 +1157,461 @@ CPThemeComboParts(cpComboHwnd, darkMode) {
     }
 }
 
-CPApplyThemeToControl(cpThemeHwnd, darkMode := -1) {
+CPPrepareStudyCombo(cpComboHwnd) {
+    global CPStudyThemedComboHwnds, CPStudyComboSubclassCallback
+    if !cpComboHwnd || CPStudyThemedComboHwnds.Has(cpComboHwnd)
+        return
+    cpComboCtrl := 0
+    try cpComboCtrl := GuiCtrlFromHwnd(cpComboHwnd)
+    if !IsObject(cpComboCtrl)
+        return
+    ; Owner-draw only changes the appearance. It retains the native ComboBox,
+    ; its items, focus behavior, keyboard navigation and controller wiring.
+    try cpComboCtrl.Opt("+0x10") ; CBS_OWNERDRAWFIXED
+    if !CPStudyComboSubclassCallback
+        CPStudyComboSubclassCallback := CallbackCreate(CPStudyComboWindowProc, "Fast", 4)
+    cpComboOriginalProc := DllCall(
+        "user32\SetWindowLongPtr", "ptr", cpComboHwnd, "int", -4,
+        "ptr", CPStudyComboSubclassCallback, "ptr"
+    )
+    if cpComboOriginalProc
+        CPStudyThemedComboHwnds[cpComboHwnd] := cpComboOriginalProc
+}
+
+CPPrepareStudyListHeader(cpHeaderHwnd) {
+    global CPStudyThemedHeaderHwnds
+    if !cpHeaderHwnd || CPStudyThemedHeaderHwnds.Has(cpHeaderHwnd)
+        return
+    CPStudyThemedHeaderHwnds[cpHeaderHwnd] := true
+}
+
+CPPrepareStudyListView(cpListHwnd, cpHeaderHwnd) {
+    global CPStudyThemedListHwnds, CPStudyListSubclassCallback
+    CPPrepareStudyListHeader(cpHeaderHwnd)
+    if !cpListHwnd || CPStudyThemedListHwnds.Has(cpListHwnd)
+        return
+    if !CPStudyListSubclassCallback
+        CPStudyListSubclassCallback := CallbackCreate(CPStudyListWindowProc, "Fast", 4)
+    cpListOriginalProc := DllCall(
+        "user32\SetWindowLongPtr", "ptr", cpListHwnd, "int", -4,
+        "ptr", CPStudyListSubclassCallback, "ptr"
+    )
+    if cpListOriginalProc
+        CPStudyThemedListHwnds[cpListHwnd] := cpListOriginalProc
+}
+
+CPStudyListWindowProc(cpListHwnd, cpListMsg, cpListWParam, cpListLParam) {
+    global CPStudyThemedListHwnds, CPStudyThemedHeaderHwnds
+    if (cpListMsg = 0x002B && cpListLParam) { ; WM_DRAWITEM
+        cpListDrawType := NumGet(cpListLParam, 0, "uint")
+        cpListDrawHwndOffset := A_PtrSize = 8 ? 24 : 20
+        cpListDrawHwnd := NumGet(cpListLParam, cpListDrawHwndOffset, "ptr")
+        if (cpListDrawType = 100 && CPStudyThemedHeaderHwnds.Has(cpListDrawHwnd)) {
+            try {
+                if CPThemeDrawHeaderItem(cpListLParam)
+                    return 1
+            }
+        }
+    }
+    cpListOriginalProc := CPStudyThemedListHwnds.Has(cpListHwnd)
+        ? CPStudyThemedListHwnds[cpListHwnd] : 0
+    cpListResult := cpListOriginalProc
+        ? DllCall("user32\CallWindowProcW", "ptr", cpListOriginalProc,
+            "ptr", cpListHwnd, "uint", cpListMsg, "uptr", cpListWParam,
+            "ptr", cpListLParam, "ptr")
+        : DllCall("user32\DefWindowProcW", "ptr", cpListHwnd,
+            "uint", cpListMsg, "uptr", cpListWParam, "ptr", cpListLParam, "ptr")
+    if (cpListMsg = 0x0082 && CPStudyThemedListHwnds.Has(cpListHwnd))
+        CPStudyThemedListHwnds.Delete(cpListHwnd)
+    return cpListResult
+}
+
+CPStudyComboWindowProc(cpComboHwnd, cpComboMsg, cpComboWParam, cpComboLParam) {
+    global CPStudyThemedComboHwnds
+    cpComboOriginalProc := CPStudyThemedComboHwnds.Has(cpComboHwnd)
+        ? CPStudyThemedComboHwnds[cpComboHwnd] : 0
+    cpComboResult := cpComboOriginalProc
+        ? DllCall("user32\CallWindowProcW", "ptr", cpComboOriginalProc,
+            "ptr", cpComboHwnd, "uint", cpComboMsg, "uptr", cpComboWParam,
+            "ptr", cpComboLParam, "ptr")
+        : DllCall("user32\DefWindowProcW", "ptr", cpComboHwnd,
+            "uint", cpComboMsg, "uptr", cpComboWParam, "ptr", cpComboLParam,
+            "ptr")
+    try {
+        if (cpComboMsg = 0x000F) { ; WM_PAINT
+            cpComboDc := DllCall("user32\GetDC", "ptr", cpComboHwnd, "ptr")
+            if cpComboDc {
+                try CPThemePaintStudyComboArrow(cpComboHwnd, cpComboDc)
+                DllCall("user32\ReleaseDC", "ptr", cpComboHwnd, "ptr", cpComboDc)
+            }
+        } else if (cpComboMsg = 0x0317 || cpComboMsg = 0x0318) { ; WM_PRINT/CLIENT
+            if cpComboWParam
+                CPThemePaintStudyComboArrow(cpComboHwnd, cpComboWParam)
+        }
+    }
+    if (cpComboMsg = 0x0082 && CPStudyThemedComboHwnds.Has(cpComboHwnd))
+        CPStudyThemedComboHwnds.Delete(cpComboHwnd)
+    return cpComboResult
+}
+
+CPThemePaintStudyComboArrow(cpComboHwnd, cpComboDc) {
     global controlDarkMode
+    cpComboRect := Buffer(16, 0)
+    if !DllCall("user32\GetClientRect", "ptr", cpComboHwnd, "ptr", cpComboRect)
+        return
+    cpComboRight := NumGet(cpComboRect, 8, "int")
+    cpComboBottom := NumGet(cpComboRect, 12, "int")
+    cpComboDpi := GetWindowDPI(cpComboHwnd)
+    cpComboArrowW := Max(20, Round(24 * cpComboDpi / 96))
+    cpComboArrowRect := Buffer(16, 0)
+    NumPut("int", Max(1, cpComboRight - cpComboArrowW), "int", 1,
+        "int", Max(1, cpComboRight - 1), "int", Max(1, cpComboBottom - 1),
+        cpComboArrowRect, 0)
+    cpComboColors := CPPalette(controlDarkMode)
+    cpComboBrush := DllCall("gdi32\CreateSolidBrush", "uint",
+        CPColorRef(cpComboColors["surfaceAlt"]), "ptr")
+    try DllCall("user32\FillRect", "ptr", cpComboDc,
+        "ptr", cpComboArrowRect, "ptr", cpComboBrush)
+    finally DllCall("gdi32\DeleteObject", "ptr", cpComboBrush)
+    cpComboEnabled := DllCall("user32\IsWindowEnabled", "ptr", cpComboHwnd, "int")
+    DllCall("gdi32\SetTextColor", "ptr", cpComboDc, "uint", CPColorRef(
+        cpComboEnabled ? cpComboColors["text"] : cpComboColors["muted"]
+    ))
+    DllCall("gdi32\SetBkMode", "ptr", cpComboDc, "int", 1)
+    cpComboFont := SendMessage(0x0031, 0, 0, cpComboHwnd)
+    cpComboOldFont := cpComboFont
+        ? DllCall("gdi32\SelectObject", "ptr", cpComboDc, "ptr", cpComboFont, "ptr") : 0
+    DllCall("user32\DrawTextW", "ptr", cpComboDc, "wstr", Chr(9662),
+        "int", -1, "ptr", cpComboArrowRect,
+        "uint", 0x0020 | 0x0001 | 0x0004 | 0x0800)
+    if cpComboOldFont
+        DllCall("gdi32\SelectObject", "ptr", cpComboDc, "ptr", cpComboOldFont)
+    cpComboPen := DllCall("gdi32\CreatePen", "int", 0, "int", 1,
+        "uint", CPColorRef(cpComboColors["border"]), "ptr")
+    cpComboOldPen := DllCall("gdi32\SelectObject", "ptr", cpComboDc,
+        "ptr", cpComboPen, "ptr")
+    DllCall("gdi32\MoveToEx", "ptr", cpComboDc,
+        "int", Max(1, cpComboRight - cpComboArrowW), "int", 1, "ptr", 0)
+    DllCall("gdi32\LineTo", "ptr", cpComboDc,
+        "int", Max(1, cpComboRight - cpComboArrowW), "int", cpComboBottom - 1)
+    DllCall("gdi32\SelectObject", "ptr", cpComboDc, "ptr", cpComboOldPen)
+    DllCall("gdi32\DeleteObject", "ptr", cpComboPen)
+}
+
+CPStudyTransparentWindowProc(cpOverlayHwnd, cpOverlayMsg, cpOverlayWParam, cpOverlayLParam) {
+    global CPStudyTransparentHwnds
+    if (cpOverlayMsg = 0x0084) ; WM_NCHITTEST: pass through to native header below
+        return -1 ; HTTRANSPARENT
+    if (cpOverlayMsg = 0x0014) ; WM_ERASEBKGND
+        return 1
+    if (cpOverlayMsg = 0x000F) { ; WM_PAINT
+        cpOverlayPaint := Buffer(A_PtrSize = 8 ? 72 : 64, 0)
+        cpOverlayDc := DllCall("user32\BeginPaint", "ptr", cpOverlayHwnd,
+            "ptr", cpOverlayPaint, "ptr")
+        if cpOverlayDc
+            CPThemePaintStudyHeaderOverlay(cpOverlayHwnd, cpOverlayDc)
+        DllCall("user32\EndPaint", "ptr", cpOverlayHwnd, "ptr", cpOverlayPaint)
+        return 0
+    }
+    if (cpOverlayMsg = 0x0318 && cpOverlayWParam) { ; WM_PRINTCLIENT
+        CPThemePaintStudyHeaderOverlay(cpOverlayHwnd, cpOverlayWParam)
+        return 0
+    }
+    cpOverlayOriginalProc := (CPStudyTransparentHwnds.Has(cpOverlayHwnd)
+        && IsObject(CPStudyTransparentHwnds[cpOverlayHwnd]))
+        ? CPStudyTransparentHwnds[cpOverlayHwnd]["proc"] : 0
+    cpOverlayResult := cpOverlayOriginalProc
+        ? DllCall("user32\CallWindowProcW", "ptr", cpOverlayOriginalProc,
+            "ptr", cpOverlayHwnd, "uint", cpOverlayMsg, "uptr", cpOverlayWParam,
+            "ptr", cpOverlayLParam, "ptr")
+        : DllCall("user32\DefWindowProcW", "ptr", cpOverlayHwnd,
+            "uint", cpOverlayMsg, "uptr", cpOverlayWParam,
+            "ptr", cpOverlayLParam, "ptr")
+    if (cpOverlayMsg = 0x0082 && CPStudyTransparentHwnds.Has(cpOverlayHwnd))
+        CPStudyTransparentHwnds.Delete(cpOverlayHwnd)
+    return cpOverlayResult
+}
+
+CPThemePaintStudyHeaderOverlay(cpOverlayHwnd, cpOverlayDc) {
+    global CPStudyTransparentHwnds, controlDarkMode
+    if !CPStudyTransparentHwnds.Has(cpOverlayHwnd)
+        return
+    cpOverlayData := CPStudyTransparentHwnds[cpOverlayHwnd]
+    cpOverlayColors := CPPalette(controlDarkMode)
+    cpOverlayRect := Buffer(16, 0)
+    DllCall("user32\GetClientRect", "ptr", cpOverlayHwnd, "ptr", cpOverlayRect)
+    cpOverlayBrush := DllCall("gdi32\CreateSolidBrush", "uint",
+        CPColorRef(cpOverlayColors["surfaceAlt"]), "ptr")
+    DllCall("user32\FillRect", "ptr", cpOverlayDc, "ptr", cpOverlayRect,
+        "ptr", cpOverlayBrush)
+    DllCall("gdi32\DeleteObject", "ptr", cpOverlayBrush)
+    DllCall("gdi32\SetTextColor", "ptr", cpOverlayDc, "uint",
+        CPColorRef(cpOverlayColors["text"]))
+    DllCall("gdi32\SetBkMode", "ptr", cpOverlayDc, "int", 1)
+    cpOverlayFont := SendMessage(0x0031, 0, 0, cpOverlayHwnd)
+    cpOverlayOldFont := cpOverlayFont
+        ? DllCall("gdi32\SelectObject", "ptr", cpOverlayDc, "ptr", cpOverlayFont, "ptr") : 0
+    cpOverlayTextRect := Buffer(16, 0)
+    NumPut("int", 7, "int", 0,
+        "int", Max(7, NumGet(cpOverlayRect, 8, "int") - 4),
+        "int", NumGet(cpOverlayRect, 12, "int"), cpOverlayTextRect, 0)
+    DllCall("user32\DrawTextW", "ptr", cpOverlayDc,
+        "wstr", cpOverlayData["text"], "int", -1, "ptr", cpOverlayTextRect,
+        "uint", 0x0020 | 0x0004 | 0x0800 | 0x8000)
+    if cpOverlayOldFont
+        DllCall("gdi32\SelectObject", "ptr", cpOverlayDc, "ptr", cpOverlayOldFont)
+    cpOverlayPen := DllCall("gdi32\CreatePen", "int", 0, "int", 1,
+        "uint", CPColorRef(cpOverlayColors["border"]), "ptr")
+    cpOverlayOldPen := DllCall("gdi32\SelectObject", "ptr", cpOverlayDc,
+        "ptr", cpOverlayPen, "ptr")
+    cpOverlayRight := NumGet(cpOverlayRect, 8, "int") - 1
+    cpOverlayBottom := NumGet(cpOverlayRect, 12, "int") - 1
+    DllCall("gdi32\MoveToEx", "ptr", cpOverlayDc, "int", cpOverlayRight,
+        "int", 0, "ptr", 0)
+    DllCall("gdi32\LineTo", "ptr", cpOverlayDc, "int", cpOverlayRight,
+        "int", cpOverlayBottom + 1)
+    DllCall("gdi32\MoveToEx", "ptr", cpOverlayDc, "int", 0,
+        "int", cpOverlayBottom, "ptr", 0)
+    DllCall("gdi32\LineTo", "ptr", cpOverlayDc, "int", cpOverlayRight + 1,
+        "int", cpOverlayBottom)
+    DllCall("gdi32\SelectObject", "ptr", cpOverlayDc, "ptr", cpOverlayOldPen)
+    DllCall("gdi32\DeleteObject", "ptr", cpOverlayPen)
+}
+
+CPPrepareTransparentStudyOverlay(cpOverlayHwnd) {
+    global CPStudyTransparentHwnds, CPStudyTransparentCallback
+    if !cpOverlayHwnd || CPStudyTransparentHwnds.Has(cpOverlayHwnd)
+        return
+    if !CPStudyTransparentCallback
+        CPStudyTransparentCallback := CallbackCreate(CPStudyTransparentWindowProc, "Fast", 4)
+    cpOverlayOriginalProc := DllCall(
+        "user32\SetWindowLongPtr", "ptr", cpOverlayHwnd, "int", -4,
+        "ptr", CPStudyTransparentCallback, "ptr"
+    )
+    if cpOverlayOriginalProc
+        CPStudyTransparentHwnds[cpOverlayHwnd] := Map(
+            "proc", cpOverlayOriginalProc, "text", ""
+        )
+}
+
+CPEnsureStudyVisualOverlays(cpStudyGui) {
+    global CPStudyVisualOverlays
+    if !(IsObject(cpStudyGui) && cpStudyGui.Hwnd)
+        return
+    cpStudyRoot := cpStudyGui.Hwnd
+    if !CPStudyVisualOverlays.Has(cpStudyRoot) {
+        cpStudyEntry := Map("gui", cpStudyGui, "arrows", [], "headers", [])
+        for cpStudyControlHwnd in WinGetControlsHwnd("ahk_id " cpStudyRoot) {
+            cpStudyClass := WinGetClass("ahk_id " cpStudyControlHwnd)
+            cpStudyControl := 0
+            try cpStudyControl := GuiCtrlFromHwnd(cpStudyControlHwnd)
+            if !IsObject(cpStudyControl)
+                continue
+            if (cpStudyClass = "ComboBox") {
+                cpStudyArrow := cpStudyGui.Add(
+                    "Text", "x0 y0 w1 h1 Hidden Center +0x100 +0x200", Chr(9662)
+                )
+                cpStudyArrow.Cursor := "Hand"
+                cpStudyArrow.OnEvent("Click", CPComboArrowClick.Bind(cpStudyControlHwnd))
+                cpStudyEntry["arrows"].Push(Map(
+                    "combo", cpStudyControl, "arrow", cpStudyArrow, "last", ""
+                ))
+            } else if (cpStudyClass = "SysListView32") {
+                cpStudyHeaderHwnd := SendMessage(0x101F, 0, 0, cpStudyControlHwnd)
+                cpStudyHeaderCount := cpStudyHeaderHwnd
+                    ? SendMessage(0x1200, 0, 0, cpStudyHeaderHwnd) : 0
+                cpStudyLabels := []
+                loop Max(0, cpStudyHeaderCount) {
+                    cpStudyLabelHwnd := DllCall(
+                        "user32\CreateWindowExW", "uint", 0,
+                        "wstr", "Static", "wstr", "",
+                        "uint", 0x40000000 | 0x04000000,
+                        "int", 0, "int", 0, "int", 1, "int", 1,
+                        "ptr", cpStudyHeaderHwnd, "ptr", 0,
+                        "ptr", DllCall("kernel32\GetModuleHandleW", "ptr", 0, "ptr"),
+                        "ptr", 0, "ptr"
+                    )
+                    if !cpStudyLabelHwnd
+                        continue
+                    cpStudyHeaderFont := SendMessage(0x0031, 0, 0, cpStudyHeaderHwnd)
+                    if cpStudyHeaderFont
+                        SendMessage(0x0030, cpStudyHeaderFont, 0, cpStudyLabelHwnd)
+                    CPPrepareTransparentStudyOverlay(cpStudyLabelHwnd)
+                    cpStudyLabels.Push(Map("hwnd", cpStudyLabelHwnd, "last", ""))
+                }
+                cpStudyEntry["headers"].Push(Map(
+                    "list", cpStudyControl,
+                    "headerHwnd", cpStudyHeaderHwnd,
+                    "labels", cpStudyLabels
+                ))
+            }
+        }
+        CPStudyVisualOverlays[cpStudyRoot] := cpStudyEntry
+    }
+    CPUpdateStudyVisualOverlays(cpStudyRoot)
+    SetTimer(CPUpdateAllStudyVisualOverlays, 125)
+}
+
+CPStudyHeaderText(cpHeaderHwnd, cpHeaderIndex) {
+    cpStudyTextBuffer := Buffer(1024, 0)
+    cpStudyHeaderItem := Buffer(A_PtrSize = 8 ? 72 : 48, 0)
+    NumPut("uint", 0x0002, cpStudyHeaderItem, 0)
+    NumPut("ptr", cpStudyTextBuffer.Ptr, cpStudyHeaderItem, 8)
+    NumPut("int", 511, cpStudyHeaderItem, A_PtrSize = 8 ? 24 : 16)
+    if SendMessage(0x120B, cpHeaderIndex, cpStudyHeaderItem.Ptr, cpHeaderHwnd)
+        return StrGet(cpStudyTextBuffer, "UTF-16")
+    return ""
+}
+
+CPUpdateStudyVisualOverlays(cpStudyRoot) {
+    global CPStudyVisualOverlays, CPStudyTransparentHwnds, controlDarkMode
+    if !CPStudyVisualOverlays.Has(cpStudyRoot)
+        return
+    cpStudyEntry := CPStudyVisualOverlays[cpStudyRoot]
+    cpStudyColors := CPPalette(controlDarkMode)
+    static SWP_KEEP_GEOMETRY := 0x0001 | 0x0002 | 0x0010
+
+    for cpStudyArrowEntry in cpStudyEntry["arrows"] {
+        cpStudyCombo := cpStudyArrowEntry["combo"]
+        cpStudyArrow := cpStudyArrowEntry["arrow"]
+        cpStudyShow := DllCall("user32\IsWindowVisible", "ptr", cpStudyCombo.Hwnd, "int")
+        if !cpStudyShow {
+            if (cpStudyArrowEntry["last"] != "hidden") {
+                cpStudyArrow.Visible := false
+                cpStudyArrowEntry["last"] := "hidden"
+            }
+            continue
+        }
+        cpStudyCombo.GetPos(&cpStudyX, &cpStudyY, &cpStudyW, &cpStudyH)
+        cpStudyArrowW := Min(28, Max(20, Floor(cpStudyH * 0.85)))
+        cpStudyEnabled := DllCall("user32\IsWindowEnabled", "ptr", cpStudyCombo.Hwnd, "int")
+        cpStudyArrowColor := cpStudyEnabled
+            ? cpStudyColors["text"] : cpStudyColors["muted"]
+        cpStudyArrowState := (cpStudyX "|" cpStudyY "|" cpStudyW "|" cpStudyH
+            "|" cpStudyArrowColor "|" cpStudyColors["surfaceAlt"])
+        if (cpStudyArrowEntry["last"] != cpStudyArrowState) {
+            cpStudyArrow.Move(cpStudyX + cpStudyW - cpStudyArrowW,
+                cpStudyY + 1, cpStudyArrowW - 1, Max(1, cpStudyH - 2))
+            cpStudyArrow.Opt("+Background" cpStudyColors["surfaceAlt"])
+            cpStudyArrow.SetFont("s9 c" cpStudyArrowColor)
+            cpStudyArrow.Visible := true
+            try DllCall("user32\SetWindowPos", "ptr", cpStudyArrow.Hwnd, "ptr", 0,
+                "int", 0, "int", 0, "int", 0, "int", 0,
+                "uint", SWP_KEEP_GEOMETRY)
+            cpStudyArrowEntry["last"] := cpStudyArrowState
+        }
+    }
+
+    for cpStudyHeaderEntry in cpStudyEntry["headers"] {
+        cpStudyHeader := cpStudyHeaderEntry["headerHwnd"]
+        if !cpStudyHeader || !DllCall("user32\IsWindowVisible", "ptr", cpStudyHeader, "int") {
+            for cpStudyLabelEntry in cpStudyHeaderEntry["labels"] {
+                if (cpStudyLabelEntry["last"] != "hidden") {
+                    try DllCall("user32\ShowWindow", "ptr",
+                        cpStudyLabelEntry["hwnd"], "int", 0)
+                    cpStudyLabelEntry["last"] := "hidden"
+                }
+            }
+            continue
+        }
+        cpStudyHeaderRect := Buffer(16, 0)
+        DllCall("user32\GetClientRect", "ptr", cpStudyHeader, "ptr", cpStudyHeaderRect)
+        cpStudyHeaderH := NumGet(cpStudyHeaderRect, 12, "int")
+        for cpStudyIndex, cpStudyLabelEntry in cpStudyHeaderEntry["labels"] {
+            cpStudyLabelHwnd := cpStudyLabelEntry["hwnd"]
+            cpStudyItemRect := Buffer(16, 0)
+            if !SendMessage(0x1207, cpStudyIndex - 1,
+                cpStudyItemRect.Ptr, cpStudyHeader) {
+                if (cpStudyLabelEntry["last"] != "hidden") {
+                    try DllCall("user32\ShowWindow", "ptr", cpStudyLabelHwnd, "int", 0)
+                    cpStudyLabelEntry["last"] := "hidden"
+                }
+                continue
+            }
+            cpStudyLeft := NumGet(cpStudyItemRect, 0, "int")
+            cpStudyRight := NumGet(cpStudyItemRect, 8, "int")
+            cpStudyItemW := cpStudyRight - cpStudyLeft
+            if (cpStudyItemW <= 0) {
+                if (cpStudyLabelEntry["last"] != "hidden") {
+                    try DllCall("user32\ShowWindow", "ptr", cpStudyLabelHwnd, "int", 0)
+                    cpStudyLabelEntry["last"] := "hidden"
+                }
+                continue
+            }
+            cpStudyLabelText := CPStudyHeaderText(cpStudyHeader, cpStudyIndex - 1)
+            cpStudyLabelState := (cpStudyLeft "|0"
+                "|" cpStudyItemW "|" cpStudyHeaderH "|" cpStudyLabelText
+                "|" cpStudyColors["surfaceAlt"] "|" cpStudyColors["text"])
+            if (cpStudyLabelEntry["last"] != cpStudyLabelState) {
+                if CPStudyTransparentHwnds.Has(cpStudyLabelHwnd)
+                    CPStudyTransparentHwnds[cpStudyLabelHwnd]["text"] := cpStudyLabelText
+                try DllCall("user32\SetWindowPos", "ptr", cpStudyLabelHwnd, "ptr", 0,
+                    "int", cpStudyLeft, "int", 0, "int", cpStudyItemW,
+                    "int", cpStudyHeaderH, "uint", 0x0010 | 0x0040)
+                try DllCall("user32\InvalidateRect", "ptr", cpStudyLabelHwnd,
+                    "ptr", 0, "int", 1)
+                cpStudyLabelEntry["last"] := cpStudyLabelState
+            }
+        }
+    }
+}
+
+CPUpdateAllStudyVisualOverlays(*) {
+    global CPStudyVisualOverlays
+    cpStudyDeadRoots := []
+    for cpStudyRoot, cpStudyEntry in CPStudyVisualOverlays {
+        if !DllCall("user32\IsWindow", "ptr", cpStudyRoot, "int")
+            cpStudyDeadRoots.Push(cpStudyRoot)
+        else
+            CPUpdateStudyVisualOverlays(cpStudyRoot)
+    }
+    for cpStudyRoot in cpStudyDeadRoots
+        CPStudyVisualOverlays.Delete(cpStudyRoot)
+    if (CPStudyVisualOverlays.Count = 0)
+        SetTimer(CPUpdateAllStudyVisualOverlays, 0)
+}
+
+CPStudyHeaderWindowProc(cpHeaderHwnd, cpHeaderMsg, cpHeaderWParam, cpHeaderLParam) {
+    global CPStudyThemedHeaderHwnds
+    cpHeaderOriginalProc := CPStudyThemedHeaderHwnds.Has(cpHeaderHwnd)
+        ? CPStudyThemedHeaderHwnds[cpHeaderHwnd] : 0
+    cpHeaderResult := cpHeaderOriginalProc
+        ? DllCall("user32\CallWindowProcW", "ptr", cpHeaderOriginalProc,
+            "ptr", cpHeaderHwnd, "uint", cpHeaderMsg, "uptr", cpHeaderWParam,
+            "ptr", cpHeaderLParam, "ptr")
+        : DllCall("user32\DefWindowProcW", "ptr", cpHeaderHwnd,
+            "uint", cpHeaderMsg, "uptr", cpHeaderWParam, "ptr", cpHeaderLParam,
+            "ptr")
+    try {
+        if (cpHeaderMsg = 0x000F) { ; WM_PAINT
+            cpHeaderDc := DllCall("user32\GetDC", "ptr", cpHeaderHwnd, "ptr")
+            if cpHeaderDc {
+                try CPThemePaintAllHeaders(cpHeaderHwnd, cpHeaderDc)
+                DllCall("user32\ReleaseDC", "ptr", cpHeaderHwnd, "ptr", cpHeaderDc)
+            }
+        } else if (cpHeaderMsg = 0x0317 || cpHeaderMsg = 0x0318) {
+            if cpHeaderWParam
+                CPThemePaintAllHeaders(cpHeaderHwnd, cpHeaderWParam)
+        }
+    }
+    if (cpHeaderMsg = 0x0082 && CPStudyThemedHeaderHwnds.Has(cpHeaderHwnd))
+        CPStudyThemedHeaderHwnds.Delete(cpHeaderHwnd)
+    return cpHeaderResult
+}
+
+CPThemePaintAllHeaders(cpHeaderHwnd, cpHeaderDc) {
+    cpHeaderCount := SendMessage(0x1200, 0, 0, cpHeaderHwnd)
+    loop Max(0, cpHeaderCount) {
+        cpHeaderIndex := A_Index - 1
+        cpHeaderRect := Buffer(16, 0)
+        if SendMessage(0x1207, cpHeaderIndex, cpHeaderRect.Ptr, cpHeaderHwnd)
+            CPThemePaintHeader(cpHeaderHwnd, cpHeaderIndex, cpHeaderDc,
+                cpHeaderRect.Ptr, 0)
+    }
+}
+
+CPApplyThemeToControl(cpThemeHwnd, darkMode := -1) {
+    global controlDarkMode, CPStudyThemedComboHwnds
     if !cpThemeHwnd || !DllCall("user32\IsWindow", "ptr", cpThemeHwnd, "int")
         return
     if (darkMode = -1) {
@@ -950,6 +1626,7 @@ CPApplyThemeToControl(cpThemeHwnd, darkMode := -1) {
     cpThemeColors := CPPalette(darkMode)
     cpThemeCtrl := 0
     try cpThemeCtrl := GuiCtrlFromHwnd(cpThemeHwnd)
+    CPAllowDarkModeForWindow(cpThemeHwnd, darkMode)
 
     if (cpThemeClass = "Static") {
         if CPIsCustomTabControl(cpThemeHwnd) || CPIsComboArrowControl(cpThemeHwnd)
@@ -972,14 +1649,53 @@ CPApplyThemeToControl(cpThemeHwnd, darkMode := -1) {
         try cpThemeCtrl.SetFont("c" cpThemeColors["text"])
         try cpThemeCtrl.Opt("+Background" cpThemeColors["surface"])
         if darkMode {
-            try DllCall("uxtheme\SetWindowTheme", "ptr", cpThemeHwnd, "wstr", "DarkMode_CFD", "ptr", 0)
+            cpFieldTheme := "DarkMode_CFD"
+            if (cpThemeClass = "ComboBox" && CPStudyThemedComboHwnds.Has(cpThemeHwnd))
+                cpFieldTheme := "DarkMode_Explorer"
+            if (cpThemeClass = "Edit") {
+                cpFieldStyle := DllCall(
+                    "user32\GetWindowLongPtr", "ptr", cpThemeHwnd, "int", -16, "ptr"
+                )
+                ; Explorer supplies dark native scrollbars for multiline/read-only
+                ; viewer fields; the CFD edit theme otherwise leaves a light gutter.
+                if ((cpFieldStyle & 0x0004) || (cpFieldStyle & 0x00200000))
+                    cpFieldTheme := "DarkMode_Explorer"
+            }
+            try DllCall("uxtheme\SetWindowTheme", "ptr", cpThemeHwnd, "wstr", cpFieldTheme, "ptr", 0)
         } else {
             try DllCall("uxtheme\SetWindowTheme", "ptr", cpThemeHwnd, "ptr", 0, "ptr", 0)
         }
         if (cpThemeClass = "ComboBox")
             CPThemeComboParts(cpThemeHwnd, darkMode)
+    } else if (cpThemeClass = "SysListView32") {
+        if darkMode {
+            try DllCall("uxtheme\SetWindowTheme", "ptr", cpThemeHwnd, "wstr", "DarkMode_Explorer", "ptr", 0)
+        } else {
+            try DllCall("uxtheme\SetWindowTheme", "ptr", cpThemeHwnd, "ptr", 0, "ptr", 0)
+        }
+        ; Explorer theming alone is not sufficient on every Windows build,
+        ; especially when a ListView was created before its standalone window
+        ; was registered for dark painting. Set its three native colors too.
+        cpListBack := CPColorRef(cpThemeColors["surface"])
+        cpListText := CPColorRef(cpThemeColors["text"])
+        try SendMessage(0x1001, 0, cpListBack, cpThemeHwnd) ; LVM_SETBKCOLOR
+        try SendMessage(0x1026, 0, cpListBack, cpThemeHwnd) ; LVM_SETTEXTBKCOLOR
+        try SendMessage(0x1024, 0, cpListText, cpThemeHwnd) ; LVM_SETTEXTCOLOR
+        cpListHeader := 0
+        try cpListHeader := SendMessage(0x101F, 0, 0, cpThemeHwnd) ; LVM_GETHEADER
+        if cpListHeader {
+            CPAllowDarkModeForWindow(cpListHeader, darkMode)
+            if darkMode {
+                ; Keep the native light header for reliable contrast. Windows does
+                ; not expose a safe independent header-text color setting here.
+                try DllCall("uxtheme\SetWindowTheme", "ptr", cpListHeader, "wstr", "DarkMode_Explorer", "ptr", 0)
+            } else {
+                try DllCall("uxtheme\SetWindowTheme", "ptr", cpListHeader, "ptr", 0, "ptr", 0)
+            }
+            try DllCall("user32\InvalidateRect", "ptr", cpListHeader, "ptr", 0, "int", 1)
+        }
     } else if (cpThemeClass = "msctls_trackbar32" || cpThemeClass = "msctls_updown32"
-        || cpThemeClass = "SysTabControl32" || cpThemeClass = "SysListView32") {
+        || cpThemeClass = "SysTabControl32") {
         if darkMode {
             try DllCall("uxtheme\SetWindowTheme", "ptr", cpThemeHwnd, "wstr", "DarkMode_Explorer", "ptr", 0)
         } else {
@@ -1006,6 +1722,11 @@ CPApplyWindowScrollbarTheme(cpThemeGuiHwnd, darkMode) {
     }
 }
 
+CPAllowDarkModeForWindow(cpThemeHwnd, darkMode) {
+    if cpThemeHwnd
+        try DllCall("uxtheme\#133", "ptr", cpThemeHwnd, "int", darkMode ? 1 : 0, "int")
+}
+
 CPSetPreferredAppDarkMode(darkMode, cpThemeGuiHwnd := 0) {
     ; Windows 10/11 expose per-app dark control rendering through uxtheme.
     ; Calls are guarded so older Windows versions simply fall back to our brushes.
@@ -1017,12 +1738,27 @@ CPSetPreferredAppDarkMode(darkMode, cpThemeGuiHwnd := 0) {
 
 CPThemeCtlColor(wParam, lParam, msg, parentHwnd) {
     global ui, controlDarkMode, CPThemeBrushWindow, CPThemeBrushSurface
+        , CPThemedDialogHwnds
     if !controlDarkMode || !(IsSet(ui) && ui && ui.Hwnd)
         return
+    cpThemeRoot := 0
+    cpThemeParentRoot := 0
+    try cpThemeRoot := DllCall("user32\GetAncestor", "ptr", lParam, "uint", 2, "ptr") ; GA_ROOT
+    try cpThemeParentRoot := DllCall("user32\GetAncestor", "ptr", parentHwnd, "uint", 2, "ptr")
     cpThemeOwner := DllCall("user32\GetWindow", "ptr", parentHwnd, "uint", 4, "ptr") ; GW_OWNER
+    cpThemeRootTracked := false
+    cpThemeParentTracked := false
+    try cpThemeRootTracked := (cpThemeRoot
+        && IsSet(CPThemedDialogHwnds) && IsObject(CPThemedDialogHwnds)
+        && CPThemedDialogHwnds.Has(cpThemeRoot))
+    try cpThemeParentTracked := (cpThemeParentRoot
+        && IsSet(CPThemedDialogHwnds) && IsObject(CPThemedDialogHwnds)
+        && CPThemedDialogHwnds.Has(cpThemeParentRoot))
     if (parentHwnd != ui.Hwnd
         && cpThemeOwner != ui.Hwnd
-        && !DllCall("user32\IsChild", "ptr", ui.Hwnd, "ptr", lParam, "int"))
+        && !DllCall("user32\IsChild", "ptr", ui.Hwnd, "ptr", lParam, "int")
+        && !cpThemeRootTracked
+        && !cpThemeParentTracked)
         return
     ; Color previews retain their configured color instead of inheriting the window theme.
     if CPIsColorSwatchControl(lParam)
@@ -1044,6 +1780,42 @@ CPThemeCtlColor(wParam, lParam, msg, parentHwnd) {
     return CPThemeBrushWindow
 }
 
+CPThemedWindowDestroyed(wParam, lParam, msg, hwnd) {
+    global CPThemedDialogHwnds, CPStudyThemedComboHwnds, CPStudyThemedHeaderHwnds
+        , CPStudyThemedListHwnds
+        , CPStudyVisualOverlays, CPStudyTransparentHwnds
+    try {
+        if IsSet(CPThemedDialogHwnds) && IsObject(CPThemedDialogHwnds)
+            && CPThemedDialogHwnds.Has(hwnd)
+            CPThemedDialogHwnds.Delete(hwnd)
+    }
+    try {
+        if IsSet(CPStudyThemedComboHwnds) && IsObject(CPStudyThemedComboHwnds)
+            && CPStudyThemedComboHwnds.Has(hwnd)
+            CPStudyThemedComboHwnds.Delete(hwnd)
+    }
+    try {
+        if IsSet(CPStudyThemedHeaderHwnds) && IsObject(CPStudyThemedHeaderHwnds)
+            && CPStudyThemedHeaderHwnds.Has(hwnd)
+            CPStudyThemedHeaderHwnds.Delete(hwnd)
+    }
+    try {
+        if IsSet(CPStudyThemedListHwnds) && IsObject(CPStudyThemedListHwnds)
+            && CPStudyThemedListHwnds.Has(hwnd)
+            CPStudyThemedListHwnds.Delete(hwnd)
+    }
+    try {
+        if IsSet(CPStudyVisualOverlays) && IsObject(CPStudyVisualOverlays)
+            && CPStudyVisualOverlays.Has(hwnd)
+            CPStudyVisualOverlays.Delete(hwnd)
+    }
+    try {
+        if IsSet(CPStudyTransparentHwnds) && IsObject(CPStudyTransparentHwnds)
+            && CPStudyTransparentHwnds.Has(hwnd)
+            CPStudyTransparentHwnds.Delete(hwnd)
+    }
+}
+
 CPThemeMeasureItem(wParam, lParam, msg, parentHwnd) {
     global ui
     if !lParam || NumGet(lParam, 0, "uint") != 3 ; ODT_COMBOBOX
@@ -1055,7 +1827,12 @@ CPThemeMeasureItem(wParam, lParam, msg, parentHwnd) {
 
 CPThemeDrawItem(wParam, lParam, msg, parentHwnd) {
     global ui, controlDarkMode, CPThemeBrushSurface, CPThemeBrushFocus
-    if !lParam || NumGet(lParam, 0, "uint") != 3 ; ODT_COMBOBOX
+    if !lParam
+        return
+    cpDrawType := NumGet(lParam, 0, "uint")
+    if (cpDrawType = 100) ; ODT_HEADER
+        return CPThemeDrawHeaderItem(lParam)
+    if (cpDrawType != 3) ; ODT_COMBOBOX
         return
     if !(IsSet(ui) && ui && ui.Hwnd)
         return
@@ -1115,6 +1892,171 @@ CPThemeDrawItem(wParam, lParam, msg, parentHwnd) {
     return true
 }
 
+CPThemeDrawHeaderItem(cpHeaderDraw) {
+    global controlDarkMode, CPStudyThemedHeaderHwnds
+    cpHeaderHwndOffset := A_PtrSize = 8 ? 24 : 20
+    cpHeaderDcOffset := A_PtrSize = 8 ? 32 : 24
+    cpHeaderRectOffset := A_PtrSize = 8 ? 40 : 28
+    cpHeaderHwnd := NumGet(cpHeaderDraw, cpHeaderHwndOffset, "ptr")
+    if !cpHeaderHwnd || !CPStudyThemedHeaderHwnds.Has(cpHeaderHwnd)
+        return
+    cpHeaderDc := NumGet(cpHeaderDraw, cpHeaderDcOffset, "ptr")
+    cpHeaderIndex := NumGet(cpHeaderDraw, 8, "uint")
+    cpHeaderState := NumGet(cpHeaderDraw, 16, "uint")
+    if !cpHeaderDc
+        return
+
+    cpHeaderColors := CPPalette(controlDarkMode)
+    cpHeaderBackHex := (cpHeaderState & 0x0040)
+        ? cpHeaderColors["focus"] : cpHeaderColors["surfaceAlt"]
+    cpHeaderBrush := DllCall(
+        "gdi32\CreateSolidBrush", "uint", CPColorRef(cpHeaderBackHex), "ptr"
+    )
+    try DllCall(
+        "user32\FillRect", "ptr", cpHeaderDc,
+        "ptr", cpHeaderDraw + cpHeaderRectOffset, "ptr", cpHeaderBrush
+    )
+    finally DllCall("gdi32\DeleteObject", "ptr", cpHeaderBrush)
+
+    cpHeaderTextBuffer := Buffer(1024, 0)
+    cpHeaderTextItem := Buffer(A_PtrSize = 8 ? 72 : 48, 0)
+    NumPut("uint", 0x0002, cpHeaderTextItem, 0) ; HDI_TEXT
+    NumPut("ptr", cpHeaderTextBuffer.Ptr, cpHeaderTextItem, 8)
+    NumPut("int", 511, cpHeaderTextItem, A_PtrSize = 8 ? 24 : 16)
+    cpHeaderText := ""
+    if SendMessage(0x120B, cpHeaderIndex, cpHeaderTextItem.Ptr, cpHeaderHwnd)
+        cpHeaderText := StrGet(cpHeaderTextBuffer, "UTF-16")
+
+    DllCall(
+        "gdi32\SetTextColor", "ptr", cpHeaderDc,
+        "uint", CPColorRef(cpHeaderColors["text"])
+    )
+    DllCall("gdi32\SetBkMode", "ptr", cpHeaderDc, "int", 1) ; TRANSPARENT
+    cpHeaderFont := SendMessage(0x0031, 0, 0, cpHeaderHwnd) ; WM_GETFONT
+    cpHeaderOldFont := cpHeaderFont
+        ? DllCall("gdi32\SelectObject", "ptr", cpHeaderDc, "ptr", cpHeaderFont, "ptr") : 0
+    cpHeaderTextRect := Buffer(16, 0)
+    cpHeaderLeft := NumGet(cpHeaderDraw, cpHeaderRectOffset, "int") + 7
+    cpHeaderTop := NumGet(cpHeaderDraw, cpHeaderRectOffset + 4, "int")
+    cpHeaderRight := NumGet(cpHeaderDraw, cpHeaderRectOffset + 8, "int") - 4
+    cpHeaderBottom := NumGet(cpHeaderDraw, cpHeaderRectOffset + 12, "int")
+    NumPut(
+        "int", cpHeaderLeft, "int", cpHeaderTop,
+        "int", cpHeaderRight, "int", cpHeaderBottom,
+        cpHeaderTextRect, 0
+    )
+    DllCall(
+        "user32\DrawTextW", "ptr", cpHeaderDc, "wstr", cpHeaderText, "int", -1,
+        "ptr", cpHeaderTextRect, "uint", 0x0020 | 0x0004 | 0x0800 | 0x8000
+    ) ; SINGLELINE | VCENTER | NOPREFIX | END_ELLIPSIS
+    if cpHeaderOldFont
+        DllCall("gdi32\SelectObject", "ptr", cpHeaderDc, "ptr", cpHeaderOldFont)
+
+    cpHeaderPen := DllCall(
+        "gdi32\CreatePen", "int", 0, "int", 1,
+        "uint", CPColorRef(cpHeaderColors["border"]), "ptr"
+    )
+    cpHeaderOldPen := DllCall(
+        "gdi32\SelectObject", "ptr", cpHeaderDc, "ptr", cpHeaderPen, "ptr"
+    )
+    DllCall("gdi32\MoveToEx", "ptr", cpHeaderDc, "int", cpHeaderRight + 3,
+        "int", cpHeaderTop, "ptr", 0)
+    DllCall("gdi32\LineTo", "ptr", cpHeaderDc, "int", cpHeaderRight + 3,
+        "int", cpHeaderBottom)
+    DllCall("gdi32\MoveToEx", "ptr", cpHeaderDc, "int", cpHeaderLeft - 7,
+        "int", cpHeaderBottom - 1, "ptr", 0)
+    DllCall("gdi32\LineTo", "ptr", cpHeaderDc, "int", cpHeaderRight + 4,
+        "int", cpHeaderBottom - 1)
+    DllCall("gdi32\SelectObject", "ptr", cpHeaderDc, "ptr", cpHeaderOldPen)
+    DllCall("gdi32\DeleteObject", "ptr", cpHeaderPen)
+    return true
+}
+
+CPThemeNotify(wParam, lParam, msg, parentHwnd) {
+    global CPStudyThemedHeaderHwnds
+    if !lParam
+        return
+    cpNotifyHeader := NumGet(lParam, 0, "ptr")
+    if !cpNotifyHeader || !CPStudyThemedHeaderHwnds.Has(cpNotifyHeader)
+        return
+    cpNotifyCode := NumGet(lParam, A_PtrSize = 8 ? 16 : 8, "int")
+    if (cpNotifyCode != -12) ; NM_CUSTOMDRAW
+        return
+    cpNotifyStage := NumGet(lParam, A_PtrSize = 8 ? 24 : 12, "uint")
+    if (cpNotifyStage = 0x00000001) ; CDDS_PREPAINT
+        return 0x00000020 ; CDRF_NOTIFYITEMDRAW
+    if (cpNotifyStage != 0x00010001) ; CDDS_ITEMPREPAINT
+        return
+    cpNotifyDc := NumGet(lParam, A_PtrSize = 8 ? 32 : 16, "ptr")
+    cpNotifyRect := lParam + (A_PtrSize = 8 ? 40 : 20)
+    cpNotifyItem := NumGet(lParam, A_PtrSize = 8 ? 56 : 36, "uptr")
+    cpNotifyState := NumGet(lParam, A_PtrSize = 8 ? 64 : 40, "uint")
+    CPThemePaintHeader(
+        cpNotifyHeader, cpNotifyItem, cpNotifyDc, cpNotifyRect, cpNotifyState
+    )
+    return 0x00000004 ; CDRF_SKIPDEFAULT
+}
+
+CPThemePaintHeader(cpHeaderHwnd, cpHeaderIndex, cpHeaderDc, cpHeaderRect, cpHeaderState) {
+    global controlDarkMode
+    if !cpHeaderDc
+        return
+    cpHeaderColors := CPPalette(controlDarkMode)
+    cpHeaderBackHex := (cpHeaderState & 0x0040)
+        ? cpHeaderColors["focus"] : cpHeaderColors["surfaceAlt"]
+    cpHeaderBrush := DllCall(
+        "gdi32\CreateSolidBrush", "uint", CPColorRef(cpHeaderBackHex), "ptr"
+    )
+    try DllCall(
+        "user32\FillRect", "ptr", cpHeaderDc, "ptr", cpHeaderRect,
+        "ptr", cpHeaderBrush
+    )
+    finally DllCall("gdi32\DeleteObject", "ptr", cpHeaderBrush)
+
+    cpHeaderTextBuffer := Buffer(1024, 0)
+    cpHeaderTextItem := Buffer(A_PtrSize = 8 ? 72 : 48, 0)
+    NumPut("uint", 0x0002, cpHeaderTextItem, 0) ; HDI_TEXT
+    NumPut("ptr", cpHeaderTextBuffer.Ptr, cpHeaderTextItem, 8)
+    NumPut("int", 511, cpHeaderTextItem, A_PtrSize = 8 ? 24 : 16)
+    cpHeaderText := ""
+    if SendMessage(0x120B, cpHeaderIndex, cpHeaderTextItem.Ptr, cpHeaderHwnd)
+        cpHeaderText := StrGet(cpHeaderTextBuffer, "UTF-16")
+
+    DllCall("gdi32\SetTextColor", "ptr", cpHeaderDc,
+        "uint", CPColorRef(cpHeaderColors["text"]))
+    DllCall("gdi32\SetBkMode", "ptr", cpHeaderDc, "int", 1)
+    cpHeaderFont := SendMessage(0x0031, 0, 0, cpHeaderHwnd)
+    cpHeaderOldFont := cpHeaderFont
+        ? DllCall("gdi32\SelectObject", "ptr", cpHeaderDc, "ptr", cpHeaderFont, "ptr") : 0
+    cpHeaderTextRect := Buffer(16, 0)
+    cpHeaderLeft := NumGet(cpHeaderRect, 0, "int") + 7
+    cpHeaderTop := NumGet(cpHeaderRect, 4, "int")
+    cpHeaderRight := NumGet(cpHeaderRect, 8, "int") - 4
+    cpHeaderBottom := NumGet(cpHeaderRect, 12, "int")
+    NumPut("int", cpHeaderLeft, "int", cpHeaderTop,
+        "int", cpHeaderRight, "int", cpHeaderBottom, cpHeaderTextRect, 0)
+    DllCall("user32\DrawTextW", "ptr", cpHeaderDc, "wstr", cpHeaderText,
+        "int", -1, "ptr", cpHeaderTextRect,
+        "uint", 0x0020 | 0x0004 | 0x0800 | 0x8000)
+    if cpHeaderOldFont
+        DllCall("gdi32\SelectObject", "ptr", cpHeaderDc, "ptr", cpHeaderOldFont)
+
+    cpHeaderPen := DllCall("gdi32\CreatePen", "int", 0, "int", 1,
+        "uint", CPColorRef(cpHeaderColors["border"]), "ptr")
+    cpHeaderOldPen := DllCall("gdi32\SelectObject", "ptr", cpHeaderDc,
+        "ptr", cpHeaderPen, "ptr")
+    DllCall("gdi32\MoveToEx", "ptr", cpHeaderDc, "int", cpHeaderRight + 3,
+        "int", cpHeaderTop, "ptr", 0)
+    DllCall("gdi32\LineTo", "ptr", cpHeaderDc, "int", cpHeaderRight + 3,
+        "int", cpHeaderBottom)
+    DllCall("gdi32\MoveToEx", "ptr", cpHeaderDc, "int", cpHeaderLeft - 7,
+        "int", cpHeaderBottom - 1, "ptr", 0)
+    DllCall("gdi32\LineTo", "ptr", cpHeaderDc, "int", cpHeaderRight + 4,
+        "int", cpHeaderBottom - 1)
+    DllCall("gdi32\SelectObject", "ptr", cpHeaderDc, "ptr", cpHeaderOldPen)
+    DllCall("gdi32\DeleteObject", "ptr", cpHeaderPen)
+}
+
 CPRegisterThemeMessages() {
     global CPThemeMessagesRegistered
     if CPThemeMessagesRegistered
@@ -1123,8 +2065,28 @@ CPRegisterThemeMessages() {
         OnMessage(cpThemeMsg, CPThemeCtlColor)
     OnMessage(0x002B, CPThemeDrawItem)
     OnMessage(0x002C, CPThemeMeasureItem)
-    OnExit(CPDestroyThemeBrushes)
+    OnMessage(0x0082, CPThemedWindowDestroyed) ; WM_NCDESTROY
+    OnExit(CPShutdownThemeMessages)
     CPThemeMessagesRegistered := true
+}
+
+CPUnregisterThemeMessages(*) {
+    global CPThemeMessagesRegistered
+    if !(IsSet(CPThemeMessagesRegistered) && CPThemeMessagesRegistered)
+        return
+    ; Stop paint/destruction callbacks before ExitApp tears down GUI controls and
+    ; their global tracking maps. An in-flight callback remains independently safe.
+    for cpThemeMsg in [0x0133, 0x0134, 0x0135, 0x0138]
+        try OnMessage(cpThemeMsg, CPThemeCtlColor, 0)
+    try OnMessage(0x002B, CPThemeDrawItem, 0)
+    try OnMessage(0x002C, CPThemeMeasureItem, 0)
+    try OnMessage(0x0082, CPThemedWindowDestroyed, 0)
+    CPThemeMessagesRegistered := false
+}
+
+CPShutdownThemeMessages(*) {
+    CPUnregisterThemeMessages()
+    CPDestroyThemeBrushes()
 }
 
 CPApplyControlPanelTheme(forceRedraw := true) {
@@ -1165,6 +2127,7 @@ CPOnDarkModeToggle(*) {
     controlDarkMode := chkDarkMode.Value ? 1 : 0
     IniWrite(controlDarkMode, iniPath, "cfg_control", "darkMode")
     CPApplyControlPanelTheme()
+    CPApplyOpenStudyWindowThemes()
 }
 
 CPClampControlPanelOpacity(value) {
@@ -1270,6 +2233,7 @@ envPath     := appDir "\.env"
 overlayDir  := A_Temp "\JRPG_Overlay"      ; runtime-only stuff stays in temp
 gameProfilesDir := appDir "\game_profiles"
 try DirCreate(gameProfilesDir)
+studyLibraryDir := StudyLibraryConfiguredDirectory()
 
 ; Keeps the current registration so we can unbind/rebind on changes
 global __HK_LAUNCH_EXPL_REQ := ""
@@ -1690,7 +2654,7 @@ CPSelectCustomTab(cpTabIndex, *) {
 }
 
 CPMouseTabClick(*) {
-    global ui, CPTabVisiblePages, CPTabButtons
+    global ui, CPTabVisiblePages, CPTabButtons, CPFocusVisualNavHwnd, eCapMax
     if !(IsSet(ui) && ui && ui.Hwnd && IsSet(CPTabButtons) && IsObject(CPTabButtons))
         return
 
@@ -1699,6 +2663,17 @@ CPMouseTabClick(*) {
     MouseGetPos &cpMouseX, &cpMouseY, &cpMouseWindowHwnd, &cpMouseControlHwnd, 2
     if (cpMouseWindowHwnd != ui.Hwnd || !cpMouseControlHwnd)
         return
+
+    ; A direct click on the Maximum PNG field means the user intends ordinary
+    ; mouse/keyboard editing, not controller-navigation adjustment. Release the
+    ; navigation ownership so typed digits remain available after that click.
+    if (IsSet(eCapMax) && IsObject(eCapMax) && cpMouseControlHwnd = eCapMax.Hwnd) {
+        if CPMaxPngAdjustActive()
+            CPMaxPngAdjustFinish(true)
+        CPFocusVisualNavHwnd := 0
+        SetTimer(UpdateCPFocusRing, -1)
+        return
+    }
 
     for cpTabButtonIndex, cpTabCtrl in CPTabButtons {
         if (cpMouseControlHwnd = cpTabCtrl.Hwnd
@@ -2753,6 +3728,14 @@ try Hotkey("$Left", CPNavLeft, "On")
     try Hotkey("$Esc", CPNavEscape, "On")
     HotIfWinActive()
 
+    ; Child controls such as combo boxes can consume WM_MOUSEWHEEL before the
+    ; parent GUI sees it. A cursor-scoped hotkey keeps canvas scrolling available
+    ; immediately, while leaving open dropdowns and the opacity slider alone.
+    HotIf(CPMouseWheelOverCanvas)
+    try Hotkey("$WheelUp", CPMouseWheelHotkey.Bind(-1), "On")
+    try Hotkey("$WheelDown", CPMouseWheelHotkey.Bind(1), "On")
+    HotIf()
+
     __CP_ARROW_NAV_BOUND := true
 }
 
@@ -2994,6 +3977,21 @@ imgScript       := Load("imgScript",        defImgPy)
 overlayTrans    := Load("overlayTrans",     defOverlayTrans)
 explainScript   := Load("explainScript",   defExplainPy)
 captureDir      := IniRead(iniPath, "paths", "captureDir", defCaptureDir)
+
+; Migrate the former per-translation deletion option. Captures now remain
+; available for explanations throughout the current session and are cleared
+; safely from an exact-path ledger the next time JRPG Translator starts.
+__clearShotsMissing := "__MISSING__"
+__clearShotsRaw := IniRead(iniPath, "paths", "clearScreenshotsOnStartup", __clearShotsMissing)
+if (__clearShotsRaw = __clearShotsMissing) {
+    clearScreenshotsOnStartup := Integer(IniRead(iniPath, "paths", "deleteAfterUse", 0)) ? 1 : 0
+    IniWrite(clearScreenshotsOnStartup, iniPath, "paths", "clearScreenshotsOnStartup")
+} else {
+    clearScreenshotsOnStartup := Integer(__clearShotsRaw) ? 1 : 0
+}
+; Older overlays must never resume the former ten-second deletion timer.
+IniWrite(0, iniPath, "paths", "deleteAfterUse")
+CleanupScreenshotsFromPriorSession(clearScreenshotsOnStartup)
 
 ; --- NEW: Native capture settings (safe defaults) ---
 capMaxKB   := Integer(IniRead(iniPath, "capture", "maxKB", 1400))     ; cap file size in KB
@@ -3278,8 +4276,9 @@ SaveAll(){
 	IniWrite(debugMode, iniPath, "cfg", "debugMode")
     IniWrite(directModelOutput, iniPath, "cfg", "directModelOutput")
     IniWrite(useTerminologyOverrides, iniPath, "cfg", "useTerminologyOverrides")
-	; Also persist the delete-after-use toggle to [paths]
-    IniWrite(chkDel.Value ? 1 : 0, iniPath, "paths", "deleteAfterUse")
+	; Screenshot cleanup happens once on the next application start.
+    IniWrite(chkDel.Value ? 1 : 0, iniPath, "paths", "clearScreenshotsOnStartup")
+    IniWrite(0, iniPath, "paths", "deleteAfterUse") ; retired compatibility key
 
     ; colors
     IniWrite(boxBgHex,        iniPath, "cfg", "boxBg")
@@ -3355,9 +4354,28 @@ SetCapMaxKB(v) {
 }
 
 SetCapMaxKBFromUI(v) {
-    global CPMaxPngAdjustSyncing
+    global CPMaxPngAdjustSyncing, CPMaxPngAdjustState, CPFocusVisualNavHwnd
+    global capMaxKB, eCapMax
     if CPMaxPngAdjustSyncing
         return
+
+
+    ; When controller/arrow navigation owns this focused edit, raw digits can
+    ; be duplicates emitted by JoyToKey (for example D-pad Down -> Numpad2).
+    ; Only the explicit A/Enter adjustment path may change the value in this
+    ; state. Programmatic adjustment updates are already covered by the syncing
+    ; guard above. Mouse clicks and ordinary Tab focus release/bypass ownership.
+    cpControllerOwnsMaxPng := false
+    try cpControllerOwnsMaxPng := IsSet(eCapMax) && IsObject(eCapMax)
+        && CPFocusVisualNavHwnd = eCapMax.Hwnd
+        && CPFocusedHwnd() = eCapMax.Hwnd
+    if cpControllerOwnsMaxPng {
+        cpProtectedMaxPng := capMaxKB
+        if CPMaxPngAdjustActive()
+            cpProtectedMaxPng := CPMaxPngAdjustState["value"]
+        CPMaxPngAdjustSyncValue(cpProtectedMaxPng)
+        return
+    }
     SetCapMaxKB(v)
 }
 
@@ -3518,6 +4536,42 @@ ResolvePath(p) {
         return A_ScriptDir "\" expanded
     }
     return A_ScriptDir "\" expanded
+}
+
+ScreenshotCleanupLedgerPath() {
+    return A_ScriptDir "\Settings\screenshot_cleanup_pending.txt"
+}
+
+CleanupScreenshotsFromPriorSession(shouldDelete) {
+    ledgerPath := ScreenshotCleanupLedgerPath()
+    if !FileExist(ledgerPath)
+        return
+
+    entries := ""
+    try entries := FileRead(ledgerPath, "UTF-8")
+
+    if shouldDelete {
+        seen := Map()
+        for rawPath in StrSplit(entries, "`n", "`r") {
+            screenshotPath := Trim(StrReplace(rawPath, Chr(0xFEFF)))
+            if (screenshotPath = "" || seen.Has(StrLower(screenshotPath)))
+                continue
+            seen[StrLower(screenshotPath)] := true
+
+            ; The ledger contains exact paths written by the capture overlay.
+            ; Restrict cleanup to absolute PNG files and never delete folders.
+            if !RegExMatch(screenshotPath, 'i)^(?:[A-Z]:\\|\\\\).+\.png$')
+                continue
+            try {
+                if FileExist(screenshotPath) && !InStr(FileGetAttrib(screenshotPath), "D")
+                    FileDelete(screenshotPath)
+            }
+        }
+    }
+
+    ; Disabled cleanup also discards the pending list so old captures cannot be
+    ; removed unexpectedly if the setting is enabled again much later.
+    try FileDelete(ledgerPath)
 }
 
 ; =========================
@@ -4094,12 +5148,39 @@ ApplyShotSettings(*) {
     ; --- Speaker name color toggle (JP+EN; Python strips ã€Œâ€¦ã€ when ON) ---
     global chkName
     EnvSet("SHOT_COLOR_SPEAKER", chkName.Value ? "1" : "0")
+}
+
+CPSyncExplanationSelectionFromControls() {
+    global explainProvider, explainOpenAIModel, explainGeminiModel
+    global ddlEProv, ddlEOpenAI, ddlEGem
+
+    prov := StrLower(Trim(explainProvider))
+    if IsSet(ddlEProv) {
+        candidate := StrLower(Trim(ddlEProv.Text))
+        if (candidate = "gemini" || candidate = "openai")
+            prov := candidate
     }
+    if (prov != "gemini" && prov != "openai")
+        prov := "openai"
+
+    if IsSet(ddlEOpenAI) {
+        candidate := Trim(ddlEOpenAI.Text)
+        if (candidate != "")
+            explainOpenAIModel := candidate
+    }
+    if IsSet(ddlEGem) {
+        candidate := Trim(ddlEGem.Text)
+        if (candidate != "")
+            explainGeminiModel := candidate
+    }
+    explainProvider := prov
+    return prov
+}
 
 ExplainNow(*) {
     global pythonExe, explainScript
     global explainProvider, explainOpenAIModel, explainGeminiModel
-    global debugMode, explainsDir
+    global debugMode, explainsDir, studyLibraryDir
     px := ResolvePath(pythonExe)
     ex := ResolvePath(explainScript)
     if !(FileExist(px) && FileExist(ex)) {
@@ -4107,7 +5188,9 @@ ExplainNow(*) {
         return
     }
 
-    prov := StrLower(Trim(explainProvider))
+    ; The visible Explanation controls are authoritative. This prevents a
+    ; defensive INI/UI refresh from leaving the internal provider stale.
+    prov := CPSyncExplanationSelectionFromControls()
     if !CPApiKeyConfigured(prov) {
         CPShowMissingApiKey(prov, "explainer")
         DbgCP("ExplainNow blocked: " prov " API key is missing")
@@ -4139,17 +5222,32 @@ ExplainNow(*) {
     }
     EnvSet("PYTHONIOENCODING","utf-8")
 	
-	; --- Save-to-textfiles (archive) wiring for explainer.py ---
-    ; Read the user's toggle from the INI (written by the checkbox in the Explanation tab)
+	; --- Explanation archive wiring for explainer.py ---
     saveExpl := Integer(IniRead(iniPath, "cfg", "saveExplains", 0))
+    saveStudyLibrary := Integer(IniRead(iniPath, "cfg", "saveStudyLibrary", 0))
+    saveStudyScreenshots := Integer(IniRead(iniPath, "cfg", "studyLibraryScreenshots", 1))
 
     ; Pass environment variables to explainer.py
     ; SAVE_EXPLAINS: "1" to archive each explanation; "0" to skip (default)
-    ; EXPLAIN_SAVE_DIR: directory where time-stamped files are written
+    ; EXPLAIN_SAVE_DIR: directory where time-stamped files are written. An active
+    ; unified Profile gets its own safely named subfolder; no active Profile keeps
+    ; the original root-folder behavior.
     ; SETTINGS_DIR: optional hint for Python's fallback resolution
+    explainSaveDir := explainsDir
+    activeGameProfile := Trim(IniRead(iniPath, "game_profiles", "active", ""))
+    if (activeGameProfile != "") {
+        safeProfileFolder := GameProfileSafeName(activeGameProfile)
+        if (safeProfileFolder != "")
+            explainSaveDir := explainsDir "\" safeProfileFolder
+    }
     EnvSet "SAVE_EXPLAINS", (saveExpl ? "1" : "0")
-    EnvSet "EXPLAIN_SAVE_DIR", explainsDir
+    EnvSet "EXPLAIN_SAVE_DIR", explainSaveDir
     EnvSet "SETTINGS_DIR", A_ScriptDir "\Settings"
+    EnvSet "SAVE_STUDY_LIBRARY", (saveStudyLibrary ? "1" : "0")
+    EnvSet "STUDY_LIBRARY_SCREENSHOTS", (saveStudyScreenshots ? "1" : "0")
+    EnvSet "STUDY_LIBRARY_DIR", studyLibraryDir
+    EnvSet "STUDY_LIBRARY_PROFILE", activeGameProfile
+    EnvSet "EXPLAIN_PROMPT_PROFILE", Trim(ddlEPr.Text)
     
     outFile := A_Temp "\learn_out.txt"
     errFile := A_Temp "\learn_err.txt"
@@ -4172,6 +5270,3910 @@ ExplainNow(*) {
         MsgBox(msg, "Explain failed", 16)
         DbgCP("ExplainNow ERR: " msg)
     }
+}
+
+StudyLibrarySafeName(slName) {
+    slName := Trim(slName)
+    if (slName = "" || StrLen(slName) > 80)
+        return ""
+    if RegExMatch(slName, '[\\/:*?"<>|]')
+        return ""
+    if RegExMatch(slName, "[\. ]$")
+        return ""
+    if RegExMatch(slName, 'i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$')
+        return ""
+    if (StrLower(slName) = "default")
+        return ""
+    return slName
+}
+
+StudyLibraryDirectoryForName(slName) {
+    global studyLibraryDefaultDir, studyLibrariesRoot
+    if (StrLower(Trim(slName)) = "default")
+        return studyLibraryDefaultDir
+    slSafeName := StudyLibrarySafeName(slName)
+    return slSafeName != "" ? studyLibrariesRoot "\" slSafeName : ""
+}
+
+StudyLibraryListNames() {
+    global studyLibrariesRoot
+    slNames := ["Default"]
+    if !DirExist(studyLibrariesRoot)
+        return slNames
+    slNameText := ""
+    Loop Files studyLibrariesRoot "\*", "D" {
+        if (StrLower(A_LoopFileName) = "default")
+            continue
+        slNameText .= A_LoopFileName "`n"
+    }
+    slNameText := RTrim(slNameText, "`n")
+    if (slNameText != "") {
+        slNameText := Sort(slNameText)
+        Loop Parse slNameText, "`n", "`r"
+            if (A_LoopField != "")
+                slNames.Push(A_LoopField)
+    }
+    return slNames
+}
+
+StudyLibraryConfiguredName() {
+    global iniPath
+    slName := Trim(IniRead(iniPath, "study_library", "active", "Default"))
+    if (StrLower(slName) = "default")
+        return "Default"
+    slSafeName := StudyLibrarySafeName(slName)
+    slDirectory := StudyLibraryDirectoryForName(slSafeName)
+    if (slSafeName = "" || slDirectory = "" || !DirExist(slDirectory))
+        return "Default"
+    return slSafeName
+}
+
+StudyLibraryConfiguredDirectory() {
+    return StudyLibraryDirectoryForName(StudyLibraryConfiguredName())
+}
+
+StudyLibraryActivateName(slName) {
+    global studyLibraryDir, iniPath
+    if (StrLower(Trim(slName)) = "default")
+        slName := "Default"
+    else
+        slName := StudyLibrarySafeName(slName)
+    slDirectory := StudyLibraryDirectoryForName(slName)
+    if (slDirectory = "")
+        return false
+    if (slName != "Default" && !DirExist(slDirectory))
+        return false
+    if (slName = "Default")
+        DirCreate(slDirectory)
+    studyLibraryDir := slDirectory
+    IniWrite(slName, iniPath, "study_library", "active")
+    return true
+}
+
+StudyLibraryApplyProfileSelection(slProfileName, &slWarnings) {
+    global CPStudyLibraryState, CPStudyReaderState, studyLibraryDir
+    slProfileName := Trim(slProfileName)
+    if (StrLower(slProfileName) = "default") {
+        slName := "Default"
+    } else {
+        slName := StudyLibrarySafeName(slProfileName)
+        if (slName = "") {
+            GameProfileAppendWarning(
+                &slWarnings,
+                "Study Library '" slProfileName
+                    . "' has an invalid name; the current library was kept."
+            )
+            return false
+        }
+    }
+    slDirectory := StudyLibraryDirectoryForName(slName)
+    if (slName != "Default" && !DirExist(slDirectory)) {
+        GameProfileAppendWarning(
+            &slWarnings,
+            "Study Library '" slName
+                . "' was not found; the current library was kept."
+        )
+        return false
+    }
+    if (StrLower(StudyLibraryConfiguredName()) = StrLower(slName)) {
+        studyLibraryDir := StudyLibraryConfiguredDirectory()
+        EnvSet("STUDY_LIBRARY_DIR", studyLibraryDir)
+        return true
+    }
+    slApplied := false
+    if StudyLibraryStateAlive(CPStudyLibraryState) {
+        slApplied := StudyLibrarySwitchTo(CPStudyLibraryState, slName, false)
+    } else {
+        if IsObject(CPStudyReaderState)
+            StudyReaderClose(CPStudyReaderState)
+        slApplied := StudyLibraryActivateName(slName)
+    }
+    if !slApplied {
+        GameProfileAppendWarning(
+            &slWarnings,
+            "Study Library '" slName
+                . "' could not be selected; the current library was kept."
+        )
+        return false
+    }
+    studyLibraryDir := StudyLibraryConfiguredDirectory()
+    EnvSet("STUDY_LIBRARY_DIR", studyLibraryDir)
+    return true
+}
+
+StudyLibraryRefreshLibrarySelector(slState, slSelect := "") {
+    if !StudyLibraryStateAlive(slState)
+        return
+    if (slSelect = "")
+        slSelect := slState.Has("libraryName")
+            ? slState["libraryName"] : StudyLibraryConfiguredName()
+    slNames := StudyLibraryListNames()
+    slState["suspendLibrary"] := true
+    try {
+        slState["libraryDdl"].Delete()
+        slState["libraryDdl"].Add(slNames)
+        slIndex := 1
+        for slCandidateIndex, slCandidate in slNames {
+            if (StrLower(slCandidate) = StrLower(slSelect)) {
+                slIndex := slCandidateIndex
+                slSelect := slCandidate
+                break
+            }
+        }
+        slState["libraryDdl"].Choose(slIndex)
+        slState["libraryNames"] := slNames
+        slState["libraryName"] := slSelect
+    } finally {
+        slState["suspendLibrary"] := false
+    }
+}
+
+StudyLibrarySwitchTo(slState, slName, slAnnounce := true) {
+    global CPStudyReaderState
+    if !StudyLibraryStateAlive(slState)
+        return false
+    if !StudyLibraryActivateName(slName) {
+        StudyLibraryRefreshLibrarySelector(slState)
+        return false
+    }
+    slName := StudyLibraryConfiguredName()
+    slDirectory := StudyLibraryConfiguredDirectory()
+    if IsObject(CPStudyReaderState)
+        StudyReaderClose(CPStudyReaderState)
+    slState["libraryName"] := slName
+    slState["database"] := slDirectory "\study_library.db"
+    slState["storage"] := 0
+    slState["storageLastTick"] := 0
+    slState["storageButton"].Enabled := false
+    slState["storageButton"].Text := "Storage..."
+    slState["search"].Value := ""
+    slState["profileMode"] := "all", slState["profileFilter"] := ""
+    slState["chapterMode"] := "all", slState["chapterFilter"] := ""
+    slState["speakerMode"] := "all", slState["speakerFilter"] := ""
+    slState["tagMode"] := "all", slState["tagFilter"] := ""
+    slState["ankiMode"] := "all", slState["dateMode"] := "all"
+    slState["gui"].Title := "JRPG Translator - Study Library — " slName
+    StudyLibraryRefreshLibrarySelector(slState, slName)
+    StudyLibraryRunBridge(slState, "ensure")
+    StudyLibraryRefresh(slState)
+    StudyLibraryRefreshStorage(slState, true)
+    if slAnnounce
+        Toast("Study Library: " slName)
+    return true
+}
+
+StudyLibraryLibraryChanged(slState, *) {
+    if !StudyLibraryStateAlive(slState)
+        return
+    if (slState.Has("suspendLibrary") && slState["suspendLibrary"])
+        return
+    slName := Trim(slState["libraryDdl"].Text)
+    if (slName = "" || StrLower(slName) = StrLower(slState["libraryName"]))
+        return
+    StudyLibrarySwitchTo(slState, slName)
+}
+
+StudyLibraryCreateNew(slState, slDialog, slNameEdit, slManager := 0, *) {
+    global studyLibrariesRoot
+    slName := Trim(slNameEdit.Value)
+    slSafeName := StudyLibrarySafeName(slName)
+    if (slSafeName = "") {
+        GlossaryOwnedMessage(
+            slDialog.Hwnd,
+            "Enter a name up to 80 characters without any of these characters:"
+                . "`n`n\ / : * ? `" < > |`n`nThe name Default is reserved.",
+            "New Study Library"
+        )
+        slNameEdit.Focus()
+        return
+    }
+    slDirectory := StudyLibraryDirectoryForName(slSafeName)
+    if DirExist(slDirectory) {
+        GlossaryOwnedMessage(
+            slDialog.Hwnd,
+            "A Study Library named '" slSafeName "' already exists.",
+            "New Study Library"
+        )
+        slNameEdit.Focus()
+        return
+    }
+    try {
+        DirCreate(studyLibrariesRoot)
+        DirCreate(slDirectory)
+    } catch as slCreateError {
+        GlossaryOwnedMessage(
+            slDialog.Hwnd,
+            "The Study Library folder could not be created:`n`n"
+                . slCreateError.Message,
+            "New Study Library", "ok", "error"
+        )
+        return
+    }
+    try slDialog.Destroy()
+    StudyLibrarySwitchTo(slState, slSafeName)
+    if IsObject(slManager)
+        StudyLibraryRefreshManager(slManager, slSafeName)
+}
+
+StudyLibraryOpenNew(slState, slManager := 0, *) {
+    if !StudyLibraryStateAlive(slState)
+        return
+    slOwnerHwnd := slState["gui"].Hwnd
+    if IsObject(slManager) {
+        try slOwnerHwnd := slManager["gui"].Hwnd
+    }
+    slDialog := Gui(
+        "+Owner" slOwnerHwnd " +OwnDialogs",
+        "New Study Library"
+    )
+    slDialog.MarginX := 18, slDialog.MarginY := 16
+    slDialog.SetFont("s10", "Segoe UI")
+    slDialog.Add("Text", "xm ym w450", "Create a separate Study Library")
+        .SetFont("s11 Bold")
+    slDialog.Add(
+        "Text", "xm y+8 w450 h42 cGray",
+        "New explanations will be saved to this library after it is created. "
+            . "Existing explanations remain in their current library."
+    )
+    slNameEdit := slDialog.Add("Edit", "xm y+12 w450", "")
+    try slNameEdit.SetCueBanner("For example: Dragon Quest or PC Engine")
+    slCreate := slDialog.Add("Button", "xm y+14 w110 Default", "Create")
+    slCancel := slDialog.Add("Button", "x+10 yp w100", "Cancel")
+    slCreate.OnEvent(
+        "Click",
+        StudyLibraryCreateNew.Bind(
+            slState, slDialog, slNameEdit, slManager
+        )
+    )
+    slCancel.OnEvent("Click", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Close", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(slDialog)
+    slNameEdit.Focus()
+}
+
+StudyLibraryManagerSelectedName(slManager) {
+    try slRow := slManager["list"].GetNext()
+    catch
+        return ""
+    return slRow > 0 ? Trim(slManager["list"].GetText(slRow, 1)) : ""
+}
+
+StudyLibraryManagerUpdateActions(slManager, *) {
+    slName := StudyLibraryManagerSelectedName(slManager)
+    slHasSelection := slName != ""
+    slIsDefault := StrLower(slName) = "default"
+    slIsActive := slHasSelection
+        && StrLower(slName) = StrLower(slManager["ownerState"]["libraryName"])
+    slManager["switchButton"].Enabled := slHasSelection && !slIsActive
+    slManager["renameButton"].Enabled := slHasSelection && !slIsDefault
+    slManager["archiveButton"].Enabled := slHasSelection && !slIsDefault
+    slManager["openButton"].Enabled := slHasSelection
+}
+
+StudyLibraryManagerSummary(slState, slName, slOutputDir) {
+    return StudyLibraryManagerSummaryDirectory(
+        slState, StudyLibraryDirectoryForName(slName), slOutputDir
+    )
+}
+
+StudyLibraryManagerSummaryDirectory(slState, slDirectory, slOutputDir) {
+    slDatabase := slDirectory "\study_library.db"
+    slSummaryState := Map(
+        "database", slDatabase,
+        "outputDir", slOutputDir
+    )
+    if !StudyLibraryRunBridge(slSummaryState, "storage")
+        return Map("sources", 0, "explanations", 0, "bytes", 0)
+    slRows := StudyLibraryReadRows(slOutputDir "\storage.tsv")
+    if !slRows.Length || slRows[1].Length < 13
+        return Map("sources", 0, "explanations", 0, "bytes", 0)
+    return Map(
+        "sources", Integer(slRows[1][12]),
+        "explanations", Integer(slRows[1][13]),
+        "bytes", Integer(slRows[1][9])
+    )
+}
+
+StudyLibraryRefreshManager(slManager, slPrefer := "") {
+    slState := slManager["ownerState"]
+    if !StudyLibraryStateAlive(slState)
+        return
+    if (slPrefer = "")
+        slPrefer := StudyLibraryManagerSelectedName(slManager)
+    slNames := StudyLibraryListNames()
+    slManager["list"].Delete()
+    slSelectedRow := 0
+    for slIndex, slName in slNames {
+        slSummary := StudyLibraryManagerSummary(
+            slState, slName, slManager["outputDir"]
+        )
+        slStatus := StrLower(slName) = StrLower(slState["libraryName"])
+            ? "Active" : ""
+        slManager["list"].Add(
+            "", slName, slStatus, slSummary["sources"],
+            slSummary["explanations"],
+            StudyLibraryFormatBytes(slSummary["bytes"])
+        )
+        if (StrLower(slName) = StrLower(slPrefer))
+            slSelectedRow := slIndex
+    }
+    Loop 5
+        slManager["list"].ModifyCol(A_Index, "AutoHdr")
+    if slNames.Length {
+        if !slSelectedRow
+            slSelectedRow := 1
+        slManager["list"].Modify(slSelectedRow, "Select Focus Vis")
+    }
+    StudyLibraryManagerUpdateActions(slManager)
+}
+
+StudyLibraryManagerSwitch(slManager, *) {
+    slName := StudyLibraryManagerSelectedName(slManager)
+    if (slName = "")
+        return
+    if StudyLibrarySwitchTo(slManager["ownerState"], slName)
+        StudyLibraryRefreshManager(slManager, slName)
+}
+
+StudyLibraryManagerNew(slManager, *) {
+    slState := slManager["ownerState"]
+    StudyLibraryOpenNew(slState, slManager)
+}
+
+StudyLibraryManagerOpenFolder(slManager, *) {
+    slName := StudyLibraryManagerSelectedName(slManager)
+    slDirectory := StudyLibraryDirectoryForName(slName)
+    if (slDirectory != "" && DirExist(slDirectory))
+        Run('explorer.exe "' slDirectory '"')
+}
+
+StudyLibraryManagerRenameApply(
+    slManager, slDialog, slNameEdit, slOldName, *
+) {
+    global CPStudyReaderState
+    slNewName := StudyLibrarySafeName(Trim(slNameEdit.Value))
+    if (slNewName = "") {
+        GlossaryOwnedMessage(
+            slDialog.Hwnd,
+            "Enter a name up to 80 characters without any of these characters:"
+                . "`n`n\ / : * ? `" < > |`n`nThe name Default is reserved.",
+            "Rename Study Library"
+        )
+        slNameEdit.Focus()
+        return
+    }
+    if (StrLower(slNewName) = StrLower(slOldName)) {
+        try slDialog.Destroy()
+        return
+    }
+    slOldDirectory := StudyLibraryDirectoryForName(slOldName)
+    slNewDirectory := StudyLibraryDirectoryForName(slNewName)
+    if DirExist(slNewDirectory) {
+        GlossaryOwnedMessage(
+            slDialog.Hwnd,
+            "A Study Library named '" slNewName "' already exists.",
+            "Rename Study Library"
+        )
+        slNameEdit.Focus()
+        return
+    }
+    slState := slManager["ownerState"]
+    slWasActive := StrLower(slOldName) = StrLower(slState["libraryName"])
+    if slWasActive
+        StudyLibrarySwitchTo(slState, "Default", false)
+    try {
+        DirMove(slOldDirectory, slNewDirectory)
+    } catch as slRenameError {
+        if slWasActive
+            StudyLibrarySwitchTo(slState, slOldName, false)
+        GlossaryOwnedMessage(
+            slDialog.Hwnd,
+            "The Study Library could not be renamed:`n`n"
+                . slRenameError.Message,
+            "Rename Study Library", "ok", "error"
+        )
+        return
+    }
+    if slWasActive
+        StudyLibrarySwitchTo(slState, slNewName, false)
+    else
+        StudyLibraryRefreshLibrarySelector(slState)
+    try slDialog.Destroy()
+    StudyLibraryRefreshManager(slManager, slNewName)
+    Toast("Renamed Study Library to " slNewName)
+}
+
+StudyLibraryManagerRename(slManager, *) {
+    slOldName := StudyLibraryManagerSelectedName(slManager)
+    if (slOldName = "" || StrLower(slOldName) = "default")
+        return
+    slDialog := Gui(
+        "+Owner" slManager["gui"].Hwnd " +OwnDialogs",
+        "Rename Study Library"
+    )
+    slDialog.MarginX := 18, slDialog.MarginY := 16
+    slDialog.SetFont("s10", "Segoe UI")
+    slDialog.Add("Text", "xm ym w420", "Rename '" slOldName "'")
+        .SetFont("s11 Bold")
+    slNameEdit := slDialog.Add("Edit", "xm y+12 w420", slOldName)
+    slRename := slDialog.Add("Button", "xm y+14 w110 Default", "Rename")
+    slCancel := slDialog.Add("Button", "x+10 yp w100", "Cancel")
+    slRename.OnEvent(
+        "Click",
+        StudyLibraryManagerRenameApply.Bind(
+            slManager, slDialog, slNameEdit, slOldName
+        )
+    )
+    slCancel.OnEvent("Click", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Close", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(slDialog)
+    slNameEdit.Focus()
+    Send("^a")
+}
+
+StudyLibraryManagerArchive(slManager, *) {
+    global studyLibrariesArchiveRoot
+    slName := StudyLibraryManagerSelectedName(slManager)
+    if (slName = "" || StrLower(slName) = "default")
+        return
+    slArchiveMessage := "Archive the Study Library '" slName "'?`n`n"
+        . "It will disappear from the library selector, but its database, "
+        . "screenshots, backups, and Trash will be moved intact to:`n`n"
+        . studyLibrariesArchiveRoot
+    if (GlossaryOwnedMessage(
+        slManager["gui"].Hwnd, slArchiveMessage,
+        "Archive Study Library", "yesno", "warning"
+    ) != 6)
+        return
+    slState := slManager["ownerState"]
+    slWasActive := StrLower(slName) = StrLower(slState["libraryName"])
+    if slWasActive
+        StudyLibrarySwitchTo(slState, "Default", false)
+    slSource := StudyLibraryDirectoryForName(slName)
+    DirCreate(studyLibrariesArchiveRoot)
+    slStamp := FormatTime(, "yyyyMMdd-HHmmss")
+    slDestination := studyLibrariesArchiveRoot "\" slName "_" slStamp
+    try {
+        DirMove(slSource, slDestination)
+    } catch as slArchiveError {
+        if slWasActive
+            StudyLibrarySwitchTo(slState, slName, false)
+        GlossaryOwnedMessage(
+            slManager["gui"].Hwnd,
+            "The Study Library could not be archived:`n`n"
+                . slArchiveError.Message,
+            "Archive Study Library", "ok", "error"
+        )
+        return
+    }
+    StudyLibraryRefreshLibrarySelector(slState)
+    StudyLibraryRefreshManager(slManager, "Default")
+    Toast("Archived Study Library: " slName)
+}
+
+StudyLibraryArchiveEntries() {
+    global studyLibrariesArchiveRoot
+    slEntries := []
+    if !DirExist(studyLibrariesArchiveRoot)
+        return slEntries
+    slFolderNames := ""
+    Loop Files studyLibrariesArchiveRoot "\*", "D"
+        slFolderNames .= A_LoopFileName "`n"
+    slFolderNames := RTrim(slFolderNames, "`n")
+    if (slFolderNames = "")
+        return slEntries
+    slFolderNames := Sort(slFolderNames, "R")
+    Loop Parse slFolderNames, "`n", "`r" {
+        slFolderName := A_LoopField
+        if (slFolderName = "")
+            continue
+        slName := slFolderName
+        slArchivedAt := "Unknown"
+        if RegExMatch(
+            slFolderName, "^(.*)_([0-9]{8})-([0-9]{6})$", &slMatch
+        ) {
+            slName := slMatch[1]
+            slDate := slMatch[2], slTime := slMatch[3]
+            slArchivedAt := SubStr(slDate, 1, 4) "-"
+                . SubStr(slDate, 5, 2) "-" SubStr(slDate, 7, 2) " "
+                . SubStr(slTime, 1, 2) ":" SubStr(slTime, 3, 2) ":"
+                . SubStr(slTime, 5, 2)
+        } else {
+            try slArchivedAt := FormatTime(
+                FileGetTime(studyLibrariesArchiveRoot "\" slFolderName, "M"),
+                "yyyy-MM-dd HH:mm:ss"
+            )
+        }
+        slEntries.Push(Map(
+            "name", slName,
+            "folderName", slFolderName,
+            "path", studyLibrariesArchiveRoot "\" slFolderName,
+            "archivedAt", slArchivedAt
+        ))
+    }
+    return slEntries
+}
+
+StudyLibraryArchiveSelectedEntry(slArchive) {
+    try slRow := slArchive["list"].GetNext()
+    catch
+        return 0
+    if (slRow <= 0 || slRow > slArchive["entries"].Length)
+        return 0
+    return slArchive["entries"][slRow]
+}
+
+StudyLibraryArchiveUpdateActions(slArchive, *) {
+    slEntry := StudyLibraryArchiveSelectedEntry(slArchive)
+    slEnabled := IsObject(slEntry)
+    slArchive["restoreButton"].Enabled := slEnabled
+    slArchive["openButton"].Enabled := slEnabled
+}
+
+StudyLibraryRefreshArchives(slArchive, slPreferPath := "") {
+    if !StudyLibraryStateAlive(slArchive["ownerState"])
+        return
+    if (slPreferPath = "") {
+        slCurrent := StudyLibraryArchiveSelectedEntry(slArchive)
+        if IsObject(slCurrent)
+            slPreferPath := slCurrent["path"]
+    }
+    slEntries := StudyLibraryArchiveEntries()
+    slArchive["entries"] := slEntries
+    slArchive["list"].Delete()
+    slSelectedRow := 0
+    for slIndex, slEntry in slEntries {
+        slSummary := StudyLibraryManagerSummaryDirectory(
+            slArchive["ownerState"], slEntry["path"], slArchive["outputDir"]
+        )
+        slArchive["list"].Add(
+            "", slEntry["name"], slEntry["archivedAt"],
+            slSummary["sources"], slSummary["explanations"],
+            StudyLibraryFormatBytes(slSummary["bytes"])
+        )
+        if (StrLower(slEntry["path"]) = StrLower(slPreferPath))
+            slSelectedRow := slIndex
+    }
+    Loop 5
+        slArchive["list"].ModifyCol(A_Index, "AutoHdr")
+    if slEntries.Length {
+        if !slSelectedRow
+            slSelectedRow := 1
+        slArchive["list"].Modify(slSelectedRow, "Select Focus Vis")
+        slArchive["emptyText"].Text := ""
+    } else {
+        slArchive["emptyText"].Text := "No archived Study Libraries."
+    }
+    StudyLibraryArchiveUpdateActions(slArchive)
+}
+
+StudyLibraryArchiveOpenFolder(slArchive, *) {
+    slEntry := StudyLibraryArchiveSelectedEntry(slArchive)
+    if IsObject(slEntry) && DirExist(slEntry["path"])
+        Run('explorer.exe "' slEntry["path"] '"')
+}
+
+StudyLibraryArchiveRestoreApply(
+    slArchive, slDialog, slNameEdit, slEntry, *
+) {
+    slName := StudyLibrarySafeName(Trim(slNameEdit.Value))
+    if (slName = "") {
+        GlossaryOwnedMessage(
+            slDialog.Hwnd,
+            "Enter a name up to 80 characters without any of these characters:"
+                . "`n`n\ / : * ? `" < > |`n`nThe name Default is reserved.",
+            "Restore Study Library"
+        )
+        slNameEdit.Focus()
+        return
+    }
+    slDestination := StudyLibraryDirectoryForName(slName)
+    if (slDestination = "" || DirExist(slDestination)) {
+        GlossaryOwnedMessage(
+            slDialog.Hwnd,
+            "A current Study Library named '" slName "' already exists."
+                . "`n`nChoose a different name before restoring this archive.",
+            "Restore Study Library"
+        )
+        slNameEdit.Focus()
+        return
+    }
+    try {
+        DirCreate(RegExReplace(slDestination, "\\[^\\]+$"))
+        DirMove(slEntry["path"], slDestination)
+    } catch as slRestoreError {
+        GlossaryOwnedMessage(
+            slDialog.Hwnd,
+            "The Study Library could not be restored:`n`n"
+                . slRestoreError.Message,
+            "Restore Study Library", "ok", "error"
+        )
+        return
+    }
+    slManager := slArchive["manager"]
+    slState := slArchive["ownerState"]
+    StudyLibraryRefreshLibrarySelector(slState)
+    StudyLibraryRefreshManager(slManager, slName)
+    try slDialog.Destroy()
+    StudyLibraryRefreshArchives(slArchive)
+    Toast("Restored Study Library: " slName)
+}
+
+StudyLibraryArchiveRestore(slArchive, *) {
+    slEntry := StudyLibraryArchiveSelectedEntry(slArchive)
+    if !IsObject(slEntry)
+        return
+    slSuggestedName := slEntry["name"]
+    if DirExist(StudyLibraryDirectoryForName(slSuggestedName))
+        slSuggestedName .= " Restored"
+    slDialog := Gui(
+        "+Owner" slArchive["gui"].Hwnd " +OwnDialogs",
+        "Restore Study Library"
+    )
+    slDialog.MarginX := 18, slDialog.MarginY := 16
+    slDialog.SetFont("s10", "Segoe UI")
+    slDialog.Add("Text", "xm ym w460", "Restore '" slEntry["name"] "'")
+        .SetFont("s11 Bold")
+    slDialog.Add(
+        "Text", "xm y+8 w460 h42 cGray",
+        "The complete archived folder will return to the active library list. "
+            . "No existing library will be overwritten."
+    )
+    slNameEdit := slDialog.Add("Edit", "xm y+12 w460", slSuggestedName)
+    slRestore := slDialog.Add("Button", "xm y+14 w110 Default", "Restore")
+    slCancel := slDialog.Add("Button", "x+10 yp w100", "Cancel")
+    slRestore.OnEvent(
+        "Click",
+        StudyLibraryArchiveRestoreApply.Bind(
+            slArchive, slDialog, slNameEdit, slEntry
+        )
+    )
+    slCancel.OnEvent("Click", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Close", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(slDialog)
+    slNameEdit.Focus()
+    Send("^a")
+}
+
+StudyLibraryOpenArchives(slManager, *) {
+    global studyLibrariesArchiveRoot
+    slState := slManager["ownerState"]
+    if !StudyLibraryStateAlive(slState)
+        return
+    slOutputDir := slManager["outputDir"] "\archives"
+    DirCreate(slOutputDir)
+    slGui := Gui(
+        "+Owner" slManager["gui"].Hwnd " +OwnDialogs",
+        "Archived Study Libraries"
+    )
+    slGui.MarginX := 16, slGui.MarginY := 14
+    slGui.SetFont("s10", "Segoe UI")
+    slGui.Add("Text", "xm ym w690", "Archived Study Libraries")
+        .SetFont("s11 Bold")
+    slHint := slGui.Add(
+        "Text", "xm y+5 w690 h42 cGray",
+        "Archives retain their complete database and media. Restore returns "
+            . "an archive to the active library list; nothing here is removed "
+            . "automatically."
+    )
+    CPRegisterMutedControl(slHint)
+    slList := slGui.Add(
+        "ListView", "xm y+10 w690 h230 Grid -Multi",
+        ["Library", "Archived", "Sources", "Explanations", "Storage"]
+    )
+    slEmpty := slGui.Add("Text", "xm y+5 w690 h24 cGray", "")
+    CPRegisterMutedControl(slEmpty)
+    slRestore := slGui.Add("Button", "xm y+7 w100 Disabled", "Restore...")
+    slOpen := slGui.Add("Button", "x+8 yp w110 Disabled", "Open Folder")
+    slClose := slGui.Add("Button", "x+8 yp w82 Default", "Close")
+    slArchive := Map(
+        "gui", slGui,
+        "manager", slManager,
+        "ownerState", slState,
+        "outputDir", slOutputDir,
+        "list", slList,
+        "entries", [],
+        "emptyText", slEmpty,
+        "restoreButton", slRestore,
+        "openButton", slOpen
+    )
+    slList.OnEvent("ItemFocus", StudyLibraryArchiveUpdateActions.Bind(slArchive))
+    slList.OnEvent("ItemSelect", StudyLibraryArchiveUpdateActions.Bind(slArchive))
+    slList.OnEvent("DoubleClick", StudyLibraryArchiveRestore.Bind(slArchive))
+    slRestore.OnEvent("Click", StudyLibraryArchiveRestore.Bind(slArchive))
+    slOpen.OnEvent("Click", StudyLibraryArchiveOpenFolder.Bind(slArchive))
+    slClose.OnEvent("Click", StudyLibraryCloseDialog.Bind(slGui))
+    slGui.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slGui))
+    slGui.OnEvent("Close", StudyLibraryCloseDialog.Bind(slGui))
+    StudyLibraryRefreshArchives(slArchive)
+    slGui.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(slGui)
+}
+
+StudyLibraryOpenManager(slState, *) {
+    if !StudyLibraryStateAlive(slState)
+        return
+    slOutputDir := slState["outputDir"] "\manager"
+    DirCreate(slOutputDir)
+    slGui := Gui(
+        "+Owner" slState["gui"].Hwnd " +OwnDialogs",
+        "Study Libraries"
+    )
+    slGui.MarginX := 16, slGui.MarginY := 14
+    slGui.SetFont("s10", "Segoe UI")
+    slTitle := slGui.Add("Text", "xm ym w690", "Manage Study Libraries")
+    slTitle.SetFont("s11 Bold")
+    slHint := slGui.Add(
+        "Text", "xm y+5 w690 h42 cGray",
+        "Each library has its own database, screenshots, backups, and Trash. "
+            . "Default preserves the original Study Library folder and cannot "
+            . "be renamed or archived."
+    )
+    CPRegisterMutedControl(slHint)
+    slList := slGui.Add(
+        "ListView", "xm y+10 w690 h230 Grid -Multi",
+        ["Library", "Status", "Sources", "Explanations", "Storage"]
+    )
+    slNew := slGui.Add("Button", "xm y+12 w82", "New...")
+    slSwitch := slGui.Add("Button", "x+8 yp w82 Disabled", "Switch")
+    slRename := slGui.Add("Button", "x+8 yp w90 Disabled", "Rename...")
+    slArchive := slGui.Add("Button", "x+8 yp w90 Disabled", "Archive...")
+    slArchived := slGui.Add("Button", "x+8 yp w96", "Archived...")
+    slOpen := slGui.Add("Button", "x+8 yp w110 Disabled", "Open Folder")
+    slClose := slGui.Add("Button", "x+8 yp w82 Default", "Close")
+    slManager := Map(
+        "gui", slGui,
+        "ownerState", slState,
+        "outputDir", slOutputDir,
+        "title", slTitle,
+        "hint", slHint,
+        "list", slList,
+        "newButton", slNew,
+        "switchButton", slSwitch,
+        "renameButton", slRename,
+        "archiveButton", slArchive,
+        "archivedButton", slArchived,
+        "openButton", slOpen,
+        "closeButton", slClose
+    )
+    slList.OnEvent("ItemFocus", StudyLibraryManagerUpdateActions.Bind(slManager))
+    slList.OnEvent("ItemSelect", StudyLibraryManagerUpdateActions.Bind(slManager))
+    slList.OnEvent("DoubleClick", StudyLibraryManagerSwitch.Bind(slManager))
+    slNew.OnEvent("Click", StudyLibraryManagerNew.Bind(slManager))
+    slSwitch.OnEvent("Click", StudyLibraryManagerSwitch.Bind(slManager))
+    slRename.OnEvent("Click", StudyLibraryManagerRename.Bind(slManager))
+    slArchive.OnEvent("Click", StudyLibraryManagerArchive.Bind(slManager))
+    slArchived.OnEvent("Click", StudyLibraryOpenArchives.Bind(slManager))
+    slOpen.OnEvent("Click", StudyLibraryManagerOpenFolder.Bind(slManager))
+    slClose.OnEvent("Click", StudyLibraryCloseDialog.Bind(slGui))
+    slGui.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slGui))
+    slGui.OnEvent("Close", StudyLibraryCloseDialog.Bind(slGui))
+    StudyLibraryRefreshManager(slManager, slState["libraryName"])
+    slGui.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(slGui)
+}
+
+StudyLibrarySaveToggleChanged(*) {
+    global saveLibraryChk, saveLibraryScreenshotsChk, iniPath
+    enabled := saveLibraryChk.Value ? 1 : 0
+    IniWrite(enabled, iniPath, "cfg", "saveStudyLibrary")
+    saveLibraryScreenshotsChk.Enabled := enabled
+}
+
+StudyLibraryHexDecode(slHex) {
+    if (slHex = "")
+        return ""
+    slByteCount := Floor(StrLen(slHex) / 2)
+    if (slByteCount <= 0)
+        return ""
+    slBuffer := Buffer(slByteCount, 0)
+    Loop slByteCount {
+        slByte := Integer("0x" SubStr(slHex, (A_Index - 1) * 2 + 1, 2))
+        NumPut("UChar", slByte, slBuffer, A_Index - 1)
+    }
+    return StrGet(slBuffer, slByteCount, "UTF-8")
+}
+
+StudyLibraryReadRows(slPath) {
+    slRows := []
+    if !FileExist(slPath)
+        return slRows
+    try slText := FileRead(slPath, "UTF-8")
+    catch
+        return slRows
+    Loop Parse slText, "`n", "`r" {
+        if (A_LoopField = "")
+            continue
+        slRows.Push(StrSplit(A_LoopField, "`t"))
+    }
+    return slRows
+}
+
+StudyLibraryFormatBytes(slBytes) {
+    try slBytes := Max(0, Integer(slBytes))
+    catch
+        slBytes := 0
+    if (slBytes < 1024)
+        return slBytes " B"
+    slUnits := ["KB", "MB", "GB", "TB"]
+    slValue := slBytes / 1024
+    for slUnit in slUnits {
+        if (slValue < 1024 || slUnit = "TB") {
+            slDecimals := slValue < 10 ? 1 : 0
+            return Round(slValue, slDecimals) " " slUnit
+        }
+        slValue /= 1024
+    }
+    return slBytes " B"
+}
+
+StudyLibraryReadStorage(slState) {
+    slRows := StudyLibraryReadRows(slState["outputDir"] "\storage.tsv")
+    if !slRows.Length || slRows[1].Length < 13
+        return false
+    slRow := slRows[1]
+    return Map(
+        "databaseBytes", Integer(slRow[1]),
+        "mediaBytes", Integer(slRow[2]),
+        "mediaFiles", Integer(slRow[3]),
+        "backupBytes", Integer(slRow[4]),
+        "backupFiles", Integer(slRow[5]),
+        "trashBytes", Integer(slRow[6]),
+        "trashFiles", Integer(slRow[7]),
+        "otherBytes", Integer(slRow[8]),
+        "totalBytes", Integer(slRow[9]),
+        "freeBytes", Integer(slRow[10]),
+        "volumeBytes", Integer(slRow[11]),
+        "sourceCount", Integer(slRow[12]),
+        "explanationCount", Integer(slRow[13])
+    )
+}
+
+StudyLibraryRefreshStorage(slState, slForce := false, *) {
+    if !StudyLibraryStateAlive(slState)
+        return false
+    if (slState.Has("storageRefreshing") && slState["storageRefreshing"])
+        return false
+    slLastTick := slState.Has("storageLastTick") ? slState["storageLastTick"] : 0
+    if (!slForce && slLastTick && A_TickCount - slLastTick < 30000) {
+        if slState.Has("storage") && IsObject(slState["storage"])
+            slState["storageButton"].Text := "Storage: "
+                . StudyLibraryFormatBytes(slState["storage"]["totalBytes"])
+        return true
+    }
+
+    slState["storageRefreshing"] := true
+    try {
+        if !StudyLibraryRunBridge(slState, "storage")
+            return false
+        if !StudyLibraryStateAlive(slState)
+            return false
+        slStorage := StudyLibraryReadStorage(slState)
+        if !IsObject(slStorage)
+            return false
+        slState["storage"] := slStorage
+        slState["storageLastTick"] := A_TickCount
+        slState["storageButton"].Text := "Storage: "
+            . StudyLibraryFormatBytes(slStorage["totalBytes"])
+        slState["storageButton"].Enabled := true
+        return true
+    } finally {
+        if IsObject(slState)
+            slState["storageRefreshing"] := false
+    }
+}
+
+StudyLibraryUpdateStorageDialog(slState, slControls) {
+    if !(slState.Has("storage") && IsObject(slState["storage"]))
+        return
+    slStorage := slState["storage"]
+    slControls["entries"].Value := slStorage["sourceCount"] " source"
+        . (slStorage["sourceCount"] = 1 ? "" : "s") " • "
+        . slStorage["explanationCount"] " explanation"
+        . (slStorage["explanationCount"] = 1 ? "" : "s")
+    slControls["database"].Value := StudyLibraryFormatBytes(
+        slStorage["databaseBytes"]
+    )
+    slControls["media"].Value := StudyLibraryFormatBytes(
+        slStorage["mediaBytes"]
+    ) "  (" slStorage["mediaFiles"] " file"
+        . (slStorage["mediaFiles"] = 1 ? "" : "s") ")"
+    slControls["backups"].Value := StudyLibraryFormatBytes(
+        slStorage["backupBytes"]
+    ) "  (" slStorage["backupFiles"] " file"
+        . (slStorage["backupFiles"] = 1 ? "" : "s") ")"
+    slControls["trash"].Value := StudyLibraryFormatBytes(
+        slStorage["trashBytes"]
+    ) "  (" slStorage["trashFiles"] " file"
+        . (slStorage["trashFiles"] = 1 ? "" : "s") ")"
+    slControls["other"].Value := StudyLibraryFormatBytes(
+        slStorage["otherBytes"]
+    )
+    slControls["total"].Value := StudyLibraryFormatBytes(
+        slStorage["totalBytes"]
+    )
+    slControls["free"].Value := StudyLibraryFormatBytes(
+        slStorage["freeBytes"]
+    ) " of " StudyLibraryFormatBytes(slStorage["volumeBytes"])
+
+    if (slStorage["freeBytes"] < 2 * 1024 * 1024 * 1024) {
+        slNotice := "Disk space is running low. Consider moving or cleaning "
+            . "Study Library media, backups, or Trash."
+    } else if (slStorage["sourceCount"] >= 5000) {
+        slNotice := "This is a large library. It remains safe to use, but opening, "
+            . "refreshing, and broad searches may become slower."
+    } else {
+        slNotice := "There is no fixed Study Library limit. Screenshots normally "
+            . "account for most of its disk usage."
+    }
+    slControls["notice"].Value := slNotice
+}
+
+StudyLibraryRefreshStorageDialog(slState, slControls, *) {
+    if StudyLibraryRefreshStorage(slState, true)
+        StudyLibraryUpdateStorageDialog(slState, slControls)
+}
+
+StudyLibraryOpenStorageFolder(slState, *) {
+    SplitPath(slState["database"],, &slDirectory)
+    if (slDirectory != "")
+        Run('explorer.exe "' slDirectory '"')
+}
+
+StudyLibraryOpenStorage(slState, *) {
+    if !StudyLibraryRefreshStorage(slState, true)
+        return
+    SplitPath(slState["database"],, &slDirectory)
+    slDialog := Gui(
+        "+Owner" slState["gui"].Hwnd " +OwnDialogs",
+        "Study Library - Storage - " slState["libraryName"]
+    )
+    slDialog.MarginX := 18, slDialog.MarginY := 16
+    slDialog.SetFont("s10", "Segoe UI")
+    slDialog.Add(
+        "Text", "xm ym w540",
+        "Current Study Library: " slState["libraryName"]
+    )
+        .SetFont("s11 Bold")
+    slPath := slDialog.Add(
+        "Edit", "xm y+8 w540 h30 ReadOnly", slDirectory
+    )
+
+    slControls := Map()
+    slRows := [
+        ["entries", "Saved entries"],
+        ["database", "Database"],
+        ["media", "Active screenshots"],
+        ["backups", "Recovery backups"],
+        ["trash", "Trash"],
+        ["other", "Other files"],
+        ["total", "Total Study Library"],
+        ["free", "Free disk space"]
+    ]
+    for slIndex, slRow in slRows {
+        slYOption := slIndex = 1 ? "xm y+16" : "xm y+10"
+        slLabel := slDialog.Add("Text", slYOption " w180", slRow[2] ":")
+        if (slRow[1] = "total")
+            slLabel.SetFont("Bold")
+        slValue := slDialog.Add("Text", "x+10 yp w350 Right", "")
+        if (slRow[1] = "total")
+            slValue.SetFont("Bold")
+        slControls[slRow[1]] := slValue
+    }
+    slNotice := slDialog.Add("Text", "xm y+18 w540 h46 cGray", "")
+    CPRegisterMutedControl(slNotice)
+    slControls["notice"] := slNotice
+
+    slOpenFolder := slDialog.Add("Button", "xm y+14 w160", "Open Library Folder")
+    slRefresh := slDialog.Add("Button", "x+10 yp w100", "Refresh")
+    slClose := slDialog.Add("Button", "x+10 yp w100 Default", "Close")
+    slOpenFolder.OnEvent("Click", StudyLibraryOpenStorageFolder.Bind(slState))
+    slRefresh.OnEvent(
+        "Click", StudyLibraryRefreshStorageDialog.Bind(slState, slControls)
+    )
+    slClose.OnEvent("Click", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Close", StudyLibraryCloseDialog.Bind(slDialog))
+    StudyLibraryUpdateStorageDialog(slState, slControls)
+    slDialog.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(slDialog)
+}
+
+StudyLibraryRefreshAll(slState, *) {
+    StudyLibraryRefresh(slState)
+    StudyLibraryRefreshStorage(slState, true)
+}
+
+StudyLibraryRunBridge(slState, slAction, slGroupId := 0, slVersion := 0) {
+    global pythonExe
+    slPython := ResolvePath(pythonExe)
+    slBridge := A_ScriptDir "\scripts\study_library.py"
+    if !(FileExist(slPython) && FileExist(slBridge)) {
+        MsgBox(
+            "The Study Library viewer needs valid Python and bridge paths.`n`n"
+            . "Python:`n" slPython "`n`nBridge:`n" slBridge,
+            "Study Library",
+            "OK Icon!"
+        )
+        return false
+    }
+
+    slCommand := Format(
+        '"{1}" "{2}" {3} --db "{4}" --output-dir "{5}"',
+        slPython, slBridge, slAction, slState["database"], slState["outputDir"]
+    )
+    if (slAction = "detail" || slAction = "set-metadata"
+        || slAction = "set-anki" || slAction = "remove-version") {
+        slCommand .= " --group-id " Integer(slGroupId)
+    }
+    if (slAction = "detail" || slAction = "remove-version")
+        slCommand .= " --version " Integer(slVersion)
+    DbgCP("Study Library bridge -> " slCommand)
+    slBridgeOperation := (slAction = "set-metadata" || slAction = "bulk-metadata"
+        || slAction = "set-anki" || slAction = "remove-version")
+        ? "updated" : "read"
+    try slExitCode := RunWait(slCommand, A_ScriptDir, "Hide")
+    catch as slBridgeError {
+        MsgBox(
+            "The Study Library could not be " slBridgeOperation ".`n`n"
+            . slBridgeError.Message,
+            "Study Library",
+            "OK Iconx"
+        )
+        return false
+    }
+    if (slExitCode != 0) {
+        MsgBox(
+            "The Study Library could not be " slBridgeOperation
+            . " (bridge exit " slExitCode ").",
+            "Study Library",
+            "OK Iconx"
+        )
+        return false
+    }
+    return true
+}
+
+StudyLibraryClearDetail(slState, slMessage := "Select an explanation.") {
+    slState["currentGroupId"] := 0
+    slState["versions"] := []
+    slState["sections"] := []
+    slState["media"] := []
+    slState["mediaIndex"] := 0
+    slState["currentVersion"] := 0
+    slState["currentChapter"] := ""
+    slState["currentSpeaker"] := ""
+    slState["currentTags"] := ""
+    slState["currentAddedToAnkiAt"] := ""
+    slState["currentProfile"] := ""
+    slState["currentProvider"] := ""
+    slState["currentModel"] := ""
+    slState["currentPrompt"] := ""
+    slState["detailTitle"].Value := slMessage
+    slState["metadata"].Value := ""
+    slState["source"].Value := ""
+    slState["explanation"].Value := ""
+    slState["versionDdl"].Delete()
+    slState["versionDdl"].Enabled := false
+    if slState.Has("editDetailsButton")
+        slState["editDetailsButton"].Enabled := false
+    if slState.Has("removeVersionButton")
+        slState["removeVersionButton"].Enabled := false
+    StudyLibrarySyncVersionNavigation(slState)
+    if slState.Has("studyButton")
+        slState["studyButton"].Enabled := false
+    slState["sectionDdl"].Delete()
+    slState["sectionDdl"].Add(["Full explanation"])
+    slState["sectionDdl"].Choose(1)
+    slState["sectionDdl"].Enabled := false
+    if slState.Has("sectionNavCallback")
+        slState["sectionNavCallback"].Call()
+    slState["picture"].Visible := false
+    try slState["picture"].Value := ""
+    slState["imageInfo"].Value := "No source screenshot selected."
+    slState["previousImage"].Enabled := false
+    slState["nextImage"].Enabled := false
+    slState["openImage"].Enabled := false
+}
+
+StudyLibrarySyncVersionNavigation(slState) {
+    slCount := slState["versions"].Length
+    slIndex := slState["versionDdl"].Value
+    slLabel := ""
+    if (slIndex >= 1 && slIndex <= slCount) {
+        slVersionEntry := slState["versions"][slIndex]
+        slLabel := Format(
+            "v{1:02}  •  {2}",
+            slVersionEntry["version"],
+            slVersionEntry["created"]
+        )
+        if slVersionEntry["preferred"]
+            slLabel .= "  (latest)"
+    }
+    if slState.Has("versionView")
+        slState["versionView"].Value := slLabel
+    if slState.Has("previousVersion")
+        slState["previousVersion"].Enabled := slIndex > 1
+    if slState.Has("nextVersion")
+        slState["nextVersion"].Enabled := slIndex >= 1 && slIndex < slCount
+    if slState.Has("removeVersionButton") {
+        slState["removeVersionButton"].Text := slCount = 1
+            ? "Remove explanation..."
+            : "Remove version..."
+        slState["removeVersionButton"].Enabled := slCount > 0
+    }
+}
+
+StudyLibraryStepVersion(slState, slDirection, *) {
+    slIndex := slState["versionDdl"].Value
+    slTargetIndex := slIndex + slDirection
+    if (slIndex < 1 || slTargetIndex < 1
+        || slTargetIndex > slState["versions"].Length)
+        return
+    StudyLibraryLoadGroup(
+        slState,
+        slState["currentGroupId"],
+        slState["versions"][slTargetIndex]["version"]
+    )
+}
+
+StudyLibraryImageDimensions(slPath, &slWidth, &slHeight) {
+    slWidth := 0, slHeight := 0
+    try {
+        slImageType := 0
+        slHandle := LoadPicture(slPath, "", &slImageType)
+        if !slHandle
+            return false
+        if (slImageType = 0) {
+            slBitmapInfo := Buffer(32, 0)
+            if DllCall("gdi32\GetObjectW", "ptr", slHandle, "int", slBitmapInfo.Size,
+                "ptr", slBitmapInfo.Ptr, "int") {
+                slWidth := Abs(NumGet(slBitmapInfo, 4, "Int"))
+                slHeight := Abs(NumGet(slBitmapInfo, 8, "Int"))
+            }
+            DllCall("gdi32\DeleteObject", "ptr", slHandle)
+        } else {
+            DllCall("user32\DestroyIcon", "ptr", slHandle)
+        }
+    }
+    return (slWidth > 0 && slHeight > 0)
+}
+
+StudyLibraryShowImage(slState, *) {
+    if !(slState.Has("gui") && slState["gui"] && slState["gui"].Hwnd)
+        return
+    slMedia := slState["media"]
+    slIndex := slState["mediaIndex"]
+    if (slIndex < 1 || slIndex > slMedia.Length) {
+        slState["picture"].Visible := false
+        slState["imageInfo"].Value := "No source screenshot saved for this version."
+        slState["previousImage"].Enabled := false
+        slState["nextImage"].Enabled := false
+        slState["openImage"].Enabled := false
+        return
+    }
+
+    slItem := slMedia[slIndex]
+    slPath := slItem["path"]
+    if !FileExist(slPath) {
+        slState["picture"].Visible := false
+        slState["imageInfo"].Value := "The saved source screenshot is missing."
+        slState["previousImage"].Enabled := (slIndex > 1)
+        slState["nextImage"].Enabled := (slIndex < slMedia.Length)
+        slState["openImage"].Enabled := false
+        return
+    }
+
+    slArea := slState["imageArea"]
+    slNativeW := slItem["width"], slNativeH := slItem["height"]
+    if (slNativeW <= 0 || slNativeH <= 0) {
+        StudyLibraryImageDimensions(slPath, &slNativeW, &slNativeH)
+        slItem["width"] := slNativeW, slItem["height"] := slNativeH
+    }
+    if (slNativeW <= 0 || slNativeH <= 0) {
+        slNativeW := slArea["w"], slNativeH := slArea["h"]
+    }
+    slScale := Min(slArea["w"] / slNativeW, slArea["h"] / slNativeH)
+    slDisplayW := Max(1, Round(slNativeW * slScale))
+    slDisplayH := Max(1, Round(slNativeH * slScale))
+    slX := slArea["x"] + Floor((slArea["w"] - slDisplayW) / 2)
+    slY := slArea["y"] + Floor((slArea["h"] - slDisplayH) / 2)
+    try {
+        ; Picture load dimensions are physical pixels, while GUI Move uses
+        ; DPI-scaled logical coordinates. Supplying logical values directly
+        ; shrinks previews severely on high-DPI displays.
+        slDpi := GetWindowDPI(slState["gui"].Hwnd)
+        slLoadW := Max(1, Round(slDisplayW * slDpi / 96))
+        slLoadH := Max(1, Round(slDisplayH * slDpi / 96))
+        slState["picture"].Value := "*w" slLoadW " *h" slLoadH " " slPath
+        ; Assigning a new bitmap can resize the Picture control. Restore the
+        ; intended logical bounds after loading it.
+        slState["picture"].Move(slX, slY, slDisplayW, slDisplayH)
+        slState["picture"].Visible := true
+    } catch {
+        slState["picture"].Visible := false
+    }
+    slState["imageInfo"].Value := "Screenshot " slIndex " of " slMedia.Length
+    slState["previousImage"].Enabled := (slIndex > 1)
+    slState["nextImage"].Enabled := (slIndex < slMedia.Length)
+    slState["openImage"].Enabled := true
+}
+
+StudyLibraryPreviousImage(slState, *) {
+    if (slState["mediaIndex"] > 1) {
+        slState["mediaIndex"] -= 1
+        StudyLibraryShowImage(slState)
+    }
+}
+
+StudyLibraryNextImage(slState, *) {
+    if (slState["mediaIndex"] < slState["media"].Length) {
+        slState["mediaIndex"] += 1
+        StudyLibraryShowImage(slState)
+    }
+}
+
+StudyLibraryOpenImage(slState, *) {
+    slIndex := slState["mediaIndex"]
+    if (slIndex < 1 || slIndex > slState["media"].Length)
+        return
+    slPath := slState["media"][slIndex]["path"]
+    if FileExist(slPath)
+        try Run('"' slPath '"')
+}
+
+StudyLibraryUpdateMetadataText(slState) {
+    if (slState["currentGroupId"] <= 0) {
+        slState["metadata"].Value := ""
+        return
+    }
+    slProfile := slState.Has("currentProfile") ? slState["currentProfile"] : ""
+    slProvider := slState.Has("currentProvider") ? slState["currentProvider"] : ""
+    slModel := slState.Has("currentModel") ? slState["currentModel"] : ""
+    slPrompt := slState.Has("currentPrompt") ? slState["currentPrompt"] : ""
+    slState["metadata"].Value := "Profile: "
+        . (slProfile != "" ? slProfile : "Unsorted")
+        . "    Chapter: "
+        . (slState["currentChapter"] != "" ? slState["currentChapter"] : "—")
+        . "    Speaker: "
+        . (slState["currentSpeaker"] != "" ? slState["currentSpeaker"] : "—")
+        . "`r`nTags: "
+        . (slState["currentTags"] != "" ? slState["currentTags"] : "—")
+        . "    Anki: "
+        . (slState["currentAddedToAnkiAt"] != ""
+            ? "Added " SubStr(slState["currentAddedToAnkiAt"], 1, 10)
+            : "Not added")
+        . "    Model: " slProvider " / " slModel "    Prompt: " slPrompt
+}
+
+StudyLibraryLoadGroup(slState, slGroupId, slVersion := 0) {
+    if (slGroupId <= 0)
+        return StudyLibraryClearDetail(slState)
+    if !StudyLibraryRunBridge(slState, "detail", slGroupId, slVersion)
+        return
+
+    slOutputDir := slState["outputDir"]
+    slDetailRows := StudyLibraryReadRows(slOutputDir "\detail.tsv")
+    if !slDetailRows.Length
+        return StudyLibraryClearDetail(slState, "This explanation is no longer available.")
+    slDetail := slDetailRows[1]
+    if (slDetail.Length < 10)
+        return StudyLibraryClearDetail(slState, "This explanation could not be read.")
+
+    slState["currentGroupId"] := Integer(slDetail[1])
+    slSelectedVersion := Integer(slDetail[3])
+    slProfile := StudyLibraryHexDecode(slDetail[5])
+    slCreated := StudyLibraryHexDecode(slDetail[6])
+    slProvider := StudyLibraryHexDecode(slDetail[7])
+    slModel := StudyLibraryHexDecode(slDetail[8])
+    slPrompt := StudyLibraryHexDecode(slDetail[9])
+    slChapter := slDetail.Length >= 11 ? StudyLibraryHexDecode(slDetail[11]) : ""
+    slSpeaker := slDetail.Length >= 12 ? StudyLibraryHexDecode(slDetail[12]) : ""
+    slTags := slDetail.Length >= 13 ? StudyLibraryHexDecode(slDetail[13]) : ""
+    slAddedToAnkiAt := slDetail.Length >= 14 ? StudyLibraryHexDecode(slDetail[14]) : ""
+    slState["currentVersion"] := slSelectedVersion
+    slState["currentChapter"] := slChapter
+    slState["currentSpeaker"] := slSpeaker
+    slState["currentTags"] := slTags
+    slState["currentAddedToAnkiAt"] := slAddedToAnkiAt
+    slState["currentProfile"] := slProfile
+    slState["currentProvider"] := slProvider
+    slState["currentModel"] := slModel
+    slState["currentPrompt"] := slPrompt
+
+    slState["suspend"] := true
+    slState["versions"] := []
+    slVersionLabels := []
+    slVersionIndex := 1
+    for slVersionRow in StudyLibraryReadRows(slOutputDir "\versions.tsv") {
+        if (slVersionRow.Length < 4)
+            continue
+        slVersionNumber := Integer(slVersionRow[2])
+        slVersionDate := StudyLibraryHexDecode(slVersionRow[4])
+        slPreferred := Integer(slVersionRow[3])
+        slVersionEntry := Map(
+            "id", Integer(slVersionRow[1]),
+            "version", slVersionNumber,
+            "preferred", slPreferred,
+            "created", slVersionDate
+        )
+        slState["versions"].Push(slVersionEntry)
+        slVersionLabel := Format("v{1:02}  •  {2}", slVersionNumber, slVersionDate)
+        if slPreferred
+            slVersionLabel .= "  (latest)"
+        slVersionLabels.Push(slVersionLabel)
+        if (slVersionNumber = slSelectedVersion)
+            slVersionIndex := slVersionLabels.Length
+    }
+    slState["versionDdl"].Delete()
+    if slVersionLabels.Length {
+        slState["versionDdl"].Add(slVersionLabels)
+        slState["versionDdl"].Choose(slVersionIndex)
+        slState["versionDdl"].Enabled := true
+    } else {
+        slState["versionDdl"].Enabled := false
+    }
+    if slState.Has("editDetailsButton")
+        slState["editDetailsButton"].Enabled := true
+    if slState.Has("removeVersionButton")
+        slState["removeVersionButton"].Enabled := slVersionLabels.Length > 0
+    if slState.Has("studyButton")
+        slState["studyButton"].Enabled := true
+    slState["suspend"] := false
+    StudyLibrarySyncVersionNavigation(slState)
+
+    slSourcePath := slOutputDir "\source.txt"
+    slExplanationPath := slOutputDir "\explanation.txt"
+    slSourceText := FileExist(slSourcePath) ? FileRead(slSourcePath, "UTF-8") : ""
+    slExplanationText := FileExist(slExplanationPath)
+        ? FileRead(slExplanationPath, "UTF-8") : ""
+    slState["source"].Value := slSourceText
+    slState["suspend"] := true
+    slState["sections"] := [
+        Map("key", "full", "heading", "Full explanation", "content", slExplanationText)
+    ]
+    slSectionLabels := ["Full explanation"]
+    for slSectionRow in StudyLibraryReadRows(slOutputDir "\sections.tsv") {
+        if (slSectionRow.Length < 4)
+            continue
+        slSectionKey := StudyLibraryHexDecode(slSectionRow[2])
+        ; A parser fallback is identical to the permanent Full explanation item.
+        if (slSectionKey = "full")
+            continue
+        slSectionHeading := StudyLibraryHexDecode(slSectionRow[3])
+        slSectionFile := StudyLibraryHexDecode(slSectionRow[4])
+        slSectionPath := slOutputDir "\" slSectionFile
+        slSectionText := FileExist(slSectionPath)
+            ? FileRead(slSectionPath, "UTF-8") : ""
+        slState["sections"].Push(Map(
+            "key", slSectionKey,
+            "heading", slSectionHeading,
+            "content", slSectionText
+        ))
+        slSectionLabels.Push(slSectionHeading)
+    }
+    slState["sectionDdl"].Delete()
+    slState["sectionDdl"].Add(slSectionLabels)
+    slState["sectionDdl"].Choose(1)
+    slState["sectionDdl"].Enabled := (slSectionLabels.Length > 1)
+    slState["explanation"].Value := slExplanationText
+    slState["suspend"] := false
+    if slState.Has("sectionNavCallback")
+        slState["sectionNavCallback"].Call()
+    slState["detailTitle"].Value := "Saved explanation"
+    StudyLibraryUpdateMetadataText(slState)
+
+    slState["media"] := []
+    for slMediaRow in StudyLibraryReadRows(slOutputDir "\media.tsv") {
+        if (slMediaRow.Length < 7)
+            continue
+        slMediaPath := StudyLibraryHexDecode(slMediaRow[2])
+        slState["media"].Push(Map(
+            "order", Integer(slMediaRow[1]),
+            "path", slMediaPath,
+            "exists", Integer(slMediaRow[7]),
+            "width", 0,
+            "height", 0
+        ))
+    }
+    slState["mediaIndex"] := slState["media"].Length ? 1 : 0
+    StudyLibraryShowImage(slState)
+    if slState.Has("entryNavCallback")
+        slState["entryNavCallback"].Call()
+}
+
+StudyLibraryGroupFocused(slState, slList, slRow, *) {
+    if slState["suspend"] || slRow < 1 || slRow > slState["groups"].Length
+        return
+    slGroupId := StudyLibraryRowGroupId(slState, slRow)
+    if (slGroupId <= 0)
+        return
+    StudyLibraryLoadGroup(slState, slGroupId)
+    StudyLibraryUpdateSelectionActions(slState)
+}
+
+StudyLibraryVersionChanged(slState, *) {
+    if slState["suspend"]
+        return
+    slIndex := slState["versionDdl"].Value
+    if (slIndex < 1 || slIndex > slState["versions"].Length)
+        return
+    StudyLibraryLoadGroup(
+        slState,
+        slState["currentGroupId"],
+        slState["versions"][slIndex]["version"]
+    )
+}
+
+StudyLibrarySectionChanged(slState, *) {
+    if slState["suspend"]
+        return
+    slIndex := slState["sectionDdl"].Value
+    if (slIndex < 1 || slIndex > slState["sections"].Length)
+        return
+    slState["explanation"].Value := slState["sections"][slIndex]["content"]
+    try {
+        DllCall("user32\SendMessageW", "ptr", slState["explanation"].Hwnd,
+            "uint", 0x00B1, "ptr", 0, "ptr", 0) ; EM_SETSEL
+        DllCall("user32\SendMessageW", "ptr", slState["explanation"].Hwnd,
+            "uint", 0x00B7, "ptr", 0, "ptr", 0) ; EM_SCROLLCARET
+    }
+    if slState.Has("sectionNavCallback")
+        slState["sectionNavCallback"].Call()
+}
+
+StudyReaderSyncSectionNavigation(srState, *) {
+    srSectionCount := Max(0, srState["sections"].Length - 1)
+    srIndex := srState["sectionDdl"].Value
+    if (srIndex < 1 || srIndex > srState["sections"].Length)
+        srIndex := 1
+    srHasExplanation := srState["currentGroupId"] > 0
+    srState["fullSectionButton"].Enabled := srHasExplanation
+    srState["previousSection"].Enabled := srSectionCount > 0
+    srState["nextSection"].Enabled := srSectionCount > 0
+    if !srHasExplanation {
+        srState["sectionStatus"].Value := "No explanation selected"
+    } else if (srIndex = 1) {
+        srState["sectionStatus"].Value := "Full explanation"
+    } else {
+        srHeading := srState["sections"][srIndex]["heading"]
+        srState["sectionStatus"].Value := srHeading "  ·  "
+            . (srIndex - 1) " of " srSectionCount
+    }
+}
+
+StudyReaderSelectFullSection(srState, *) {
+    if (srState["currentGroupId"] <= 0 || !srState["sections"].Length)
+        return
+    srState["sectionDdl"].Choose(1)
+    StudyLibrarySectionChanged(srState)
+}
+
+StudyReaderStepSection(srState, srDirection, *) {
+    srSectionCount := Max(0, srState["sections"].Length - 1)
+    if (srSectionCount <= 0)
+        return
+    srIndex := srState["sectionDdl"].Value
+    if (srIndex <= 1) {
+        srIndex := srDirection > 0 ? 2 : srState["sections"].Length
+    } else if (srDirection > 0) {
+        srIndex := srIndex < srState["sections"].Length ? srIndex + 1 : 2
+    } else {
+        srIndex := srIndex > 2 ? srIndex - 1 : srState["sections"].Length
+    }
+    srState["sectionDdl"].Choose(srIndex)
+    StudyLibrarySectionChanged(srState)
+}
+
+StudyReaderSetEntrySequence(srState, srGroups, srGroupId) {
+    srIds := []
+    srSeen := Map()
+    if IsObject(srGroups) {
+        for srGroup in srGroups {
+            if !(IsObject(srGroup) && srGroup.Has("id"))
+                continue
+            srId := Integer(srGroup["id"])
+            if (srId <= 0 || srSeen.Has(srId))
+                continue
+            srSeen[srId] := true
+            srIds.Push(srId)
+        }
+    }
+    if !srIds.Length && srGroupId > 0
+        srIds.Push(Integer(srGroupId))
+    srState["entryIds"] := srIds
+    StudyReaderSyncEntryNavigation(srState)
+}
+
+StudyReaderEntryIndex(srState, srGroupId := 0) {
+    if (srGroupId <= 0)
+        srGroupId := srState["currentGroupId"]
+    for srIndex, srId in srState["entryIds"] {
+        if (srId = srGroupId)
+            return srIndex
+    }
+    return 0
+}
+
+StudyReaderSyncEntryNavigation(srState, *) {
+    global iniPath
+    srHasEntry := srState["currentGroupId"] > 0
+    srIndex := StudyReaderEntryIndex(srState)
+    if (srHasEntry && !srIndex) {
+        srState["entryIds"].Push(srState["currentGroupId"])
+        srIndex := srState["entryIds"].Length
+    }
+    srCount := srState["entryIds"].Length
+    srState["previousEntry"].Enabled := srHasEntry && srIndex > 1
+    srState["nextEntry"].Enabled := srHasEntry && srIndex > 0 && srIndex < srCount
+    srState["entryStatus"].Value := srHasEntry && srIndex
+        ? srIndex " of " srCount : "No entry"
+    srState["suspendAnki"] := true
+    srState["ankiCheck"].Enabled := srHasEntry
+    srState["ankiCheck"].Value := srHasEntry
+        && srState["currentAddedToAnkiAt"] != "" ? 1 : 0
+    srState["suspendAnki"] := false
+    if srHasEntry
+        try IniWrite(srState["currentGroupId"], iniPath,
+            "study_reader_view", "lastGroupId")
+}
+
+StudyReaderRememberEntryView(srState) {
+    global iniPath
+    srGroupId := srState["currentGroupId"]
+    if (srGroupId <= 0)
+        return
+    try IniWrite(srGroupId, iniPath, "study_reader_view", "lastGroupId")
+    srSectionKey := "full"
+    srSectionIndex := srState["sectionDdl"].Value
+    if (srSectionIndex >= 1 && srSectionIndex <= srState["sections"].Length)
+        srSectionKey := srState["sections"][srSectionIndex]["key"]
+    srFirstLine := 0
+    try srFirstLine := DllCall(
+        "user32\SendMessageW", "ptr", srState["explanation"].Hwnd,
+        "uint", 0x00CE, "ptr", 0, "ptr", 0, "int" ; EM_GETFIRSTVISIBLELINE
+    )
+    srState["entryViewMemory"][srGroupId] := Map(
+        "version", srState["currentVersion"],
+        "sectionKey", srSectionKey,
+        "firstLine", Max(0, srFirstLine)
+    )
+}
+
+StudyReaderRestoreEntryView(srState, srGroupId) {
+    if !srState["entryViewMemory"].Has(srGroupId)
+        return
+    srMemory := srState["entryViewMemory"][srGroupId]
+    srTargetSection := 1
+    for srIndex, srSection in srState["sections"] {
+        if (srSection["key"] = srMemory["sectionKey"]) {
+            srTargetSection := srIndex
+            break
+        }
+    }
+    srState["sectionDdl"].Choose(srTargetSection)
+    StudyLibrarySectionChanged(srState)
+    srFirstLine := srMemory["firstLine"]
+    if (srFirstLine > 0) {
+        try DllCall(
+            "user32\SendMessageW", "ptr", srState["explanation"].Hwnd,
+            "uint", 0x00B6, "ptr", 0, "ptr", srFirstLine ; EM_LINESCROLL
+        )
+    }
+}
+
+StudyReaderStepEntry(srState, srDirection, *) {
+    srIndex := StudyReaderEntryIndex(srState)
+    srTargetIndex := srIndex + srDirection
+    if (srIndex <= 0 || srTargetIndex < 1
+        || srTargetIndex > srState["entryIds"].Length)
+        return
+    StudyReaderRememberEntryView(srState)
+    srTargetId := srState["entryIds"][srTargetIndex]
+    srTargetVersion := 0
+    if srState["entryViewMemory"].Has(srTargetId)
+        srTargetVersion := srState["entryViewMemory"][srTargetId]["version"]
+    StudyLibraryLoadGroup(srState, srTargetId, srTargetVersion)
+    StudyReaderRestoreEntryView(srState, srTargetId)
+}
+
+StudyReaderAnkiChanged(srState, *) {
+    global CPStudyLibraryState
+    if (srState["suspendAnki"] || srState["currentGroupId"] <= 0)
+        return
+    srDesired := srState["ankiCheck"].Value ? 1 : 0
+    srPrevious := srState["currentAddedToAnkiAt"]
+    srState["ankiCheck"].Enabled := false
+    EnvSet("STUDY_LIBRARY_ADDED_TO_ANKI", srDesired ? "1" : "0")
+    srUpdated := false
+    try {
+        srUpdated := StudyLibraryRunBridge(
+            srState, "set-anki", srState["currentGroupId"]
+        )
+    } finally {
+        EnvSet("STUDY_LIBRARY_ADDED_TO_ANKI", "")
+    }
+    if !srUpdated {
+        srState["currentAddedToAnkiAt"] := srPrevious
+        StudyReaderSyncEntryNavigation(srState)
+        return
+    }
+    srMutationRows := StudyLibraryReadRows(srState["outputDir"] "\mutation.tsv")
+    if (srMutationRows.Length && srMutationRows[1].Length >= 5)
+        srState["currentAddedToAnkiAt"] := StudyLibraryHexDecode(
+            srMutationRows[1][5]
+        )
+    else
+        srState["currentAddedToAnkiAt"] := srDesired ? "Added" : ""
+    StudyLibraryUpdateMetadataText(srState)
+    StudyReaderSyncEntryNavigation(srState)
+    if (CPStudyLibraryState && CPStudyLibraryState.Has("gui"))
+        try StudyLibraryRefresh(CPStudyLibraryState)
+}
+
+StudyReaderToggleAnki(srState, *) {
+    if (srState["currentGroupId"] <= 0)
+        return
+    srState["ankiCheck"].Value := srState["ankiCheck"].Value ? 0 : 1
+    StudyReaderAnkiChanged(srState)
+}
+
+StudyReaderBindHotkeys(srState) {
+    srContext := "ahk_id " srState["gui"].Hwnd
+    srHotkeys := Map(
+        "!Left", StudyReaderStepEntry.Bind(srState, -1),
+        "!Right", StudyReaderStepEntry.Bind(srState, 1),
+        "^Left", StudyReaderStepSection.Bind(srState, -1),
+        "^Right", StudyReaderStepSection.Bind(srState, 1),
+        "!Home", StudyReaderSelectFullSection.Bind(srState),
+        "!a", StudyReaderToggleAnki.Bind(srState)
+    )
+    HotIfWinActive(srContext)
+    for srKey, srCallback in srHotkeys
+        Hotkey(srKey, srCallback, "On")
+    HotIf()
+    srState["hotkeyContext"] := srContext
+    srState["hotkeys"] := srHotkeys
+}
+
+StudyReaderUnbindHotkeys(srState) {
+    if !(srState.Has("hotkeys") && srState.Has("hotkeyContext"))
+        return
+    HotIfWinActive(srState["hotkeyContext"])
+    for srKey, srCallback in srState["hotkeys"]
+        try Hotkey(srKey, "Off")
+    HotIf()
+    srState["hotkeys"] := Map()
+}
+
+StudyReaderRedraw(srState, *) {
+    StudyLibraryRedraw(srState)
+}
+
+StudyReaderResize(srState, srGui, srMinMax, srWidth, srHeight) {
+    if (srMinMax = -1 || srWidth < 600 || srHeight < 400)
+        return
+    srHwnd := srGui.Hwnd
+    if srHwnd
+        DllCall("user32\SendMessageW", "ptr", srHwnd, "uint", 0x000B,
+            "ptr", 0, "ptr", 0) ; WM_SETREDRAW off
+    try {
+        srMargin := 14, srGap := 14
+        srContextW := Max(270, Min(420, Round(srWidth * 0.33)))
+        srLeftW := Max(300, srWidth - srMargin * 2 - srGap - srContextW)
+        srContextX := srMargin + srLeftW + srGap
+        srBottom := srHeight - srMargin
+
+        srState["detailTitle"].Move(srMargin, srMargin, srLeftW, 26)
+        srEntryY := srMargin + 31
+        srState["previousEntry"].Move(srMargin, srEntryY, 34, 30)
+        srState["entryStatus"].Move(srMargin + 40, srEntryY, 100, 30)
+        srState["nextEntry"].Move(srMargin + 146, srEntryY, 34, 30)
+        srState["ankiCheck"].Move(
+            srMargin + 190, srEntryY + 4, Max(120, srLeftW - 190), 24
+        )
+        srToolbarY := srEntryY + 36
+        srVersionLabelW := 58, srArrowW := 34, srNavGap := 6
+        srVersionW := Min(300, Max(135, Round(srLeftW * 0.38)))
+        srState["versionLabel"].Move(srMargin, srToolbarY + 4, srVersionLabelW, 22)
+        srVersionPrevX := srMargin + srVersionLabelW
+        srState["previousVersion"].Move(
+            srVersionPrevX, srToolbarY, srArrowW, 30
+        )
+        srVersionViewX := srVersionPrevX + srArrowW + srNavGap
+        srState["versionView"].Move(
+            srVersionViewX, srToolbarY, srVersionW, 30
+        )
+        srState["nextVersion"].Move(
+            srVersionViewX + srVersionW + srNavGap,
+            srToolbarY, srArrowW, 30
+        )
+        srSectionNavY := srToolbarY + 36
+        srFullButtonW := 128
+        srState["fullSectionButton"].Move(
+            srMargin, srSectionNavY, srFullButtonW, 30
+        )
+        srPreviousX := srMargin + srFullButtonW + 8
+        srState["previousSection"].Move(
+            srPreviousX, srSectionNavY, srArrowW, 30
+        )
+        srSectionStatusX := srPreviousX + srArrowW + srNavGap
+        ; Wide enough for the longest expected localized section heading, but
+        ; no longer stretches across the complete Reader on large displays.
+        srSectionStatusW := Min(
+            420,
+            Max(70, srLeftW - (srSectionStatusX - srMargin) - srArrowW - srNavGap)
+        )
+        srState["sectionStatus"].Move(
+            srSectionStatusX, srSectionNavY, srSectionStatusW, 30
+        )
+        srNextX := srSectionStatusX + srSectionStatusW + srNavGap
+        srState["nextSection"].Move(srNextX, srSectionNavY, srArrowW, 30)
+        srExplanationLabelY := srSectionNavY + 35
+        srState["explanationLabel"].Move(
+            srMargin, srExplanationLabelY, srLeftW, 22
+        )
+        srExplanationY := srExplanationLabelY + 23
+        srState["explanation"].Move(
+            srMargin, srExplanationY, srLeftW,
+            Max(80, srBottom - srExplanationY)
+        )
+
+        srState["contextTitle"].Move(srContextX, srMargin, srContextW, 26)
+        srMetadataY := srMargin + 31
+        srState["metadata"].Move(srContextX, srMetadataY, srContextW, 72)
+        srImageLabelY := srMetadataY + 76
+        srState["imageLabel"].Move(srContextX, srImageLabelY, srContextW, 20)
+        srImageY := srImageLabelY + 20
+        srMaxImageH := Max(90, srBottom - srImageY - 27 - 5 - 20 - 90)
+        srDesiredImageH := Round((srBottom - srImageY) * 0.43)
+        srImageH := Max(90, Min(300, Min(srMaxImageH, srDesiredImageH)))
+        srState["imageFrame"].Move(srContextX, srImageY, srContextW, srImageH)
+        srState["imageArea"] := Map(
+            "x", srContextX + 4,
+            "y", srImageY + 4,
+            "w", Max(1, srContextW - 8),
+            "h", Max(1, srImageH - 8)
+        )
+        srNavY := srImageY + srImageH + 5
+        srImageInfoW := Max(70, srContextW - 200)
+        srState["previousImage"].Move(srContextX, srNavY, 34, 27)
+        srState["imageInfo"].Move(
+            srContextX + 40, srNavY + 4, srImageInfoW, 22
+        )
+        srState["nextImage"].Move(
+            srContextX + 40 + srImageInfoW + 6, srNavY, 34, 27
+        )
+        srState["openImage"].Move(
+            srContextX + srContextW - 112, srNavY, 112, 27
+        )
+        srSourceLabelY := srNavY + 32
+        srState["sourceLabel"].Move(srContextX, srSourceLabelY, srContextW, 20)
+        srSourceY := srSourceLabelY + 20
+        srState["source"].Move(
+            srContextX, srSourceY, srContextW,
+            Max(60, srBottom - srSourceY)
+        )
+        SetTimer(srState["imageLayoutCallback"], -100)
+    } finally {
+        if srHwnd {
+            DllCall("user32\SendMessageW", "ptr", srHwnd, "uint", 0x000B,
+                "ptr", 1, "ptr", 0) ; WM_SETREDRAW on
+            StudyReaderRedraw(srState)
+        }
+    }
+    SetTimer(srState["redrawCallback"], -160)
+}
+
+StudyReaderSaveBounds(srState) {
+    global iniPath
+    if !(srState.Has("gui") && srState["gui"] && srState["gui"].Hwnd)
+        return
+    try {
+        if (WinGetMinMax("ahk_id " srState["gui"].Hwnd) != 0)
+            return
+        srState["gui"].GetPos(&srX, &srY)
+        srState["gui"].GetClientPos(,, &srW, &srH)
+        if (srW < 600 || srH < 400)
+            return
+        IniWrite(srX, iniPath, "study_reader_view", "x")
+        IniWrite(srY, iniPath, "study_reader_view", "y")
+        IniWrite(srW, iniPath, "study_reader_view", "w")
+        IniWrite(srH, iniPath, "study_reader_view", "h")
+    }
+}
+
+StudyReaderClampPosition(srGui, &srX, &srY) {
+    srGui.GetPos(,, &srOuterW, &srOuterH)
+    srDpi := GetWindowDPI(srGui.Hwnd)
+    srScale := 96 / Max(96, srDpi)
+    srBestMonitor := 0, srBestArea := 0
+    try {
+        Loop MonitorGetCount() {
+            MonitorGetWorkArea(A_Index, &srLeft, &srTop, &srRight, &srBottom)
+            srLeft := Ceil(srLeft * srScale), srTop := Ceil(srTop * srScale)
+            srRight := Floor(srRight * srScale), srBottom := Floor(srBottom * srScale)
+            srIntersectionW := Max(0,
+                Min(srX + srOuterW, srRight) - Max(srX, srLeft)
+            )
+            srIntersectionH := Max(0,
+                Min(srY + srOuterH, srBottom) - Max(srY, srTop)
+            )
+            srArea := srIntersectionW * srIntersectionH
+            if (srArea > srBestArea) {
+                srBestArea := srArea
+                srBestMonitor := A_Index
+            }
+        }
+    }
+    if !srBestMonitor {
+        try srBestMonitor := MonitorGetPrimary()
+        catch
+            srBestMonitor := 1
+    }
+    try {
+        MonitorGetWorkArea(
+            srBestMonitor, &srLeft, &srTop, &srRight, &srBottom
+        )
+        srLeft := Ceil(srLeft * srScale), srTop := Ceil(srTop * srScale)
+        srRight := Floor(srRight * srScale), srBottom := Floor(srBottom * srScale)
+        srX := Min(Max(srX, srLeft), Max(srLeft, srRight - srOuterW))
+        srY := Min(Max(srY, srTop), Max(srTop, srBottom - srOuterH))
+    }
+}
+
+StudyReaderClose(srState, *) {
+    global CPStudyReaderState
+    try SetTimer(srState["imageLayoutCallback"], 0)
+    try SetTimer(srState["redrawCallback"], 0)
+    try StudyReaderRememberEntryView(srState)
+    try StudyReaderUnbindHotkeys(srState)
+    try StudyReaderSaveBounds(srState)
+    try srState["gui"].Destroy()
+    CPStudyReaderState := 0
+    StudyStandaloneMaybeExit()
+}
+
+StudyLibraryOpenSelectedReader(slState, *) {
+    if (slState["currentGroupId"] <= 0)
+        return
+    OpenStudyReader(
+        slState["currentGroupId"], slState["currentVersion"],
+        StudyLibraryGroupsInDisplayOrder(slState)
+    )
+}
+
+StudyLibraryOpenReaderFromList(slState, slList, slRow, *) {
+    if (slRow < 1 || slRow > slState["groups"].Length)
+        return
+    slGroupId := StudyLibraryRowGroupId(slState, slRow)
+    if (slGroupId <= 0)
+        return
+    slList.Modify(slRow, "Select Focus Vis")
+    OpenStudyReader(slGroupId, 0, StudyLibraryGroupsInDisplayOrder(slState))
+}
+
+StudyLibraryReaderSnapshot() {
+    global studyLibraryDir
+    srOutputDir := A_Temp "\JRPG_Study_Reader_Startup_"
+        . DllCall("kernel32\GetCurrentProcessId", "uint")
+    DirCreate(srOutputDir)
+    srState := Map(
+        "database", studyLibraryDir "\study_library.db",
+        "outputDir", srOutputDir
+    )
+    srEnvironment := Map(
+        "STUDY_LIBRARY_QUERY", "",
+        "STUDY_LIBRARY_PROFILE_MODE", "all",
+        "STUDY_LIBRARY_PROFILE_FILTER", "",
+        "STUDY_LIBRARY_CHAPTER_MODE", "all",
+        "STUDY_LIBRARY_CHAPTER_FILTER", "",
+        "STUDY_LIBRARY_SPEAKER_MODE", "all",
+        "STUDY_LIBRARY_SPEAKER_FILTER", "",
+        "STUDY_LIBRARY_TAG_MODE", "all",
+        "STUDY_LIBRARY_TAG_FILTER", "",
+        "STUDY_LIBRARY_ANKI_MODE", "all",
+        "STUDY_LIBRARY_DATE_MODE", "all",
+        "STUDY_LIBRARY_DATE_FROM", "",
+        "STUDY_LIBRARY_DATE_TO", ""
+    )
+    srPreviousEnvironment := Map()
+    for srName, srValue in srEnvironment {
+        srPreviousEnvironment[srName] := EnvGet(srName)
+        EnvSet(srName, srValue)
+    }
+    srSucceeded := false
+    try srSucceeded := StudyLibraryRunBridge(srState, "snapshot")
+    finally {
+        for srName, srValue in srPreviousEnvironment
+            EnvSet(srName, srValue)
+    }
+    srGroups := []
+    if !srSucceeded
+        return srGroups
+    for srRow in StudyLibraryReadRows(srOutputDir "\groups.tsv") {
+        if (srRow.Length < 6)
+            continue
+        srGroups.Push(Map(
+            "id", Integer(srRow[1]),
+            "addedToAnkiAt", srRow.Length >= 10
+                ? StudyLibraryHexDecode(srRow[10]) : ""
+        ))
+    }
+    return srGroups
+}
+
+OpenStandaloneStudyReader(*) {
+    global iniPath
+    srGroups := StudyLibraryReaderSnapshot()
+    if !srGroups.Length {
+        ; The Library provides a useful empty-state message and gives a new
+        ; user access to all filters once explanations have been generated.
+        OpenStandaloneStudyLibrary()
+        return
+    }
+    srLastGroupId := 0
+    try srLastGroupId := Integer(IniRead(
+        iniPath, "study_reader_view", "lastGroupId", 0
+    ))
+    srTargetId := 0
+    if (srLastGroupId > 0) {
+        for srGroup in srGroups {
+            if (srGroup["id"] = srLastGroupId) {
+                srTargetId := srLastGroupId
+                break
+            }
+        }
+    }
+    if !srTargetId {
+        for srGroup in srGroups {
+            if (srGroup["addedToAnkiAt"] = "") {
+                srTargetId := srGroup["id"]
+                break
+            }
+        }
+    }
+    if !srTargetId
+        srTargetId := srGroups[1]["id"]
+    OpenStudyReader(srTargetId, 0, srGroups)
+}
+
+OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
+    global CPStudyReaderState, studyLibraryDir, iniPath
+    if (srGroupId <= 0)
+        return
+    if (CPStudyReaderState && CPStudyReaderState.Has("gui")) {
+        try {
+            if IsObject(srGroups)
+                StudyReaderSetEntrySequence(
+                    CPStudyReaderState, srGroups, srGroupId
+                )
+            StudyLibraryLoadGroup(CPStudyReaderState, srGroupId, srVersion)
+            CPStudyReaderState["gui"].Show()
+            WinActivate("ahk_id " CPStudyReaderState["gui"].Hwnd)
+            return
+        }
+    }
+
+    DirCreate(studyLibraryDir)
+    srOutputDir := A_Temp "\JRPG_Study_Reader_"
+        . DllCall("kernel32\GetCurrentProcessId", "uint")
+    DirCreate(srOutputDir)
+    srGui := Gui(
+        "+Resize +MinSize720x480 +OwnDialogs",
+        "JRPG Translator - Study Reader"
+    )
+    srGui.MarginX := 14, srGui.MarginY := 14
+    srGui.SetFont("s10", "Segoe UI")
+
+    srDetailTitle := srGui.Add(
+        "Text", "x14 y14 w650 h26 +0x200", "Saved explanation"
+    )
+    srDetailTitle.SetFont("s11 Bold")
+    srPreviousEntry := srGui.Add("Button", "x14 y45 w34 h30 Disabled", "‹")
+    srEntryStatus := srGui.Add(
+        "Text", "x54 y45 w100 h30 Border Center +0x200", "No entry"
+    )
+    srNextEntry := srGui.Add("Button", "x160 y45 w34 h30 Disabled", "›")
+    srAnkiCheck := srGui.Add(
+        "CheckBox", "x204 y49 w210 h24 Disabled", "Added to Anki  (Alt+A)"
+    )
+    srVersionLabel := srGui.Add("Text", "x14 y85 w58", "Version:")
+    ; Keep the original list hidden as the version data model. The visible
+    ; read-only field and arrow buttons provide simpler navigation.
+    srVersionDdl := srGui.Add(
+        "DropDownList", "x0 y0 w1 h1 Hidden 0x210", []
+    )
+    srVersionView := srGui.Add(
+        "Edit", "x72 y81 w220 h30 ReadOnly", ""
+    )
+    srPreviousVersion := srGui.Add(
+        "Button", "x298 y81 w34 h30 Disabled", "‹"
+    )
+    srNextVersion := srGui.Add(
+        "Button", "x338 y81 w34 h30 Disabled", "›"
+    )
+    ; The loader still uses this hidden list as its section index/data model.
+    ; The Reader exposes the compact permanent navigation controls below.
+    srSectionLabel := srGui.Add("Text", "x0 y0 w1 h1 Hidden", "Section:")
+    srSectionDdl := srGui.Add(
+        "DropDownList", "x0 y0 w1 h1 Hidden 0x210", ["Full explanation"]
+    )
+    srFullSectionButton := srGui.Add(
+        "Button", "x14 y117 w128 h30 Disabled", "Full explanation"
+    )
+    srPreviousSection := srGui.Add("Button", "x150 y117 w34 h30 Disabled", "‹")
+    srSectionStatus := srGui.Add(
+        "Text",
+        "x190 y117 w434 h30 Border Center +0x200 +0x4000",
+        "No explanation selected"
+    )
+    srNextSection := srGui.Add("Button", "x630 y117 w34 h30 Disabled", "›")
+    srExplanationLabel := srGui.Add(
+        "Text", "x14 y152 w650 h22", "Explanation"
+    )
+    srExplanationLabel.SetFont("Bold")
+    srExplanation := srGui.Add(
+        "Edit", "x14 y175 w650 h489 ReadOnly Multi VScroll"
+    )
+    srExplanation.SetFont("s11", "Segoe UI")
+
+    srContextTitle := srGui.Add("Text", "x678 y14 w380 h26", "Context")
+    srContextTitle.SetFont("s11 Bold")
+    srMetadata := srGui.Add("Text", "x678 y45 w380 h72 cGray", "")
+    CPRegisterMutedControl(srMetadata)
+    srImageLabel := srGui.Add(
+        "Text", "x678 y121 w380 h20", "Source screenshot"
+    )
+    srImageFrame := srGui.Add(
+        "Text", "x678 y141 w380 h250 Border Background101010", ""
+    )
+    srPicture := srGui.Add("Picture", "x682 y145 w1 h1 Hidden", "")
+    srPreviousImage := srGui.Add("Button", "x678 y396 w34 h27", "‹")
+    srNextImage := srGui.Add("Button", "x718 y396 w34 h27", "›")
+    srImageInfo := srGui.Add(
+        "Text", "x760 y400 w178", "No source screenshot selected."
+    )
+    srOpenImage := srGui.Add(
+        "Button", "x946 y396 w112 h27", "Open full image"
+    )
+    srSourceLabel := srGui.Add(
+        "Text", "x678 y428 w380 h20", "Original Japanese"
+    )
+    srSource := srGui.Add(
+        "Edit", "x678 y448 w380 h216 ReadOnly Multi VScroll"
+    )
+
+    srState := Map(
+        "gui", srGui,
+        "database", studyLibraryDir "\study_library.db",
+        "outputDir", srOutputDir,
+        "detailTitle", srDetailTitle,
+        "previousEntry", srPreviousEntry,
+        "entryStatus", srEntryStatus,
+        "nextEntry", srNextEntry,
+        "ankiCheck", srAnkiCheck,
+        "entryIds", [],
+        "entryViewMemory", Map(),
+        "suspendAnki", false,
+        "versionLabel", srVersionLabel,
+        "versionDdl", srVersionDdl,
+        "versionView", srVersionView,
+        "previousVersion", srPreviousVersion,
+        "nextVersion", srNextVersion,
+        "versions", [],
+        "sectionLabel", srSectionLabel,
+        "sectionDdl", srSectionDdl,
+        "sections", [],
+        "fullSectionButton", srFullSectionButton,
+        "previousSection", srPreviousSection,
+        "sectionStatus", srSectionStatus,
+        "nextSection", srNextSection,
+        "explanationLabel", srExplanationLabel,
+        "explanation", srExplanation,
+        "contextTitle", srContextTitle,
+        "metadata", srMetadata,
+        "imageLabel", srImageLabel,
+        "imageFrame", srImageFrame,
+        "picture", srPicture,
+        "previousImage", srPreviousImage,
+        "nextImage", srNextImage,
+        "imageInfo", srImageInfo,
+        "openImage", srOpenImage,
+        "imageArea", Map("x", 682, "y", 145, "w", 372, "h", 242),
+        "media", [],
+        "mediaIndex", 0,
+        "sourceLabel", srSourceLabel,
+        "source", srSource,
+        "currentGroupId", 0,
+        "currentVersion", 0,
+        "currentChapter", "",
+        "currentSpeaker", "",
+        "currentTags", "",
+        "currentAddedToAnkiAt", "",
+        "currentProfile", "",
+        "currentProvider", "",
+        "currentModel", "",
+        "currentPrompt", "",
+        "suspend", false
+    )
+    srState["imageLayoutCallback"] := StudyLibraryShowImage.Bind(srState)
+    srState["redrawCallback"] := StudyReaderRedraw.Bind(srState)
+    srState["sectionNavCallback"] := StudyReaderSyncSectionNavigation.Bind(srState)
+    srState["entryNavCallback"] := StudyReaderSyncEntryNavigation.Bind(srState)
+    StudyReaderSetEntrySequence(srState, srGroups, srGroupId)
+    CPStudyReaderState := srState
+
+    srPreviousEntry.OnEvent("Click", StudyReaderStepEntry.Bind(srState, -1))
+    srNextEntry.OnEvent("Click", StudyReaderStepEntry.Bind(srState, 1))
+    srAnkiCheck.OnEvent("Click", StudyReaderAnkiChanged.Bind(srState))
+    srPreviousVersion.OnEvent(
+        "Click", StudyLibraryStepVersion.Bind(srState, -1)
+    )
+    srNextVersion.OnEvent(
+        "Click", StudyLibraryStepVersion.Bind(srState, 1)
+    )
+    srFullSectionButton.OnEvent(
+        "Click", StudyReaderSelectFullSection.Bind(srState)
+    )
+    srPreviousSection.OnEvent(
+        "Click", StudyReaderStepSection.Bind(srState, -1)
+    )
+    srNextSection.OnEvent(
+        "Click", StudyReaderStepSection.Bind(srState, 1)
+    )
+    srPreviousImage.OnEvent("Click", StudyLibraryPreviousImage.Bind(srState))
+    srNextImage.OnEvent("Click", StudyLibraryNextImage.Bind(srState))
+    srOpenImage.OnEvent("Click", StudyLibraryOpenImage.Bind(srState))
+    srGui.OnEvent("Size", StudyReaderResize.Bind(srState))
+    srGui.OnEvent("Escape", StudyReaderClose.Bind(srState))
+    srGui.OnEvent("Close", StudyReaderClose.Bind(srState))
+    StudyReaderBindHotkeys(srState)
+
+    srGui.Show("Hide w1100 h700")
+    srDpi := GetWindowDPI(srGui.Hwnd)
+    srLogicalScale := 96 / Max(96, srDpi)
+    srMaxW := Max(720, Floor(A_ScreenWidth * srLogicalScale) - 40)
+    srMaxH := Max(480, Floor(A_ScreenHeight * srLogicalScale) - 60)
+    srDefaultW := Max(720, Min(1200, srMaxW - 40))
+    srDefaultH := Max(480, Min(760, srMaxH - 40))
+    srSavedW := IniRead(iniPath, "study_reader_view", "w", srDefaultW)
+    srSavedH := IniRead(iniPath, "study_reader_view", "h", srDefaultH)
+    try srSavedW := Integer(srSavedW)
+    catch
+        srSavedW := srDefaultW
+    try srSavedH := Integer(srSavedH)
+    catch
+        srSavedH := srDefaultH
+    srSavedW := Max(720, Min(srMaxW, srSavedW))
+    srSavedH := Max(480, Min(srMaxH, srSavedH))
+    srGui.Show("Hide w" srSavedW " h" srSavedH)
+    CPApplyOwnedDialogTheme(srGui)
+    srGui.GetClientPos(,, &srClientW, &srClientH)
+    StudyReaderResize(srState, srGui, 0, srClientW, srClientH)
+    StudyLibraryRunBridge(srState, "ensure")
+    StudyLibraryLoadGroup(srState, srGroupId, srVersion)
+    ; Loading enables the initially disabled navigation/Anki controls. Reapply
+    ; their native dark state after that transition so Windows does not repaint
+    ; them with the default light button/check-box theme.
+    CPApplyOwnedDialogTheme(srGui)
+
+    srSavedX := IniRead(iniPath, "study_reader_view", "x", "__missing__")
+    srSavedY := IniRead(iniPath, "study_reader_view", "y", "__missing__")
+    if ((srSavedX is number) && (srSavedY is number)) {
+        srSavedX := Integer(srSavedX), srSavedY := Integer(srSavedY)
+        StudyReaderClampPosition(srGui, &srSavedX, &srSavedY)
+        srGui.Show("x" srSavedX " y" srSavedY)
+    } else {
+        srGui.Show("Center")
+    }
+    WinActivate("ahk_id " srGui.Hwnd)
+}
+
+StudyLibraryCloseDialog(slDialog, *) {
+    try slDialog.Destroy()
+}
+
+StudyLibrarySelectedGroupIds(slState) {
+    slIds := []
+    if !(slState.Has("list") && slState.Has("groups"))
+        return slIds
+    slRow := 0
+    Loop {
+        slRow := slState["list"].GetNext(slRow)
+        if !slRow
+            break
+        slGroupId := StudyLibraryRowGroupId(slState, slRow)
+        if (slGroupId > 0)
+            slIds.Push(slGroupId)
+    }
+    return slIds
+}
+
+StudyLibraryRowGroupId(slState, slRow) {
+    try return Integer(slState["list"].GetText(slRow, 9))
+    return 0
+}
+
+StudyLibraryGroupsInDisplayOrder(slState) {
+    slGroups := []
+    slGroupsById := Map()
+    for slGroup in slState["groups"]
+        slGroupsById[slGroup["id"]] := slGroup
+    Loop slState["list"].GetCount() {
+        slGroupId := StudyLibraryRowGroupId(slState, A_Index)
+        if slGroupsById.Has(slGroupId)
+            slGroups.Push(slGroupsById[slGroupId])
+    }
+    return slGroups
+}
+
+StudyLibraryFindGroupRow(slState, slGroupId) {
+    if (slGroupId <= 0)
+        return 0
+    Loop slState["list"].GetCount() {
+        if (StudyLibraryRowGroupId(slState, A_Index) = slGroupId)
+            return A_Index
+    }
+    return 0
+}
+
+StudyLibraryGroupIdSelected(slIds, slGroupId) {
+    for slId in slIds {
+        if (slId = slGroupId)
+            return true
+    }
+    return false
+}
+
+StudyLibraryUpdateSelectionActions(slState, *) {
+    if !(slState.Has("editDetailsButton") && slState["editDetailsButton"])
+        return
+    slCount := StudyLibrarySelectedGroupIds(slState).Length
+    slState["editDetailsButton"].Text := slCount > 1
+        ? "Edit " slCount " selected..." : "Edit details..."
+    slState["editDetailsButton"].Enabled := slCount > 0
+}
+
+StudyLibraryEditDetails(slState, *) {
+    slIds := StudyLibrarySelectedGroupIds(slState)
+    if !slIds.Length
+        return
+    if (slIds.Length > 1)
+        return StudyLibraryOpenBulkDetails(slState, slIds)
+    if (slState["currentGroupId"] != slIds[1])
+        StudyLibraryLoadGroup(slState, slIds[1])
+    if (slState["currentGroupId"] <= 0)
+        return
+    slDialog := Gui(
+        "+Owner" slState["gui"].Hwnd " +OwnDialogs",
+        "Study Library - Edit details"
+    )
+    slDialog.MarginX := 18, slDialog.MarginY := 16
+    slDialog.SetFont("s10", "Segoe UI")
+    slDialog.Add("Text", "xm ym w110", "Chapter / section:")
+    slChapterEdit := slDialog.Add(
+        "Edit", "x+10 yp-4 w360", slState["currentChapter"]
+    )
+    slDialog.Add("Text", "xm y+18 w110", "Speaker:")
+    slSpeakerEdit := slDialog.Add(
+        "Edit", "x+10 yp-4 w360", slState["currentSpeaker"]
+    )
+    slDialog.Add("Text", "xm y+18 w110", "Tags:")
+    slTagsEdit := slDialog.Add(
+        "Edit", "x+10 yp-4 w360", slState["currentTags"]
+    )
+    slAddedToAnki := slDialog.Add(
+        "CheckBox", "xm y+18 w480", "Added to Anki"
+    )
+    slAddedToAnki.Value := slState["currentAddedToAnkiAt"] != "" ? 1 : 0
+    slHint := slDialog.Add(
+        "Text", "xm y+12 w480 h38 cGray",
+        "Separate multiple tags with commas. Chapter, speaker and tags are "
+        . "included in the Study Library search."
+    )
+    CPRegisterMutedControl(slHint)
+    slSaveButton := slDialog.Add("Button", "xm y+14 w120 Default", "Save details")
+    slCancelButton := slDialog.Add("Button", "x+10 yp w120", "Cancel")
+    slSaveButton.OnEvent(
+        "Click",
+        StudyLibrarySaveDetails.Bind(
+            slState, slDialog, slChapterEdit, slSpeakerEdit, slTagsEdit,
+            slAddedToAnki
+        )
+    )
+    slCancelButton.OnEvent("Click", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Close", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(slDialog)
+    slChapterEdit.Focus()
+}
+
+StudyLibraryBulkValueModeChanged(slModeDdl, slValueEdit, slEnabledValues, *) {
+    slValueEdit.Enabled := InStr("," slEnabledValues ",", "," slModeDdl.Value ",")
+}
+
+StudyLibraryBulkOwnedMessage(slOwnerHwnd, slMessage, slIcon := "warning") {
+    if !slOwnerHwnd || !DllCall("user32\IsWindow", "ptr", slOwnerHwnd, "int")
+        slOwnerHwnd := DllCall("user32\GetForegroundWindow", "ptr")
+    slFlags := 0x00010000 ; MB_SETFOREGROUND
+    slFlags |= slIcon = "error" ? 0x00000010 : 0x00000030
+    return DllCall(
+        "user32\MessageBoxW", "ptr", slOwnerHwnd,
+        "wstr", slMessage, "wstr", "Study Library - Bulk edit",
+        "uint", slFlags, "int"
+    )
+}
+
+StudyLibraryOpenBulkDetails(slState, slIds) {
+    slCount := slIds.Length
+    slDialog := Gui(
+        "+Owner" slState["gui"].Hwnd " +OwnDialogs",
+        "Study Library - Bulk edit"
+    )
+    slDialog.MarginX := 18, slDialog.MarginY := 16
+    slDialog.SetFont("s10", "Segoe UI")
+    slHeading := slDialog.Add(
+        "Text", "xm ym w540", slCount " explanations selected"
+    )
+    slHeading.SetFont("s11 Bold")
+    slHint := slDialog.Add(
+        "Text", "xm y+7 w540 h42 cGray",
+        "Only the changes chosen below are applied. Every field starts at "
+        . "Keep existing so unrelated metadata remains untouched."
+    )
+    CPRegisterMutedControl(slHint)
+
+    slDialog.Add("Text", "xm y+14 w92", "Chapter:")
+    slChapterMode := slDialog.Add(
+        "DropDownList", "x+8 yp-4 w145 0x210", ["Keep existing", "Set to...", "Clear"]
+    )
+    slChapterMode.Choose(1)
+    slChapterEdit := slDialog.Add("Edit", "x+10 yp w285 Disabled")
+
+    slDialog.Add("Text", "xm y+16 w92", "Speaker:")
+    slSpeakerMode := slDialog.Add(
+        "DropDownList", "x+8 yp-4 w145 0x210", ["Keep existing", "Set to...", "Clear"]
+    )
+    slSpeakerMode.Choose(1)
+    slSpeakerEdit := slDialog.Add("Edit", "x+10 yp w285 Disabled")
+
+    slDialog.Add("Text", "xm y+16 w92", "Tags:")
+    slTagsMode := slDialog.Add(
+        "DropDownList", "x+8 yp-4 w145 0x210",
+        ["Keep existing", "Add tags", "Remove tags", "Replace all tags", "Clear all tags"]
+    )
+    slTagsMode.Choose(1)
+    slTagsEdit := slDialog.Add("Edit", "x+10 yp w285 Disabled")
+
+    slDialog.Add("Text", "xm y+16 w92", "Added to Anki:")
+    slAnkiMode := slDialog.Add(
+        "DropDownList", "x+8 yp-4 w210 0x210",
+        ["Keep existing", "Mark as added", "Mark as not added"]
+    )
+    slAnkiMode.Choose(1)
+
+    slTagHint := slDialog.Add(
+        "Text", "xm y+13 w540 h38 cGray",
+        "Separate multiple tags with commas. Add and Remove preserve all other "
+        . "tags; Replace all tags intentionally overwrites them."
+    )
+    CPRegisterMutedControl(slTagHint)
+    slApply := slDialog.Add(
+        "Button", "xm y+12 w170 Default", "Apply to " slCount " entries"
+    )
+    slCancel := slDialog.Add("Button", "x+10 yp w110", "Cancel")
+
+    slChapterMode.OnEvent(
+        "Change", StudyLibraryBulkValueModeChanged.Bind(
+            slChapterMode, slChapterEdit, "2"
+        )
+    )
+    slSpeakerMode.OnEvent(
+        "Change", StudyLibraryBulkValueModeChanged.Bind(
+            slSpeakerMode, slSpeakerEdit, "2"
+        )
+    )
+    slTagsMode.OnEvent(
+        "Change", StudyLibraryBulkValueModeChanged.Bind(
+            slTagsMode, slTagsEdit, "2,3,4"
+        )
+    )
+    slApply.OnEvent(
+        "Click", StudyLibraryApplyBulkDetails.Bind(
+            slState, slDialog, slIds,
+            slChapterMode, slChapterEdit, slSpeakerMode, slSpeakerEdit,
+            slTagsMode, slTagsEdit, slAnkiMode
+        )
+    )
+    slCancel.OnEvent("Click", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Close", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(slDialog)
+    slChapterMode.Focus()
+}
+
+StudyLibraryApplyBulkDetails(
+    slState, slDialog, slIds,
+    slChapterMode, slChapterEdit, slSpeakerMode, slSpeakerEdit,
+    slTagsMode, slTagsEdit, slAnkiMode, *
+) {
+    global CPStudyReaderState
+    slChapterModes := ["keep", "set", "clear"]
+    slSpeakerModes := ["keep", "set", "clear"]
+    slTagsModes := ["keep", "add", "remove", "replace", "clear"]
+    slAnkiModes := ["keep", "1", "0"]
+    slChapterOperation := slChapterModes[slChapterMode.Value]
+    slSpeakerOperation := slSpeakerModes[slSpeakerMode.Value]
+    slTagsOperation := slTagsModes[slTagsMode.Value]
+    slAnkiOperation := slAnkiModes[slAnkiMode.Value]
+    slChapterValue := Trim(slChapterEdit.Value)
+    slSpeakerValue := Trim(slSpeakerEdit.Value)
+    slTagsValue := Trim(slTagsEdit.Value)
+
+    if (slChapterOperation = "keep" && slSpeakerOperation = "keep"
+        && slTagsOperation = "keep" && slAnkiOperation = "keep") {
+        StudyLibraryBulkOwnedMessage(
+            slDialog.Hwnd, "Choose at least one metadata change first."
+        )
+        return
+    }
+    if (slChapterOperation = "set" && slChapterValue = "") {
+        StudyLibraryBulkOwnedMessage(
+            slDialog.Hwnd, "Enter the chapter that should be set."
+        )
+        slChapterEdit.Focus()
+        return
+    }
+    if (slSpeakerOperation = "set" && slSpeakerValue = "") {
+        StudyLibraryBulkOwnedMessage(
+            slDialog.Hwnd, "Enter the speaker that should be set."
+        )
+        slSpeakerEdit.Focus()
+        return
+    }
+    if (slTagsOperation = "add" || slTagsOperation = "remove"
+        || slTagsOperation = "replace") && slTagsValue = "" {
+        StudyLibraryBulkOwnedMessage(
+            slDialog.Hwnd, "Enter at least one tag for the selected tag operation."
+        )
+        slTagsEdit.Focus()
+        return
+    }
+
+    slIdText := ""
+    for slId in slIds
+        slIdText .= (slIdText = "" ? "" : ",") slId
+    EnvSet("STUDY_LIBRARY_GROUP_IDS", slIdText)
+    EnvSet("STUDY_LIBRARY_BULK_CHAPTER_MODE", slChapterOperation)
+    EnvSet("STUDY_LIBRARY_BULK_CHAPTER", slChapterValue)
+    EnvSet("STUDY_LIBRARY_BULK_SPEAKER_MODE", slSpeakerOperation)
+    EnvSet("STUDY_LIBRARY_BULK_SPEAKER", slSpeakerValue)
+    EnvSet("STUDY_LIBRARY_BULK_TAGS_MODE", slTagsOperation)
+    EnvSet("STUDY_LIBRARY_BULK_TAGS", slTagsValue)
+    EnvSet("STUDY_LIBRARY_BULK_ANKI_MODE", slAnkiOperation)
+    slUpdated := false
+    try {
+        slUpdated := StudyLibraryRunBridge(slState, "bulk-metadata")
+    } finally {
+        for slName in [
+            "STUDY_LIBRARY_GROUP_IDS",
+            "STUDY_LIBRARY_BULK_CHAPTER_MODE", "STUDY_LIBRARY_BULK_CHAPTER",
+            "STUDY_LIBRARY_BULK_SPEAKER_MODE", "STUDY_LIBRARY_BULK_SPEAKER",
+            "STUDY_LIBRARY_BULK_TAGS_MODE", "STUDY_LIBRARY_BULK_TAGS",
+            "STUDY_LIBRARY_BULK_ANKI_MODE"
+        ]
+            EnvSet(slName, "")
+    }
+    if !slUpdated
+        return
+
+    try slDialog.Destroy()
+    if (CPStudyReaderState && CPStudyReaderState.Has("currentGroupId")
+        && StudyLibraryGroupIdSelected(
+            slIds, CPStudyReaderState["currentGroupId"]
+        )) {
+        slReaderGroup := CPStudyReaderState["currentGroupId"]
+        slReaderVersion := CPStudyReaderState["currentVersion"]
+        StudyReaderRememberEntryView(CPStudyReaderState)
+        StudyLibraryLoadGroup(
+            CPStudyReaderState, slReaderGroup, slReaderVersion
+        )
+        StudyReaderRestoreEntryView(CPStudyReaderState, slReaderGroup)
+    }
+    StudyLibraryRefresh(slState)
+}
+
+StudyLibrarySaveDetails(
+    slState, slDialog, slChapterEdit, slSpeakerEdit, slTagsEdit,
+    slAddedToAnki, *
+) {
+    EnvSet("STUDY_LIBRARY_CHAPTER", Trim(slChapterEdit.Value))
+    EnvSet("STUDY_LIBRARY_SPEAKER", Trim(slSpeakerEdit.Value))
+    EnvSet("STUDY_LIBRARY_TAGS", Trim(slTagsEdit.Value))
+    EnvSet("STUDY_LIBRARY_ADDED_TO_ANKI", slAddedToAnki.Value ? "1" : "0")
+    try {
+        if !StudyLibraryRunBridge(
+            slState, "set-metadata", slState["currentGroupId"]
+        )
+            return
+    } finally {
+        EnvSet("STUDY_LIBRARY_CHAPTER", "")
+        EnvSet("STUDY_LIBRARY_SPEAKER", "")
+        EnvSet("STUDY_LIBRARY_TAGS", "")
+        EnvSet("STUDY_LIBRARY_ADDED_TO_ANKI", "")
+    }
+    try slDialog.Destroy()
+    StudyLibraryRefresh(slState)
+}
+
+StudyLibraryRemoveVersion(slState, *) {
+    slIndex := slState["versionDdl"].Value
+    if (slState["currentGroupId"] <= 0 || slIndex < 1
+        || slIndex > slState["versions"].Length)
+        return
+    slVersion := slState["versions"][slIndex]["version"]
+    slOnlyVersion := slState["versions"].Length = 1
+    slQuestion := slOnlyVersion
+        ? "This is the only version. Removing it will also remove this source "
+            . "from the Study Library."
+        : "Remove version v" Format("{:02}", slVersion)
+            . " from this saved explanation?"
+    slQuestion .= "`n`nA database backup is created first, and saved screenshots "
+        . "are moved into the Study Library Trash folder. Plain-text copies are "
+        . "not deleted."
+    slDialogTitle := slOnlyVersion ? "Remove explanation" : "Remove explanation version"
+    if (MsgBox(slQuestion, slDialogTitle, "YesNo Icon! Default2") != "Yes")
+        return
+    if !StudyLibraryRunBridge(
+        slState, "remove-version", slState["currentGroupId"], slVersion
+    )
+        return
+    slMutationRows := StudyLibraryReadRows(slState["outputDir"] "\mutation.tsv")
+    slBackupPath := ""
+    if slMutationRows.Length && slMutationRows[1].Length >= 3
+        slBackupPath := StudyLibraryHexDecode(slMutationRows[1][3])
+    StudyLibraryRefresh(slState)
+    StudyLibraryRefreshStorage(slState, true)
+    slResult := slOnlyVersion
+        ? "The explanation was removed from the Study Library."
+        : "The selected version was removed from the Study Library."
+    if (slBackupPath != "")
+        slResult .= "`n`nRecovery backup:`n" slBackupPath
+    MsgBox(slResult, "Study Library", "OK Iconi")
+}
+
+StudyLibraryValueChoices(
+    slPath, slAllLabel, slEmptyLabel, slCurrentMode := "all", slCurrentValue := ""
+) {
+    slLabels := [slAllLabel, slEmptyLabel]
+    slChoices := [
+        Map("mode", "all", "value", ""),
+        Map("mode", "empty", "value", "")
+    ]
+    slCurrentFound := (slCurrentMode != "value")
+    for slRow in StudyLibraryReadRows(slPath) {
+        if !slRow.Length
+            continue
+        slValue := StudyLibraryHexDecode(slRow[1])
+        if (slValue = "")
+            continue
+        slLabels.Push(slValue)
+        slChoices.Push(Map("mode", "value", "value", slValue))
+        if (slCurrentMode = "value" && slValue = slCurrentValue)
+            slCurrentFound := true
+    }
+    ; Keep an active value available even if another filter currently excludes
+    ; every matching row or the value was removed in another process.
+    if !slCurrentFound && slCurrentValue != "" {
+        slLabels.Push(slCurrentValue)
+        slChoices.Push(Map("mode", "value", "value", slCurrentValue))
+    }
+    return Map("labels", slLabels, "choices", slChoices)
+}
+
+StudyLibraryChoiceIndex(slChoices, slMode, slValue := "") {
+    for slIndex, slChoice in slChoices {
+        if (slChoice["mode"] = slMode && slChoice["value"] = slValue)
+            return slIndex
+    }
+    return 1
+}
+
+StudyLibraryFilterDisplay(slMode, slValue, slAny := "Any", slEmpty := "Not set") {
+    if (slMode = "empty")
+        return slEmpty
+    if (slMode = "value" && slValue != "")
+        return slValue
+    return slAny
+}
+
+StudyLibraryDateModeIndex(slMode) {
+    if (slMode = "today")
+        return 2
+    if (slMode = "yesterday")
+        return 3
+    if (slMode = "last24")
+        return 4
+    if (slMode = "last7")
+        return 5
+    if (slMode = "custom")
+        return 6
+    return 1
+}
+
+StudyLibraryDateModeFromIndex(slIndex) {
+    return slIndex = 2 ? "today"
+        : (slIndex = 3 ? "yesterday"
+        : (slIndex = 4 ? "last24"
+        : (slIndex = 5 ? "last7"
+        : (slIndex = 6 ? "custom" : "all"))))
+}
+
+StudyLibraryCompactDateTime(slStamp) {
+    if (StrLen(slStamp) < 12)
+        return ""
+    return SubStr(slStamp, 1, 4) "-" SubStr(slStamp, 5, 2) "-"
+        . SubStr(slStamp, 7, 2) " " SubStr(slStamp, 9, 2) ":"
+        . SubStr(slStamp, 11, 2)
+}
+
+StudyLibraryBridgeDateTime(slStamp) {
+    if (StrLen(slStamp) < 14)
+        return ""
+    return SubStr(slStamp, 1, 4) "-" SubStr(slStamp, 5, 2) "-"
+        . SubStr(slStamp, 7, 2) " " SubStr(slStamp, 9, 2) ":"
+        . SubStr(slStamp, 11, 2) ":" SubStr(slStamp, 13, 2)
+}
+
+StudyLibraryDateFilterDisplay(slState) {
+    slMode := slState["dateMode"]
+    if (slMode = "today")
+        return "Today"
+    if (slMode = "yesterday")
+        return "Yesterday"
+    if (slMode = "last24")
+        return "Last 24 hours"
+    if (slMode = "last7")
+        return "Last 7 days"
+    if (slMode = "custom")
+        return StudyLibraryCompactDateTime(slState["dateFrom"])
+            . " – " StudyLibraryCompactDateTime(slState["dateTo"])
+    return "Any time"
+}
+
+StudyLibraryDateControlsChanged(
+    slDateDdl, slFromDate, slFromTime, slToDate, slToTime, *
+) {
+    slEnabled := slDateDdl.Value = 6
+    for slControl in [slFromDate, slFromTime, slToDate, slToTime]
+        slControl.Enabled := slEnabled
+}
+
+StudyLibraryDialogFilterCount(slState) {
+    slCount := 0
+    for slMode in [
+        slState["profileMode"], slState["chapterMode"], slState["speakerMode"],
+        slState["tagMode"], slState["ankiMode"], slState["dateMode"]
+    ] {
+        if (slMode != "all")
+            slCount += 1
+    }
+    return slCount
+}
+
+StudyLibraryColumnFilterActive(slState, slColumnKey) {
+    if (slColumnKey = "updated")
+        return slState["dateMode"] != "all"
+    if (slColumnKey = "profile")
+        return slState["profileMode"] != "all"
+    if (slColumnKey = "chapter")
+        return slState["chapterMode"] != "all"
+    if (slColumnKey = "speaker")
+        return slState["speakerMode"] != "all"
+    if (slColumnKey = "tags")
+        return slState["tagMode"] != "all"
+    if (slColumnKey = "anki")
+        return slState["ankiMode"] != "all"
+    return false
+}
+
+StudyLibraryUpdateFilterIndicators(slState) {
+    slCount := StudyLibraryDialogFilterCount(slState)
+    slState["filterButton"].Text := slCount
+        ? "Filters (" slCount ")..." : "Filters..."
+    StudyLibraryApplyColumns(slState)
+}
+
+StudyLibraryApplyFilters(
+    slState, slDialog, slProfileDdl, slChapterDdl, slSpeakerDdl, slTagDdl, slAnkiDdl,
+    slDateDdl,
+    slFromDate, slFromTime, slToDate, slToTime, *
+) {
+    slDateMode := StudyLibraryDateModeFromIndex(slDateDdl.Value)
+    ; The picker displays minutes, so include the complete selected final minute.
+    slFromStamp := SubStr(slFromDate.Value, 1, 8) SubStr(slFromTime.Value, 9, 4) "00"
+    slToStamp := SubStr(slToDate.Value, 1, 8) SubStr(slToTime.Value, 9, 4) "59"
+    if (slDateMode = "custom" && Integer(slToStamp) < Integer(slFromStamp)) {
+        MsgBox(
+            "The end of the generated-date range must not be before its start.",
+            "Study Library - Filters",
+            "OK Icon!"
+        )
+        return
+    }
+    slProfileIndex := slProfileDdl.Value
+    slChapterIndex := slChapterDdl.Value
+    slSpeakerIndex := slSpeakerDdl.Value
+    slTagIndex := slTagDdl.Value
+    if (slProfileIndex >= 1 && slProfileIndex <= slState["profileChoices"].Length) {
+        slChoice := slState["profileChoices"][slProfileIndex]
+        slState["profileMode"] := slChoice["mode"]
+        slState["profileFilter"] := slChoice["value"]
+    }
+    if (slChapterIndex >= 1 && slChapterIndex <= slState["chapterChoices"].Length) {
+        slChoice := slState["chapterChoices"][slChapterIndex]
+        slState["chapterMode"] := slChoice["mode"]
+        slState["chapterFilter"] := slChoice["value"]
+    }
+    if (slSpeakerIndex >= 1 && slSpeakerIndex <= slState["speakerChoices"].Length) {
+        slChoice := slState["speakerChoices"][slSpeakerIndex]
+        slState["speakerMode"] := slChoice["mode"]
+        slState["speakerFilter"] := slChoice["value"]
+    }
+    if (slTagIndex >= 1 && slTagIndex <= slState["tagChoices"].Length) {
+        slChoice := slState["tagChoices"][slTagIndex]
+        slState["tagMode"] := slChoice["mode"]
+        slState["tagFilter"] := slChoice["value"]
+    }
+    slAnkiIndex := slAnkiDdl.Value
+    slState["ankiMode"] := slAnkiIndex = 2
+        ? "not-added" : (slAnkiIndex = 3 ? "added" : "all")
+    slState["dateMode"] := slDateMode
+    if (slDateMode = "custom") {
+        slState["dateFrom"] := slFromStamp
+        slState["dateTo"] := slToStamp
+    }
+    try slDialog.Destroy()
+    StudyLibraryRefresh(slState)
+}
+
+StudyLibraryOpenFilters(slState, *) {
+    slDialog := Gui(
+        "+Owner" slState["gui"].Hwnd " +OwnDialogs",
+        "Study Library - Filters"
+    )
+    slDialog.MarginX := 18, slDialog.MarginY := 16
+    slDialog.SetFont("s10", "Segoe UI")
+    slDialog.Add("Text", "xm ym w90", "Profile:")
+    slProfileDdl := slDialog.Add(
+        "DropDownList", "x+10 yp-4 w310 0x210", slState["profileLabels"]
+    )
+    slProfileDdl.Choose(StudyLibraryChoiceIndex(
+        slState["profileChoices"], slState["profileMode"], slState["profileFilter"]
+    ))
+    slDialog.Add("Text", "xm y+18 w90", "Chapter:")
+    slChapterDdl := slDialog.Add(
+        "DropDownList", "x+10 yp-4 w310 0x210", slState["chapterLabels"]
+    )
+    slChapterDdl.Choose(StudyLibraryChoiceIndex(
+        slState["chapterChoices"], slState["chapterMode"], slState["chapterFilter"]
+    ))
+    slDialog.Add("Text", "xm y+18 w90", "Speaker:")
+    slSpeakerDdl := slDialog.Add(
+        "DropDownList", "x+10 yp-4 w310 0x210", slState["speakerLabels"]
+    )
+    slSpeakerDdl.Choose(StudyLibraryChoiceIndex(
+        slState["speakerChoices"], slState["speakerMode"], slState["speakerFilter"]
+    ))
+    slDialog.Add("Text", "xm y+18 w90", "Tag:")
+    slTagDdl := slDialog.Add(
+        "DropDownList", "x+10 yp-4 w310 0x210", slState["tagLabels"]
+    )
+    slTagDdl.Choose(StudyLibraryChoiceIndex(
+        slState["tagChoices"], slState["tagMode"], slState["tagFilter"]
+    ))
+    slDialog.Add("Text", "xm y+18 w90", "Added to Anki:")
+    slAnkiDdl := slDialog.Add(
+        "DropDownList", "x+10 yp-4 w310 0x210", ["All", "Not added", "Added"]
+    )
+    slAnkiDdl.Choose(
+        slState["ankiMode"] = "not-added" ? 2
+            : (slState["ankiMode"] = "added" ? 3 : 1)
+    )
+    slDialog.Add("Text", "xm y+18 w90", "Date generated:")
+    slDateDdl := slDialog.Add(
+        "DropDownList", "x+10 yp-4 w310 0x210",
+        ["Any time", "Today", "Yesterday", "Last 24 hours", "Last 7 days",
+            "Custom range..."]
+    )
+    slDateDdl.Choose(StudyLibraryDateModeIndex(slState["dateMode"]))
+    slDialog.Add("Text", "xm y+16 w90", "From:")
+    slFromDate := slDialog.Add(
+        "DateTime", "x+10 yp-4 w140 Choose" slState["dateFrom"], "yyyy-MM-dd"
+    )
+    slFromTime := slDialog.Add(
+        "DateTime", "x+8 yp w90 Choose" slState["dateFrom"], "HH:mm"
+    )
+    slDialog.Add("Text", "xm y+16 w90", "To:")
+    slToDate := slDialog.Add(
+        "DateTime", "x+10 yp-4 w140 Choose" slState["dateTo"], "yyyy-MM-dd"
+    )
+    slToTime := slDialog.Add(
+        "DateTime", "x+8 yp w90 Choose" slState["dateTo"], "HH:mm"
+    )
+    slDateDdl.OnEvent("Change", StudyLibraryDateControlsChanged.Bind(
+        slDateDdl, slFromDate, slFromTime, slToDate, slToTime
+    ))
+    StudyLibraryDateControlsChanged(
+        slDateDdl, slFromDate, slFromTime, slToDate, slToTime
+    )
+    slHint := slDialog.Add(
+        "Text", "xm y+12 w410 h38 cGray",
+        "These filters work together with the search field."
+    )
+    CPRegisterMutedControl(slHint)
+    slApply := slDialog.Add("Button", "xm y+12 w120 Default", "Apply filters")
+    slClear := slDialog.Add("Button", "x+10 yp w100", "Clear all")
+    slCancel := slDialog.Add("Button", "x+10 yp w100", "Cancel")
+    slApply.OnEvent("Click", StudyLibraryApplyFilters.Bind(
+        slState, slDialog, slProfileDdl, slChapterDdl, slSpeakerDdl, slTagDdl, slAnkiDdl,
+        slDateDdl, slFromDate, slFromTime, slToDate, slToTime
+    ))
+    slClear.OnEvent("Click", StudyLibraryClearFiltersAndClose.Bind(slState, slDialog))
+    slCancel.OnEvent("Click", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Close", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(slDialog)
+}
+
+StudyLibraryClearFilters(slState, *) {
+    slState["profileMode"] := "all"
+    slState["profileFilter"] := ""
+    slState["chapterMode"] := "all"
+    slState["chapterFilter"] := ""
+    slState["speakerMode"] := "all"
+    slState["speakerFilter"] := ""
+    slState["tagMode"] := "all"
+    slState["tagFilter"] := ""
+    slState["ankiMode"] := "all"
+    slState["dateMode"] := "all"
+    slState["search"].Value := ""
+    StudyLibraryRefresh(slState)
+}
+
+StudyLibraryClearFiltersAndClose(slState, slDialog, *) {
+    try slDialog.Destroy()
+    StudyLibraryClearFilters(slState)
+}
+
+StudyLibraryCreateColumns() {
+    global iniPath
+    slVisibleRaw := "," StrLower(IniRead(
+        iniPath, "study_library_view", "visibleColumns",
+        "updated,profile,chapter,speaker,tags,source,versions,anki"
+    )) ","
+    slDefinitions := [
+        ["updated", "Date generated", 125, false],
+        ["profile", "Profile", 110, false],
+        ["chapter", "Chapter", 120, false],
+        ["speaker", "Speaker", 100, false],
+        ["tags", "Tags", 150, false],
+        ["source", "Japanese source", 260, true],
+        ["versions", "Versions", 72, false],
+        ["anki", "Added to Anki", 105, false]
+    ]
+    slWidthUnits := IniRead(
+        iniPath, "study_library_view", "columnWidthUnits", ""
+    )
+    slUseSavedWidths := slWidthUnits = "logical-v1"
+    slColumns := []
+    for slIndex, slDefinition in slDefinitions {
+        slKey := slDefinition[1]
+        slDefaultWidth := slDefinition[3]
+        slWidth := slUseSavedWidths
+            ? Integer(IniRead(
+                iniPath, "study_library_view", "columnWidth_" slKey, slDefaultWidth
+            ))
+            : slDefaultWidth
+        slRequired := slDefinition[4]
+        slColumns.Push(Map(
+            "index", slIndex,
+            "key", slKey,
+            "label", slDefinition[2],
+            "width", Max(40, Min(600, slWidth)),
+            "required", slRequired,
+            "visible", slRequired || InStr(slVisibleRaw, "," slKey ",")
+        ))
+    }
+    return slColumns
+}
+
+StudyLibraryCaptureColumnWidths(slState, slPersist := false) {
+    global iniPath
+    for slColumn in slState["columns"] {
+        if !slColumn["visible"]
+            continue
+        try slPhysicalWidth := DllCall(
+            "user32\SendMessageW",
+            "ptr", slState["list"].Hwnd,
+            "uint", 0x101D, ; LVM_GETCOLUMNWIDTH
+            "ptr", slColumn["index"] - 1,
+            "ptr", 0,
+            "ptr"
+        )
+        catch
+            continue
+        slDpi := GetWindowDPI(slState["gui"].Hwnd)
+        slWidth := Round(slPhysicalWidth * 96 / Max(96, slDpi))
+        if (slWidth >= 40)
+            slColumn["width"] := slWidth
+        if slPersist
+            IniWrite(
+                slColumn["width"], iniPath, "study_library_view",
+                "columnWidth_" slColumn["key"]
+            )
+    }
+    if slPersist
+        IniWrite(
+            "logical-v1", iniPath, "study_library_view", "columnWidthUnits"
+        )
+}
+
+StudyLibraryApplyColumns(slState) {
+    for slColumn in slState["columns"] {
+        slWidth := slColumn["visible"] ? slColumn["width"] : 0
+        slTitle := slColumn["label"]
+        if StudyLibraryColumnFilterActive(slState, slColumn["key"])
+            slTitle .= "  ▼"
+        slState["list"].ModifyCol(
+            slColumn["index"], slWidth, slTitle
+        )
+    }
+    StudyLibraryEnsureInternalColumnHidden(slState)
+    StudyLibraryApplyHeaderIndicators(slState)
+}
+
+StudyLibraryEnsureInternalColumnHidden(slState, *) {
+    if !StudyLibraryStateAlive(slState)
+        return
+    slInternalIndex := slState["columns"].Length
+    slState["lockingInternalColumn"] := true
+    try DllCall(
+        "user32\SendMessageW", "ptr", slState["list"].Hwnd,
+        "uint", 0x101E, ; LVM_SETCOLUMNWIDTH
+        "ptr", slInternalIndex, "ptr", 0, "ptr"
+    )
+    finally slState["lockingInternalColumn"] := false
+}
+
+StudyLibraryApplyHeaderIndicators(slState) {
+    if !StudyLibraryStateAlive(slState)
+        return
+    try {
+        if !slState["headerHwnd"]
+            slState["headerHwnd"] := DllCall(
+                "user32\SendMessageW", "ptr", slState["list"].Hwnd,
+                "uint", 0x101F, "ptr", 0, "ptr", 0, "ptr"
+            ) ; LVM_GETHEADER
+        if (!slState["headerHwnd"])
+            return
+        slItemSize := A_PtrSize = 8 ? 72 : 48
+        slFormatOffset := 12 + 2 * A_PtrSize
+        for slColumn in slState["columns"] {
+            slItem := Buffer(slItemSize, 0)
+            NumPut("uint", 0x00000004, slItem, 0) ; HDI_FORMAT
+            if !DllCall(
+                "user32\SendMessageW", "ptr", slState["headerHwnd"],
+                "uint", 0x1203, "ptr", slColumn["index"] - 1,
+                "ptr", slItem, "ptr"
+            ) ; HDM_GETITEMA (format/image fields are encoding-independent)
+                continue
+            slFormat := NumGet(slItem, slFormatOffset, "int")
+            slFormat &= ~(0x00000800 | 0x00000400 | 0x00000200)
+            if (slColumn["index"] = slState["sortColumn"])
+                slFormat |= slState["sortDirection"] = "asc"
+                    ? 0x00000400 : 0x00000200 ; HDF_SORTUP / HDF_SORTDOWN
+            NumPut("uint", 0x00000004, slItem, 0) ; HDI_FORMAT
+            NumPut("int", slFormat, slItem, slFormatOffset)
+            DllCall(
+                "user32\SendMessageW", "ptr", slState["headerHwnd"],
+                "uint", 0x1204, "ptr", slColumn["index"] - 1,
+                "ptr", slItem, "ptr"
+            ) ; HDM_SETITEMA
+        }
+        ; The final column stores the database group ID used to keep row
+        ; selection correct after sorting. It is implementation data, not UI.
+        ; HDF_FIXEDWIDTH prevents the zero-width divider from being dragged.
+        slInternalIndex := slState["columns"].Length
+        slItem := Buffer(slItemSize, 0)
+        NumPut("uint", 0x00000004, slItem, 0) ; HDI_FORMAT
+        if DllCall(
+            "user32\SendMessageW", "ptr", slState["headerHwnd"],
+            "uint", 0x1203, "ptr", slInternalIndex,
+            "ptr", slItem, "ptr"
+        ) {
+            slFormat := NumGet(slItem, slFormatOffset, "int")
+            slFormat |= 0x00000100 ; HDF_FIXEDWIDTH
+            slFormat &= ~(0x00000800 | 0x00000400 | 0x00000200)
+            NumPut("uint", 0x00000004, slItem, 0)
+            NumPut("int", slFormat, slItem, slFormatOffset)
+            DllCall(
+                "user32\SendMessageW", "ptr", slState["headerHwnd"],
+                "uint", 0x1204, "ptr", slInternalIndex,
+                "ptr", slItem, "ptr"
+            )
+        }
+        StudyLibraryEnsureInternalColumnHidden(slState)
+    }
+}
+
+StudyLibraryRedrawList(slState, *) {
+    if !StudyLibraryStateAlive(slState)
+        return
+    try DllCall(
+        "user32\RedrawWindow", "ptr", slState["list"].Hwnd,
+        "ptr", 0, "ptr", 0,
+        "uint", 0x0001 | 0x0004 | 0x0080 | 0x0100
+    ) ; RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW
+}
+
+StudyLibraryAutoSizeColumn(slState, slColumnIndex, *) {
+    if !StudyLibraryStateAlive(slState)
+        return
+    if (slColumnIndex < 0 || slColumnIndex >= slState["columns"].Length)
+        return
+    try {
+        DllCall(
+            "user32\SendMessageW", "ptr", slState["list"].Hwnd,
+            "uint", 0x101E, ; LVM_SETCOLUMNWIDTH
+            "ptr", slColumnIndex,
+            "ptr", -2, ; LVSCW_AUTOSIZE_USEHEADER: header or cells, whichever is wider
+            "ptr"
+        )
+        StudyLibraryCaptureColumnWidths(slState)
+        StudyLibraryRedrawList(slState)
+    }
+}
+
+StudyLibraryHeaderNotify(slState, wParam, lParam, slMsg, slHwnd) {
+    if (!StudyLibraryStateAlive(slState) || !lParam)
+        return
+    try {
+        if !slState["headerHwnd"]
+            slState["headerHwnd"] := DllCall(
+                "user32\SendMessageW", "ptr", slState["list"].Hwnd,
+                "uint", 0x101F, "ptr", 0, "ptr", 0, "ptr"
+            ) ; LVM_GETHEADER
+        if (NumGet(lParam, 0, "Ptr") != slState["headerHwnd"])
+            return
+        slCode := NumGet(lParam, A_PtrSize * 2, "Int")
+        slColumnIndex := -1
+        if (slCode = -300 || slCode = -320 || slCode = -301 || slCode = -321
+            || slCode = -305 || slCode = -325 || slCode = -306 || slCode = -326
+            || slCode = -307 || slCode = -327 || slCode = -308 || slCode = -328) {
+            slItemOffset := A_PtrSize = 8 ? 24 : 12
+            slColumnIndex := NumGet(lParam, slItemOffset, "Int")
+        }
+        slInternalIndex := slState["columns"].Length
+        if (slColumnIndex = slInternalIndex
+            && !slState["lockingInternalColumn"]) {
+            ; Reject every interactive path that could reveal the ID column.
+            if (slCode = -300 || slCode = -320  ; HDN_ITEMCHANGING A/W
+                || slCode = -305 || slCode = -325 ; HDN_DIVIDERDBLCLICK A/W
+                || slCode = -306 || slCode = -326 ; HDN_BEGINTRACK A/W
+                || slCode = -308 || slCode = -328) { ; HDN_TRACK A/W
+                SetTimer(
+                    StudyLibraryEnsureInternalColumnHidden.Bind(slState), -1
+                )
+                return true
+            }
+            if (slCode = -301 || slCode = -321
+                || slCode = -307 || slCode = -327) {
+                SetTimer(
+                    StudyLibraryEnsureInternalColumnHidden.Bind(slState), -1
+                )
+                return true
+            }
+        }
+        ; Header tracking does not reliably erase old vertical grid lines on a
+        ; dark native ListView. Mark the table dirty while tracking, then force
+        ; one complete repaint after Windows commits the new column width.
+        if (slCode = -308 || slCode = -328
+            || slCode = -301 || slCode = -321) { ; HDN_TRACK/ITEMCHANGED A/W
+            DllCall(
+                "user32\InvalidateRect", "ptr", slState["list"].Hwnd,
+                "ptr", 0, "int", true
+            )
+        }
+        if (slCode = -307 || slCode = -327) ; HDN_ENDTRACK A/W
+            SetTimer(slState["listRedrawCallback"], -1)
+        if (slCode = -305 || slCode = -325) { ; HDN_DIVIDERDBLCLICK A/W
+            ; Run after the native double-click handler. Windows first applies
+            ; content-only auto sizing; this replaces it with the documented
+            ; header-or-content mode.
+            SetTimer(
+                StudyLibraryAutoSizeColumn.Bind(slState, slColumnIndex), -1
+            )
+        }
+    }
+}
+
+StudyLibraryApplyCurrentSort(slState) {
+    if !StudyLibraryStateAlive(slState)
+        return
+    try slState["list"].ModifyCol(
+        slState["sortColumn"],
+        slState["sortDirection"] = "asc" ? "Sort" : "SortDesc"
+    )
+    StudyLibraryApplyHeaderIndicators(slState)
+}
+
+StudyLibraryColumnClicked(slState, slList, slColumn) {
+    if (!StudyLibraryStateAlive(slState) || slState["refreshing"])
+        return
+    if (slState["sortColumn"] = slColumn)
+        slState["sortDirection"] := slState["sortDirection"] = "asc"
+            ? "desc" : "asc"
+    else {
+        slState["sortColumn"] := slColumn
+        slState["sortDirection"] := "asc"
+    }
+    ; Run after the native column-click notification has completed so the
+    ; stored direction and the visible arrow always match the final row order.
+    SetTimer(StudyLibraryApplyCurrentSort.Bind(slState), -1)
+}
+
+StudyLibrarySaveColumns(slState, slDialog, slChecks, *) {
+    global iniPath
+    StudyLibraryCaptureColumnWidths(slState)
+    slVisible := ""
+    for slIndex, slColumn in slState["columns"] {
+        if !slColumn["required"]
+            slColumn["visible"] := slChecks[slIndex].Value ? true : false
+        if slColumn["visible"]
+            slVisible .= (slVisible = "" ? "" : ",") slColumn["key"]
+    }
+    IniWrite(slVisible, iniPath, "study_library_view", "visibleColumns")
+    StudyLibraryApplyColumns(slState)
+    try slDialog.Destroy()
+}
+
+StudyLibraryOpenColumns(slState, *) {
+    StudyLibraryCaptureColumnWidths(slState)
+    slDialog := Gui(
+        "+Owner" slState["gui"].Hwnd " +OwnDialogs",
+        "Study Library - Columns"
+    )
+    slDialog.MarginX := 18, slDialog.MarginY := 16
+    slDialog.SetFont("s10", "Segoe UI")
+    slDialog.Add("Text", "xm ym w320", "Choose which columns are shown:")
+    slChecks := []
+    for slColumn in slState["columns"] {
+        slCheck := slDialog.Add("CheckBox", "xm y+9 w300", slColumn["label"])
+        slCheck.Value := slColumn["visible"] ? 1 : 0
+        if slColumn["required"]
+            slCheck.Enabled := false
+        slChecks.Push(slCheck)
+    }
+    slHint := slDialog.Add(
+        "Text", "xm y+12 w320 h38 cGray",
+        "Column widths are saved when the Study Library closes. Japanese source remains visible."
+    )
+    CPRegisterMutedControl(slHint)
+    slApply := slDialog.Add("Button", "xm y+12 w110 Default", "Apply")
+    slCancel := slDialog.Add("Button", "x+10 yp w100", "Cancel")
+    slApply.OnEvent("Click", StudyLibrarySaveColumns.Bind(
+        slState, slDialog, slChecks
+    ))
+    slCancel.OnEvent("Click", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.OnEvent("Close", StudyLibraryCloseDialog.Bind(slDialog))
+    slDialog.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(slDialog)
+}
+
+StudyLibraryQueueImageLayout(slState, slDelay := 24) {
+    if !StudyLibraryStateAlive(slState)
+        return
+    if (slState.Has("imageLayoutQueued") && slState["imageLayoutQueued"])
+        return
+    slState["imageLayoutQueued"] := true
+    SetTimer(slState["imageLayoutCallback"], -slDelay)
+}
+
+StudyLibraryRunQueuedImageLayout(slState, *) {
+    if !IsObject(slState)
+        return
+    slState["imageLayoutQueued"] := false
+    if StudyLibraryStateAlive(slState)
+        StudyLibraryShowImage(slState)
+}
+
+StudyLibraryStateAlive(slState) {
+    if !(IsObject(slState) && slState.Has("gui"))
+        return false
+    if (slState.Has("closed") && slState["closed"])
+        return false
+    try {
+        slHwnd := slState["gui"].Hwnd
+        return slHwnd && DllCall("user32\IsWindow", "ptr", slHwnd, "int")
+    }
+    return false
+}
+
+StudyLibraryRefresh(slState, *) {
+    if !StudyLibraryStateAlive(slState)
+        return
+    if (slState.Has("refreshing") && slState["refreshing"])
+        return
+    slState["refreshing"] := true
+    try {
+    slPreviousGroup := slState["currentGroupId"]
+    EnvSet("STUDY_LIBRARY_QUERY", Trim(slState["search"].Value))
+    EnvSet("STUDY_LIBRARY_PROFILE_MODE", slState["profileMode"])
+    EnvSet("STUDY_LIBRARY_PROFILE_FILTER", slState["profileFilter"])
+    EnvSet("STUDY_LIBRARY_CHAPTER_MODE", slState["chapterMode"])
+    EnvSet("STUDY_LIBRARY_CHAPTER_FILTER", slState["chapterFilter"])
+    EnvSet("STUDY_LIBRARY_SPEAKER_MODE", slState["speakerMode"])
+    EnvSet("STUDY_LIBRARY_SPEAKER_FILTER", slState["speakerFilter"])
+    EnvSet("STUDY_LIBRARY_TAG_MODE", slState["tagMode"])
+    EnvSet("STUDY_LIBRARY_TAG_FILTER", slState["tagFilter"])
+    EnvSet("STUDY_LIBRARY_ANKI_MODE", slState["ankiMode"])
+    EnvSet("STUDY_LIBRARY_DATE_MODE", slState["dateMode"])
+    EnvSet("STUDY_LIBRARY_DATE_FROM", StudyLibraryBridgeDateTime(slState["dateFrom"]))
+    EnvSet("STUDY_LIBRARY_DATE_TO", StudyLibraryBridgeDateTime(slState["dateTo"]))
+    if !StudyLibraryRunBridge(slState, "snapshot")
+        return
+    if !StudyLibraryStateAlive(slState)
+        return
+
+    slOutputDir := slState["outputDir"]
+    slState["suspend"] := true
+    slProfileLabels := ["All Profiles", "Unsorted (no Profile)"]
+    slProfileChoices := [
+        Map("mode", "all", "value", ""),
+        Map("mode", "unsorted", "value", "")
+    ]
+    for slProfileRow in StudyLibraryReadRows(slOutputDir "\profiles.tsv") {
+        if !slProfileRow.Length
+            continue
+        slProfileName := StudyLibraryHexDecode(slProfileRow[1])
+        if (slProfileName = "")
+            continue
+        slProfileLabels.Push(slProfileName)
+        slProfileChoices.Push(Map("mode", "profile", "value", slProfileName))
+    }
+    slState["profileLabels"] := slProfileLabels
+    slState["profileChoices"] := slProfileChoices
+
+    slChapterData := StudyLibraryValueChoices(
+        slOutputDir "\chapters.tsv", "Any chapter", "Chapter not set",
+        slState["chapterMode"], slState["chapterFilter"]
+    )
+    slSpeakerData := StudyLibraryValueChoices(
+        slOutputDir "\speakers.tsv", "Any speaker", "Speaker not set",
+        slState["speakerMode"], slState["speakerFilter"]
+    )
+    slTagData := StudyLibraryValueChoices(
+        slOutputDir "\tags.tsv", "Any tag", "No tags",
+        slState["tagMode"], slState["tagFilter"]
+    )
+    slState["chapterLabels"] := slChapterData["labels"]
+    slState["chapterChoices"] := slChapterData["choices"]
+    slState["speakerLabels"] := slSpeakerData["labels"]
+    slState["speakerChoices"] := slSpeakerData["choices"]
+    slState["tagLabels"] := slTagData["labels"]
+    slState["tagChoices"] := slTagData["choices"]
+    StudyLibraryUpdateFilterIndicators(slState)
+
+    slState["groups"] := []
+    slState["list"].Delete()
+    slTotalVersions := 0
+    slNotAddedCount := 0
+    slSelectedRow := 0
+    for slGroupRow in StudyLibraryReadRows(slOutputDir "\groups.tsv") {
+        if (slGroupRow.Length < 6)
+            continue
+        slGroupId := Integer(slGroupRow[1])
+        slGroupProfile := StudyLibraryHexDecode(slGroupRow[2])
+        slUpdated := StudyLibraryHexDecode(slGroupRow[3])
+        slVersionCount := Integer(slGroupRow[4])
+        slPreview := StudyLibraryHexDecode(slGroupRow[5])
+        slChapter := slGroupRow.Length >= 7 ? StudyLibraryHexDecode(slGroupRow[7]) : ""
+        slSpeaker := slGroupRow.Length >= 8 ? StudyLibraryHexDecode(slGroupRow[8]) : ""
+        slTags := slGroupRow.Length >= 9 ? StudyLibraryHexDecode(slGroupRow[9]) : ""
+        slAddedToAnkiAt := slGroupRow.Length >= 10
+            ? StudyLibraryHexDecode(slGroupRow[10]) : ""
+        slEntry := Map(
+            "id", slGroupId,
+            "profile", slGroupProfile,
+            "updated", slUpdated,
+            "versions", slVersionCount,
+            "preview", slPreview,
+            "chapter", slChapter,
+            "speaker", slSpeaker,
+            "tags", slTags,
+            "addedToAnkiAt", slAddedToAnkiAt
+        )
+        slState["groups"].Push(slEntry)
+        slState["list"].Add(
+            "",
+            slUpdated,
+            slGroupProfile != "" ? slGroupProfile : "Unsorted",
+            slChapter,
+            slSpeaker,
+            slTags,
+            slPreview,
+            slVersionCount,
+            slAddedToAnkiAt != "" ? "Added" : "Not added",
+            slGroupId
+        )
+        slTotalVersions += slVersionCount
+        if (slAddedToAnkiAt = "")
+            slNotAddedCount += 1
+        if (slGroupId = slPreviousGroup)
+            slSelectedRow := slState["groups"].Length
+    }
+    StudyLibraryApplyCurrentSort(slState)
+    slSelectedRow := StudyLibraryFindGroupRow(slState, slPreviousGroup)
+    slState["suspend"] := false
+
+    if slState["groups"].Length {
+        if !slSelectedRow
+            slSelectedRow := 1
+        slState["list"].Modify(slSelectedRow, "Select Focus Vis")
+        StudyLibraryLoadGroup(
+            slState, StudyLibraryRowGroupId(slState, slSelectedRow)
+        )
+        StudyLibraryUpdateSelectionActions(slState)
+        slState["status"].Value := slState["groups"].Length " source"
+            . (slState["groups"].Length = 1 ? "" : "s") " • " slTotalVersions
+            . " explanation" (slTotalVersions = 1 ? "" : "s") " • "
+            . slNotAddedCount " not added to Anki"
+    } else {
+        slSearchActive := (Trim(slState["search"].Value) != "")
+            || (slState["profileMode"] != "all")
+            || (slState["chapterMode"] != "all")
+            || (slState["speakerMode"] != "all")
+            || (slState["tagMode"] != "all")
+            || (slState["ankiMode"] != "all")
+            || (slState["dateMode"] != "all")
+        StudyLibraryClearDetail(
+            slState,
+            slSearchActive ? "No explanations match the current filters."
+                : "No explanations have been saved yet."
+        )
+        slState["status"].Value := slSearchActive
+            ? "No matching explanations" : "Study Library is empty"
+        StudyLibraryUpdateSelectionActions(slState)
+    }
+    } finally {
+        if IsObject(slState)
+            slState["refreshing"] := false
+    }
+    if StudyLibraryStateAlive(slState)
+        SetTimer(StudyLibraryRefreshStorage.Bind(slState, false), -10)
+}
+
+StudyLibraryRedraw(slState, *) {
+    if !StudyLibraryStateAlive(slState)
+        return
+    ; A full parent + child erase is important after Windows performs a single
+    ; maximize/restore jump. Without it, themed child controls can leave pieces
+    ; of their previous borders behind on the newly exposed dark background.
+    try DllCall(
+        "user32\RedrawWindow",
+        "ptr", slState["gui"].Hwnd,
+        "ptr", 0,
+        "ptr", 0,
+        "uint", 0x0001 | 0x0004 | 0x0080 | 0x0100 | 0x0400
+    )
+}
+
+StudyLibraryResize(slState, slGui, slMinMax, slWidth, slHeight) {
+    if (slMinMax = -1 || slWidth < 500 || slHeight < 350)
+        return
+    slHwnd := slGui.Hwnd
+    if slHwnd
+        DllCall("user32\SendMessageW", "ptr", slHwnd, "uint", 0x000B,
+            "ptr", 0, "ptr", 0) ; WM_SETREDRAW off
+    try {
+    slMargin := 14, slGap := 12, slToolbarH := 30, slStatusH := 30
+    slState["layoutWidth"] := slWidth
+    slButtonW := 78
+    slToolbarY := slMargin
+    slLibraryLabelW := 50, slLibraryW := 150, slNewLibraryW := 82
+    slLibraryX := slMargin + slLibraryLabelW
+    slNewLibraryX := slLibraryX + slLibraryW + 8
+    slSearchX := slNewLibraryX + slNewLibraryW + slGap
+    slSearchW := Min(
+        520,
+        Max(100, slWidth - slSearchX - slMargin
+            - slButtonW * 2 - slGap * 2)
+    )
+    slSearchButtonX := slSearchX + slSearchW + slGap
+    slRefreshX := slSearchButtonX + slButtonW + slGap
+    slState["libraryLabel"].Move(
+        slMargin, slToolbarY + 4, slLibraryLabelW, 22
+    )
+    slState["libraryDdl"].Move(
+        slLibraryX, slToolbarY, slLibraryW, slToolbarH
+    )
+    slState["newLibraryButton"].Move(
+        slNewLibraryX, slToolbarY, slNewLibraryW, slToolbarH
+    )
+    slState["search"].Move(slSearchX, slToolbarY, slSearchW, slToolbarH)
+    slState["searchButton"].Move(slSearchButtonX, slToolbarY, slButtonW, slToolbarH)
+    slState["refreshButton"].Move(slRefreshX, slToolbarY, slButtonW, slToolbarH)
+
+    slFilterY := slToolbarY + slToolbarH + 8
+    slFilterButtonW := 110, slColumnsW := 92
+    slColumnsX := slMargin + slFilterButtonW + 8
+    slEditX := slColumnsX + slColumnsW + 8
+    slStudyX := slEditX + 140 + 8
+    slState["filterButton"].Move(
+        slMargin, slFilterY, slFilterButtonW, slToolbarH
+    )
+    slState["columnsButton"].Move(slColumnsX, slFilterY, slColumnsW, slToolbarH)
+    slState["editDetailsButton"].Move(slEditX, slFilterY, 140, slToolbarH)
+    slState["studyButton"].Move(slStudyX, slFilterY, 82, slToolbarH)
+
+    slContentY := slFilterY + slToolbarH + slGap
+    slContentBottom := slHeight - slMargin - slStatusH
+    slContentH := Max(240, slContentBottom - slContentY - slGap)
+    ; The Study Reader now owns full-explanation reading. Keep this management
+    ; view predictable: a compact fixed-width context pane and a flexible table.
+    slPaneGap := 14
+    slAvailableW := Max(1, slWidth - slMargin * 2 - slPaneGap)
+    slRightW := Max(300, Min(325, slAvailableW - 250))
+    slLeftW := Max(250, slAvailableW - slRightW)
+    slRightX := slMargin + slLeftW + slPaneGap
+    slState["list"].Move(slMargin, slContentY, slLeftW, slContentH)
+
+    slDetailY := slContentY
+    slState["detailTitle"].Move(slRightX, slDetailY, slRightW, 24)
+    slVersionY := slDetailY + 27
+    slState["versionLabel"].Move(slRightX, slVersionY + 4, 58, 22)
+    slArrowW := 34, slVersionGap := 6
+    slPreviousVersionX := slRightX + 58
+    slState["previousVersion"].Move(
+        slPreviousVersionX, slVersionY, slArrowW, 30
+    )
+    slVersionViewX := slPreviousVersionX + slArrowW + slVersionGap
+    slVersionW := Max(100, slRightW - 58 - slArrowW * 2 - slVersionGap * 2)
+    slState["versionView"].Move(
+        slVersionViewX, slVersionY, slVersionW, 30
+    )
+    slState["nextVersion"].Move(
+        slVersionViewX + slVersionW + slVersionGap,
+        slVersionY, slArrowW, 30
+    )
+    slRemoveY := slVersionY + 34
+    slRemoveW := 154
+    slRemoveX := slRightX + 58
+    slState["removeVersionButton"].Move(
+        slRemoveX, slRemoveY, slRemoveW, 30
+    )
+    slMetaY := slRemoveY + 34
+    slCompactDetails := slContentH < 400
+    slMetaH := slCompactDetails ? 38 : 56
+    slState["metadata"].Move(slRightX, slMetaY, slRightW, slMetaH)
+    slImageLabelY := slMetaY + slMetaH + 2
+    slState["imageLabel"].Move(slRightX, slImageLabelY, slRightW, 20)
+    slImageY := slImageLabelY + 20
+    slMinImageH := slCompactDetails ? 50 : 70
+    slMinSourceH := slCompactDetails ? 30 : 42
+    slRemainingForDetails := Max(90, slContentBottom - slImageY)
+    slMaxImageH := Max(
+        slMinImageH,
+        slContentBottom - slImageY - 31 - 20 - slMinSourceH
+    )
+    slImageH := Min(
+        260, slMaxImageH,
+        Max(slMinImageH, Round(slRemainingForDetails * 0.55))
+    )
+    slState["imageFrame"].Move(slRightX, slImageY, slRightW, slImageH)
+    slState["imageArea"] := Map(
+        "x", slRightX + 4,
+        "y", slImageY + 4,
+        "w", Max(1, slRightW - 8),
+        "h", Max(1, slImageH - 8)
+    )
+    slNavY := slImageY + slImageH + 5
+    slImageInfoW := Max(70, slRightW - 200)
+    slState["previousImage"].Move(slRightX, slNavY, 34, 27)
+    slState["imageInfo"].Move(
+        slRightX + 40, slNavY + 4, slImageInfoW, 22
+    )
+    slState["nextImage"].Move(
+        slRightX + 40 + slImageInfoW + 6, slNavY, 34, 27
+    )
+    slState["openImage"].Move(slRightX + slRightW - 112, slNavY, 112, 27)
+
+    slSourceLabelY := slNavY + 31
+    slState["sourceLabel"].Move(slRightX, slSourceLabelY, slRightW, 20)
+    slSourceY := slSourceLabelY + 20
+    slSourceH := Max(slMinSourceH, slContentBottom - slSourceY)
+    slState["source"].Move(slRightX, slSourceY, slRightW, slSourceH)
+    slStorageW := 150
+    slFooterY := slContentBottom + 3
+    slState["status"].Move(
+        slMargin, slFooterY + 4,
+        Max(100, slWidth - slMargin * 2 - slStorageW - 10), 22
+    )
+    slState["storageButton"].Move(
+        slWidth - slMargin - slStorageW, slFooterY, slStorageW, 27
+    )
+    StudyLibraryQueueImageLayout(slState, 80)
+    } finally {
+        if slHwnd {
+            DllCall("user32\SendMessageW", "ptr", slHwnd, "uint", 0x000B,
+                "ptr", 1, "ptr", 0) ; WM_SETREDRAW on
+            StudyLibraryRedraw(slState)
+        }
+    }
+    ; Maximize/restore composition can finish after the Size event returns.
+    ; Coalesce one final repaint once Windows has settled on the new bounds.
+    SetTimer(slState["redrawCallback"], -160)
+}
+
+StudyLibrarySaveBounds(slState) {
+    global iniPath
+    if !(slState.Has("gui") && slState["gui"] && slState["gui"].Hwnd)
+        return
+    try {
+        ; Keep the last useful restored bounds rather than replacing them with
+        ; minimized or maximized coordinates.
+        if (WinGetMinMax("ahk_id " slState["gui"].Hwnd) != 0)
+            return
+        slState["gui"].GetPos(&slX, &slY)
+        slState["gui"].GetClientPos(,, &slW, &slH)
+        if (slW < 640 || slH < 440)
+            return
+        IniWrite(slX, iniPath, "study_library_view", "x")
+        IniWrite(slY, iniPath, "study_library_view", "y")
+        IniWrite(slW, iniPath, "study_library_view", "w")
+        IniWrite(slH, iniPath, "study_library_view", "h")
+    }
+}
+
+StudyLibraryClose(slState, *) {
+    global CPStudyLibraryState
+    if !IsObject(slState)
+        return
+    slState["closed"] := true
+    try SetTimer(slState["imageLayoutCallback"], 0)
+    try SetTimer(slState["redrawCallback"], 0)
+    try SetTimer(slState["listRedrawCallback"], 0)
+    try StudyLibraryCaptureColumnWidths(slState, true)
+    try StudyLibrarySaveBounds(slState)
+    try OnMessage(0x004E, slState["headerNotifyCallback"], 0)
+    try slState["gui"].Destroy()
+    CPStudyLibraryState := 0
+    StudyStandaloneMaybeExit()
+}
+
+StudyStandaloneMaybeExit(*) {
+    global CP_STUDY_ONLY_PROCESS, CPStudyLibraryState, CPStudyReaderState
+    if !CP_STUDY_ONLY_PROCESS
+        return
+    if IsObject(CPStudyLibraryState) || IsObject(CPStudyReaderState)
+        return
+    SetTimer((*) => ExitApp(), -25)
+}
+
+OpenStudyLibrary(*) {
+    OpenStudyLibraryWindow(false)
+}
+
+OpenStandaloneStudyLibrary(*) {
+    OpenStudyLibraryWindow(true)
+}
+
+OpenStudyLibraryWindow(slStandalone := false) {
+    global CPStudyLibraryState, studyLibraryDir, ui, iniPath
+    if (CPStudyLibraryState && CPStudyLibraryState.Has("gui")) {
+        try {
+            CPStudyLibraryState["gui"].Show()
+            WinActivate("ahk_id " CPStudyLibraryState["gui"].Hwnd)
+            StudyLibraryRefresh(CPStudyLibraryState)
+            return
+        }
+    }
+
+    slActiveLibrary := StudyLibraryConfiguredName()
+    StudyLibraryActivateName(slActiveLibrary)
+    DirCreate(studyLibraryDir)
+    slOutputDir := A_Temp "\JRPG_Study_Library"
+    DirCreate(slOutputDir)
+    slGuiOptions := "+Resize +MinSize640x440 +OwnDialogs"
+    if !slStandalone
+        slGuiOptions .= " +Owner" ui.Hwnd
+    slGui := Gui(
+        slGuiOptions,
+        "JRPG Translator - Study Library — " slActiveLibrary
+    )
+    slGui.MarginX := 14, slGui.MarginY := 14
+    slGui.SetFont("s10", "Segoe UI")
+
+    slColumns := StudyLibraryCreateColumns()
+    slColumnLabels := []
+    for slColumn in slColumns
+        slColumnLabels.Push(slColumn["label"])
+    ; A permanently hidden ID column keeps selections mapped to the correct
+    ; database row even after the visible table is sorted.
+    slColumnLabels.Push("")
+    slNowStamp := FormatTime(, "yyyyMMddHHmmss")
+    slTodayStart := SubStr(slNowStamp, 1, 8) "000000"
+
+    slLibraryLabel := slGui.Add("Text", "x14 y18 w50", "Library:")
+    slLibraryDdl := slGui.Add("DropDownList", "x64 y14 w150 0x210", [])
+    slNewLibraryButton := slGui.Add("Button", "x222 y14 w82", "Libraries...")
+    slSearch := slGui.Add("Edit", "x316 y14 w328")
+    try slSearch.SetCueBanner("Japanese, explanation, chapter, speaker or tags")
+    slSearchButton := slGui.Add("Button", "x656 y14 w78 Default", "Search")
+    slRefreshButton := slGui.Add("Button", "x746 y14 w78", "Refresh")
+    slFilterButton := slGui.Add("Button", "x14 y52 w110 h30", "Filters...")
+    slColumnsButton := slGui.Add("Button", "x132 y52 w92 h30", "Columns...")
+    slEditDetailsButton := slGui.Add("Button", "x232 y52 w140 h30 Disabled", "Edit details...")
+    slStudyButton := slGui.Add("Button", "x380 y52 w82 h30 Disabled", "Study")
+    slList := slGui.Add(
+        "ListView", "x14 y94 w430 h530 Grid Multi",
+        slColumnLabels
+    )
+    slList.ModifyCol(9, 0)
+    slDetailTitle := slGui.Add("Text", "x468 y94 w638 h24 +0x200", "Select an explanation.")
+    slDetailTitle.SetFont("s11 Bold")
+    slVersionLabel := slGui.Add("Text", "x468 y125 w58", "Version:")
+    ; Keep the original list hidden as the version data model. The visible
+    ; read-only field and arrow buttons provide simpler navigation.
+    slVersionDdl := slGui.Add(
+        "DropDownList", "x0 y0 w1 h1 Hidden 0x210", []
+    )
+    slVersionView := slGui.Add(
+        "Edit", "x526 y121 w300 h30 ReadOnly", ""
+    )
+    slRemoveVersionButton := slGui.Add(
+        "Button", "x526 y155 w154 h30 Disabled", "Remove version..."
+    )
+    slPreviousVersion := slGui.Add(
+        "Button", "x688 y155 w34 h30 Disabled", "‹"
+    )
+    slNextVersion := slGui.Add(
+        "Button", "x728 y155 w34 h30 Disabled", "›"
+    )
+    slMetadata := slGui.Add("Text", "x468 y155 w638 h38 cGray", "")
+    CPRegisterMutedControl(slMetadata)
+    slImageLabel := slGui.Add("Text", "x468 y195 w638 h20", "Source screenshot")
+    slImageFrame := slGui.Add("Text", "x468 y215 w638 h190 Border Background101010", "")
+    slPicture := slGui.Add("Picture", "x472 y219 w1 h1 Hidden", "")
+    slPreviousImage := slGui.Add("Button", "x468 y410 w34 h27", "‹")
+    slNextImage := slGui.Add("Button", "x508 y410 w34 h27", "›")
+    slImageInfo := slGui.Add("Text", "x550 y414 w300", "No source screenshot selected.")
+    slOpenImage := slGui.Add("Button", "x994 y410 w112 h27", "Open full image")
+    slSourceLabel := slGui.Add("Text", "x468 y443 w638 h20", "Original Japanese")
+    slSource := slGui.Add("Edit", "x468 y463 w638 h90 ReadOnly Multi VScroll")
+    ; These hidden controls retain the shared loading/parsing state used by the
+    ; Study Reader without occupying space in the management window.
+    slSectionLabel := slGui.Add("Text", "x0 y0 w1 h1 Hidden", "Section:")
+    slSectionDdl := slGui.Add("DropDownList", "x0 y0 w1 Hidden", ["Full explanation"])
+    slExplanation := slGui.Add("Edit", "x0 y0 w1 h1 Hidden ReadOnly Multi")
+    slStatus := slGui.Add("Text", "x14 y736 w1092 h22 cGray", "Loading Study Library...")
+    CPRegisterMutedControl(slStatus)
+    slStorageButton := slGui.Add(
+        "Button", "x956 y732 w150 h27 Disabled", "Storage..."
+    )
+
+    slState := Map(
+        "gui", slGui,
+        "database", studyLibraryDir "\study_library.db",
+        "outputDir", slOutputDir,
+        "libraryName", slActiveLibrary,
+        "libraryNames", [],
+        "libraryLabel", slLibraryLabel,
+        "libraryDdl", slLibraryDdl,
+        "newLibraryButton", slNewLibraryButton,
+        "suspendLibrary", false,
+        "profileLabels", ["All Profiles"],
+        "profileChoices", [],
+        "profileMode", "all",
+        "profileFilter", "",
+        "search", slSearch,
+        "searchButton", slSearchButton,
+        "refreshButton", slRefreshButton,
+        "filterButton", slFilterButton,
+        "columnsButton", slColumnsButton,
+        "chapterLabels", ["Any chapter", "Chapter not set"],
+        "chapterChoices", [
+            Map("mode", "all", "value", ""),
+            Map("mode", "empty", "value", "")
+        ],
+        "chapterMode", "all",
+        "chapterFilter", "",
+        "speakerLabels", ["Any speaker", "Speaker not set"],
+        "speakerChoices", [
+            Map("mode", "all", "value", ""),
+            Map("mode", "empty", "value", "")
+        ],
+        "speakerMode", "all",
+        "speakerFilter", "",
+        "tagLabels", ["Any tag", "No tags"],
+        "tagChoices", [
+            Map("mode", "all", "value", ""),
+            Map("mode", "empty", "value", "")
+        ],
+        "tagMode", "all",
+        "tagFilter", "",
+        "ankiMode", "all",
+        "dateMode", "all",
+        "dateFrom", slTodayStart,
+        "dateTo", slNowStamp,
+        "list", slList,
+        "columns", slColumns,
+        "sortColumn", 1,
+        "sortDirection", "desc",
+        "headerHwnd", 0,
+        "lockingInternalColumn", false,
+        "imageLayoutQueued", false,
+        "layoutWidth", 900,
+        "standaloneWindow", slStandalone,
+        "groups", [],
+        "detailTitle", slDetailTitle,
+        "studyButton", slStudyButton,
+        "editDetailsButton", slEditDetailsButton,
+        "versionLabel", slVersionLabel,
+        "versionDdl", slVersionDdl,
+        "versionView", slVersionView,
+        "previousVersion", slPreviousVersion,
+        "nextVersion", slNextVersion,
+        "removeVersionButton", slRemoveVersionButton,
+        "versions", [],
+        "metadata", slMetadata,
+        "imageLabel", slImageLabel,
+        "imageFrame", slImageFrame,
+        "picture", slPicture,
+        "previousImage", slPreviousImage,
+        "nextImage", slNextImage,
+        "imageInfo", slImageInfo,
+        "openImage", slOpenImage,
+        "imageArea", Map("x", 472, "y", 219, "w", 630, "h", 182),
+        "media", [],
+        "mediaIndex", 0,
+        "sourceLabel", slSourceLabel,
+        "source", slSource,
+        "sectionLabel", slSectionLabel,
+        "sectionDdl", slSectionDdl,
+        "sections", [],
+        "explanation", slExplanation,
+        "status", slStatus,
+        "storageButton", slStorageButton,
+        "storage", 0,
+        "storageLastTick", 0,
+        "storageRefreshing", false,
+        "currentGroupId", 0,
+        "currentVersion", 0,
+        "currentChapter", "",
+        "currentSpeaker", "",
+        "currentTags", "",
+        "currentAddedToAnkiAt", "",
+        "suspend", false,
+        "closed", false,
+        "refreshing", false
+    )
+    slState["imageLayoutCallback"] := StudyLibraryRunQueuedImageLayout.Bind(slState)
+    slState["redrawCallback"] := StudyLibraryRedraw.Bind(slState)
+    slState["listRedrawCallback"] := StudyLibraryRedrawList.Bind(slState)
+    slState["headerNotifyCallback"] := StudyLibraryHeaderNotify.Bind(slState)
+    CPStudyLibraryState := slState
+
+    OnMessage(0x004E, slState["headerNotifyCallback"])
+
+    slLibraryDdl.OnEvent("Change", StudyLibraryLibraryChanged.Bind(slState))
+    slNewLibraryButton.OnEvent("Click", StudyLibraryOpenManager.Bind(slState))
+    slSearchButton.OnEvent("Click", StudyLibraryRefresh.Bind(slState))
+    slRefreshButton.OnEvent("Click", StudyLibraryRefreshAll.Bind(slState))
+    slStorageButton.OnEvent("Click", StudyLibraryOpenStorage.Bind(slState))
+    slFilterButton.OnEvent("Click", StudyLibraryOpenFilters.Bind(slState))
+    slColumnsButton.OnEvent("Click", StudyLibraryOpenColumns.Bind(slState))
+    slList.OnEvent("ItemFocus", StudyLibraryGroupFocused.Bind(slState))
+    slList.OnEvent("ItemSelect", StudyLibraryUpdateSelectionActions.Bind(slState))
+    slList.OnEvent("DoubleClick", StudyLibraryOpenReaderFromList.Bind(slState))
+    slList.OnEvent("ColClick", StudyLibraryColumnClicked.Bind(slState))
+    slStudyButton.OnEvent("Click", StudyLibraryOpenSelectedReader.Bind(slState))
+    slPreviousVersion.OnEvent(
+        "Click", StudyLibraryStepVersion.Bind(slState, -1)
+    )
+    slNextVersion.OnEvent(
+        "Click", StudyLibraryStepVersion.Bind(slState, 1)
+    )
+    slEditDetailsButton.OnEvent("Click", StudyLibraryEditDetails.Bind(slState))
+    slRemoveVersionButton.OnEvent("Click", StudyLibraryRemoveVersion.Bind(slState))
+    slSectionDdl.OnEvent("Change", StudyLibrarySectionChanged.Bind(slState))
+    slPreviousImage.OnEvent("Click", StudyLibraryPreviousImage.Bind(slState))
+    slNextImage.OnEvent("Click", StudyLibraryNextImage.Bind(slState))
+    slOpenImage.OnEvent("Click", StudyLibraryOpenImage.Bind(slState))
+    slGui.OnEvent("Size", StudyLibraryResize.Bind(slState))
+    slGui.OnEvent("Escape", StudyLibraryClose.Bind(slState))
+    slGui.OnEvent("Close", StudyLibraryClose.Bind(slState))
+
+    slGui.Show("Hide w900 h600")
+    slDpi := GetWindowDPI(slGui.Hwnd)
+    slLogicalScale := 96 / Max(96, slDpi)
+    slMaxW := Max(640, Floor(A_ScreenWidth * slLogicalScale) - 60)
+    slMaxH := Max(440, Floor(A_ScreenHeight * slLogicalScale) - 80)
+    ; Preserve the current adaptive first-run size, but allow a larger manually
+    ; resized library to reopen at the user's preferred dimensions.
+    slDefaultW := Max(640, Min(1180, slMaxW))
+    slDefaultH := Max(440, Min(700, slMaxH))
+    slSavedW := IniRead(
+        iniPath, "study_library_view", "w", slDefaultW
+    )
+    slSavedH := IniRead(
+        iniPath, "study_library_view", "h", slDefaultH
+    )
+    try slSavedW := Integer(slSavedW)
+    catch
+        slSavedW := slDefaultW
+    try slSavedH := Integer(slSavedH)
+    catch
+        slSavedH := slDefaultH
+    slSavedW := Max(640, Min(slMaxW, slSavedW))
+    slSavedH := Max(440, Min(slMaxH, slSavedH))
+    slGui.Show("Hide w" slSavedW " h" slSavedH)
+    CPApplyOwnedDialogTheme(slGui)
+    StudyLibraryRefreshLibrarySelector(slState, slActiveLibrary)
+    StudyLibraryApplyColumns(slState)
+    slGui.GetClientPos(,, &slClientW, &slClientH)
+    StudyLibraryResize(slState, slGui, 0, slClientW, slClientH)
+    StudyLibraryRunBridge(slState, "ensure")
+    StudyLibraryRefresh(slState)
+    CPApplyOwnedDialogTheme(slGui)
+    ; Theme application can recreate native header state, so restore the
+    ; filter and sort indicators once the final theme pass is complete.
+    StudyLibraryApplyHeaderIndicators(slState)
+    slSavedX := IniRead(
+        iniPath, "study_library_view", "x", "__missing__"
+    )
+    slSavedY := IniRead(
+        iniPath, "study_library_view", "y", "__missing__"
+    )
+    if ((slSavedX is number) && (slSavedY is number)) {
+        slSavedX := Integer(slSavedX), slSavedY := Integer(slSavedY)
+        StudyReaderClampPosition(slGui, &slSavedX, &slSavedY)
+        slGui.Show("x" slSavedX " y" slSavedY)
+    } else
+        slGui.Show("Center")
+    WinActivate("ahk_id " slGui.Hwnd)
 }
 
 ; Force the color swatches to repaint immediately (no warnings, no flicker)
@@ -5297,19 +10299,49 @@ AddModel(arr, key, combo) {
 }
 
 CPApplyOwnedDialogTheme(dlg) {
-    global controlDarkMode
+    global controlDarkMode, CPThemedDialogHwnds, CPThemeBrushWindow
     if !(IsObject(dlg) && dlg.Hwnd)
         return
 
+    CPThemedDialogHwnds[dlg.Hwnd] := true
     dialogColors := CPPalette(controlDarkMode)
     dlg.BackColor := dialogColors["window"]
     CPApplyDarkTitleBar(dlg.Hwnd, controlDarkMode)
     try CPSetPreferredAppDarkMode(controlDarkMode, dlg.Hwnd)
+    CPAllowDarkModeForWindow(dlg.Hwnd, controlDarkMode)
+    CPApplyWindowScrollbarTheme(dlg.Hwnd, controlDarkMode)
+    if !CPThemeBrushWindow
+        CPRefreshThemeBrushes()
     try {
-        for controlHwnd in WinGetControlsHwnd("ahk_id " dlg.Hwnd)
+        cpDialogTitle := WinGetTitle("ahk_id " dlg.Hwnd)
+        cpDialogIsStudy := InStr(cpDialogTitle, "Study") > 0
+        for controlHwnd in WinGetControlsHwnd("ahk_id " dlg.Hwnd) {
+            if cpDialogIsStudy {
+                cpDialogControlClass := WinGetClass("ahk_id " controlHwnd)
+                if (cpDialogControlClass = "ComboBox") {
+                    CPPrepareStudyCombo(controlHwnd)
+                } else if (cpDialogControlClass = "SysListView32") {
+                    cpDialogHeader := SendMessage(0x101F, 0, 0, controlHwnd)
+                    CPPrepareStudyListHeader(cpDialogHeader)
+                }
+            }
             CPApplyThemeToControl(controlHwnd, controlDarkMode)
+        }
     }
     try DllCall("user32\RedrawWindow", "ptr", dlg.Hwnd, "ptr", 0, "ptr", 0, "uint", 0x185)
+}
+
+CPApplyOpenStudyWindowThemes() {
+    global CPStudyLibraryState, CPStudyReaderState
+    for cpStudyState in [CPStudyLibraryState, CPStudyReaderState] {
+        if !(IsObject(cpStudyState) && cpStudyState.Has("gui"))
+            continue
+        try {
+            CPApplyOwnedDialogTheme(cpStudyState["gui"])
+            if cpStudyState.Has("redrawCallback")
+                cpStudyState["redrawCallback"].Call()
+        }
+    }
 }
 
 CPThemedInputBox(promptText, dialogTitle, infoText := "", initialValue := "", dialogWidth := 420) {
@@ -6315,6 +11347,8 @@ LaunchExplainerOverlay(*) {
 	global explainProvider, explainOpenAIModel, explainGeminiModel
 	global debugMode
 
+    prov := CPSyncExplanationSelectionFromControls()
+
     ov := ResolvePath(overlayAhk)
     if (ov = "" || !FileExist(ov)) {
         MsgBox("Set a valid Overlay .ahk path.`n`n" ov, "Missing", 48)
@@ -6337,8 +11371,8 @@ LaunchExplainerOverlay(*) {
 
 
     ; Use explainer-specific provider + models
-    EnvSet("EXPLAIN_PROVIDER", explainProvider)
-    if (explainProvider = "gemini") {
+    EnvSet("EXPLAIN_PROVIDER", prov)
+    if (prov = "gemini") {
         modelToSet := explainGeminiModel
         if (SubStr(modelToSet, 1, 7) != "models/")
             modelToSet := "models/" . modelToSet
@@ -6350,7 +11384,10 @@ LaunchExplainerOverlay(*) {
     }
 
     EnvSet("PYTHONIOENCODING","utf-8")
-    DbgCP("LaunchExplainerOverlay run='" ov "' provider=" imgProvider " model=" (imgProvider="gemini"?geminiImgModel:imgModel))
+    DbgCP(
+        "LaunchExplainerOverlay run='" ov "' provider=" prov " model="
+            . (prov = "gemini" ? explainGeminiModel : explainOpenAIModel)
+    )
 
    ; Tell overlay where the app root is
     EnvSet("APP_ROOT", A_ScriptDir)
@@ -7230,6 +12267,9 @@ GameProfileSave(name, announce := true) {
         IniWriteRetry(chkName.Value ? 1 : 0, path, "screenshot", "colorSpeaker")
 
         IniWriteRetry(explainPromptName, path, "explanation", "promptProfile")
+        IniWriteRetry(
+            StudyLibraryConfiguredName(), path, "study_library", "name"
+        )
         IniWriteRetry(useTerminologyOverrides ? 1 : 0, path, "terminology", "enabled")
         IniWriteRetry(jpProfile, path, "terminology", "jp2tlProfile")
         IniWriteRetry(tlProfile, path, "terminology", "tl2tlProfile")
@@ -7386,6 +12426,15 @@ GameProfileApply(name, announce := true) {
     ; unconditionally, so a missing key intentionally falls back to enabled.
     useTerminologyOverrides := GameProfileReadInt(path, "terminology", "enabled", 1) ? 1 : 0
 
+    ; Profiles saved before Study Libraries existed intentionally have no key.
+    ; In that case, preserve the user's current library selection.
+    profileLibraryMissing := "__JRPG_MISSING_STUDY_LIBRARY__"
+    profileLibrary := IniRead(
+        path, "study_library", "name", profileLibraryMissing
+    )
+    if (profileLibrary != profileLibraryMissing)
+        StudyLibraryApplyProfileSelection(profileLibrary, &warnings)
+
     capMode := StrLower(Trim(IniRead(path, "screenshot", "captureMode", capMode)))
     if (capMode != "window")
         capMode := "region"
@@ -7533,6 +12582,14 @@ CPControlPanelCopyData(wParam, lParam, msg, hwnd) {
     if !payloadPtr
         return 0
     payload := StrGet(payloadPtr, "UTF-16")
+    if (payload = "open_study_library") {
+        SetTimer(OpenStandaloneStudyLibrary, -10)
+        return 1
+    }
+    if (payload = "open_study_reader") {
+        SetTimer(OpenStandaloneStudyReader, -10)
+        return 1
+    }
     prefix := "apply_profile="
     if (SubStr(payload, 1, StrLen(prefix)) != prefix)
         return 0
@@ -7654,6 +12711,85 @@ IsValidBounds(x, y, w, h) {
     return false
 }
 
+CPConstrainPanelBoundsToWorkArea(&x, &y, &clientW, &clientH, nonClientW, nonClientH) {
+    global ui, CP_VIEWPORT_MIN_W, CP_VIEWPORT_MIN_H
+
+    originalX := x, originalY := y
+    originalW := clientW, originalH := clientH
+    proposedRight := x + clientW + nonClientW
+    proposedBottom := y + clientH + nonClientH
+    bestMonitor := 0
+    bestArea := -1
+    ; Gui.Show/GetPos/GetClientPos use AutoHotkey's DPI-scaled logical units,
+    ; while MonitorGetWorkArea returns physical desktop pixels. Convert every
+    ; monitor rectangle before comparing or clamping the saved GUI rectangle.
+    panelDpi := GetWindowDPI(ui.Hwnd)
+    physicalToLogical := 96 / Max(96, panelDpi)
+
+    try {
+        Loop MonitorGetCount() {
+            MonitorGetWorkArea(A_Index, &left, &top, &right, &bottom)
+            left := Ceil(left * physicalToLogical)
+            top := Ceil(top * physicalToLogical)
+            right := Floor(right * physicalToLogical)
+            bottom := Floor(bottom * physicalToLogical)
+            intersectionW := Max(0, Min(proposedRight, right) - Max(x, left))
+            intersectionH := Max(0, Min(proposedBottom, bottom) - Max(y, top))
+            intersectionArea := intersectionW * intersectionH
+            if (intersectionArea > bestArea) {
+                bestArea := intersectionArea
+                bestMonitor := A_Index
+            }
+        }
+    }
+
+    if !bestMonitor {
+        try bestMonitor := MonitorGetPrimary()
+        catch
+            bestMonitor := 1
+    }
+
+    try {
+        MonitorGetWorkArea(bestMonitor, &workLeft, &workTop, &workRight, &workBottom)
+        workLeft := Ceil(workLeft * physicalToLogical)
+        workTop := Ceil(workTop * physicalToLogical)
+        workRight := Floor(workRight * physicalToLogical)
+        workBottom := Floor(workBottom * physicalToLogical)
+    }
+    catch {
+        workLeft := 0, workTop := 0
+        workRight := Floor(A_ScreenWidth * physicalToLogical)
+        workBottom := Floor(A_ScreenHeight * physicalToLogical)
+    }
+
+    workW := Max(1, workRight - workLeft)
+    workH := Max(1, workBottom - workTop)
+    maxClientW := Max(1, workW - nonClientW)
+    maxClientH := Max(1, workH - nonClientH)
+    minClientW := Min(CP_VIEWPORT_MIN_W, maxClientW)
+    minClientH := Min(CP_VIEWPORT_MIN_H, maxClientH)
+    clientW := Max(minClientW, Min(clientW, maxClientW))
+    clientH := Max(minClientH, Min(clientH, maxClientH))
+
+    outerW := clientW + nonClientW
+    outerH := clientH + nonClientH
+    x := Min(Max(x, workLeft), Max(workLeft, workRight - outerW))
+    y := Min(Max(y, workTop), Max(workTop, workBottom - outerH))
+
+    return (x != originalX || y != originalY
+        || clientW != originalW || clientH != originalH)
+}
+
+CPApplyInitialPanelLayout(*) {
+    global ui
+    if !(IsSet(ui) && ui && ui.Hwnd)
+        return
+    try {
+        ui.GetClientPos(,, &clientW, &clientH)
+        ResizeUI(ui, 0, clientW, clientH)
+    }
+}
+
 ui.MarginX := pad, ui.MarginY := pad
 ui.SetFont("s10", "Segoe UI")
 ui.BackColor := CPPalette(controlDarkMode)["window"]
@@ -7699,12 +12835,12 @@ btnPrEdit  := ui.Add("Button", "x+6 w70", "Edit")
 btnPrNew   := ui.Add("Button", "x+6 w70", "Add")
 btnPrDel   := ui.Add("Button", "x+6 w70", "Delete")
 
-; Toggle: delete screenshots after translation
-delAfterUse := Integer(IniRead(iniPath, "paths", "deleteAfterUse", 0))
-chkDel := ui.Add("Checkbox", "xm y+16", "Delete screenshots after translation")
-chkDel.Value := delAfterUse ? 1 : 0
+; Keep captures for the current session, then clear them at the next startup.
+clearScreenshotsOnStartup := Integer(IniRead(iniPath, "paths", "clearScreenshotsOnStartup", 0)) ? 1 : 0
+chkDel := ui.Add("Checkbox", "xm y+16", "Clear screenshots on startup")
+chkDel.Value := clearScreenshotsOnStartup
 ; Persist to control.ini immediately when toggled
-chkDel.OnEvent("Click", (*) => IniWrite(chkDel.Value ? 1 : 0, iniPath, "paths", "deleteAfterUse"))
+chkDel.OnEvent("Click", (*) => IniWrite(chkDel.Value ? 1 : 0, iniPath, "paths", "clearScreenshotsOnStartup"))
 
 ; Toggle: highlight guessed subjects (shifted right to avoid size box overlap)
 hlGuess := Integer(IniRead(iniPath, "cfg", "highlightGuessed", 1))
@@ -7745,7 +12881,7 @@ ddlIMG_GM.OnEvent("Change", (*) => (UpdateVars(), SaveAll(), ApplyShotSettings()
 ddlPrompt.OnEvent("Change", (*) => (UpdateVars(), SaveAll(), ApplyShotSettings()))
 
 ; --- Max size + Capture picker (native path, non-breaking) ---
-; Pin this row to the left-column baseline under the "Delete screenshots after translation" checkbox
+; Pin this row to the left-column baseline under the screenshot-cleanup checkbox
 chkDel.GetPos(&delX, &delY, , &delH)
 leftBaseY := delY + delH + 16  ; spacing under the delete checkbox
 
@@ -7976,19 +13112,43 @@ btnEPrDel  := ui.Add("Button", "x+6 w70", "Delete")
 
 ; anchor to the current Sectionâ€™s left edge, keep same row spacing
 btnExplainNow := ui.Add("Button", "xs y+20 w220", "Explain last jp. Text")
+btnOpenStudyLibrary := ui.Add("Button", "x+8 yp w200", "Open Study Library...")
 
-; Move: Save explanations checkbox â€” placed under the button row, left-aligned to the Section
-saveExplChk := ui.Add("CheckBox", "xs y+16", "Save explanations to textfiles")
-; Short info note about where the files are stored
-txtExplainSaveInfo := ui.Add("Text"
-    , "xm y+4 w720 cGray"
-    , "Saved explanations are stored in the 'Settings\\Explanations' folder inside your JRPG Translator directory."
+; Migrate the existing text-archive preference conservatively. Existing users who
+; already enabled text archives keep both outputs; a new installation starts with
+; the Study Library enabled and plain-text copies optional.
+saveExplRaw := IniRead(iniPath, "cfg", "saveExplains", "__missing__")
+saveExplVal := (saveExplRaw = "__missing__") ? 0 : Integer(saveExplRaw)
+saveLibraryRaw := IniRead(iniPath, "cfg", "saveStudyLibrary", "__missing__")
+if (saveLibraryRaw = "__missing__") {
+    saveLibraryVal := (saveExplRaw = "__missing__") ? 1 : saveExplVal
+    IniWrite(saveLibraryVal, iniPath, "cfg", "saveStudyLibrary")
+} else {
+    saveLibraryVal := Integer(saveLibraryRaw)
+}
+saveLibraryScreenshotsVal := Integer(IniRead(
+    iniPath, "cfg", "studyLibraryScreenshots", 1
+))
+
+saveLibraryChk := ui.Add("CheckBox", "xs y+16", "Save explanations to Study Library")
+saveLibraryChk.Value := saveLibraryVal ? 1 : 0
+saveLibraryScreenshotsChk := ui.Add(
+    "CheckBox", "xs y+10", "Include source screenshots in Study Library"
 )
-; Load previous setting (defaults to 0 if missing)
-CPRegisterMutedControl(txtExplainSaveInfo)
-saveExplVal := IniRead(iniPath, "cfg", "saveExplains", 0)
+saveLibraryScreenshotsChk.Value := saveLibraryScreenshotsVal ? 1 : 0
+saveLibraryScreenshotsChk.Enabled := saveLibraryChk.Value ? true : false
+saveExplChk := ui.Add("CheckBox", "xs y+10", "Save plain-text copies")
 saveExplChk.Value := saveExplVal ? 1 : 0
-; Persist on click
+
+txtExplainSaveInfo := ui.Add("Text"
+    , "xm y+4 w760 h42 cGray"
+    , "Study Library entries are grouped by the active unified Profile; without one, they are kept under Unsorted. Optional plain-text copies continue using the 'Settings\\Explanations' folder and its Profile subfolders."
+)
+CPRegisterMutedControl(txtExplainSaveInfo)
+saveLibraryChk.OnEvent("Click", StudyLibrarySaveToggleChanged)
+saveLibraryScreenshotsChk.OnEvent("Click", (*) => IniWrite(
+    saveLibraryScreenshotsChk.Value ? 1 : 0, iniPath, "cfg", "studyLibraryScreenshots"
+))
 saveExplChk.OnEvent("Click", (*) => (
     IniWrite(saveExplChk.Value ? 1 : 0, iniPath, "cfg", "saveExplains")
 ))
@@ -8011,6 +13171,7 @@ ddlEPr.OnEvent("Change", ExplainPromptChanged)
 RefreshExplainPromptProfilesList(explainPromptProfile)
 
 btnExplainNow .OnEvent("Click", ExplainNow)
+btnOpenStudyLibrary.OnEvent("Click", OpenStudyLibrary)
 
 btnEOpenAI_Add.OnEvent("Click", (*) => AddModelInteractive(model_openai_explain, "openai_explain", ddlEOpenAI, "openai", "explanation"))
 btnEOpenAI_Del.OnEvent("Click", (*) => DeleteModel(model_openai_explain, "openai_explain", ddlEOpenAI))
@@ -8129,7 +13290,7 @@ ui.Add("Text", "xm y+4 w0 h0")
 lblGameProfilesTitle := ui.Add("Text", "xm y+10 w760", "Profiles")
 lblGameProfilesTitle.SetFont("Bold")
 txtGameProfileIntro := ui.Add("Text", "xm y+8 w760 cGray"
-    , "Save and restore complete setups for screenshot and explanation prompts, translation post-processing, capture target, terminology override selections and on/off state, and both overlay windows.")
+    , "Save and restore complete setups for translation and explanation prompts, capture, terminology, overlays, controls, and the selected Study Library.")
 txtGameProfileGlobal := ui.Add("Text", "xm y+6 w760 cGray"
     , "Audio provider, model, input device, and target language remain global and are not changed by a profile.")
 CPRegisterMutedControl(txtGameProfileIntro)
@@ -8144,7 +13305,7 @@ btnGameProfileDelete := ui.Add("Button", "x+6 w80", "Delete")
 
 txtGameProfileState := ui.Add("Text", "xm y+18 w760", "")
 txtGameProfileDetails := ui.Add("Text", "xm y+18 w760 cGray"
-    , "Saved settings include overlay colors, fonts, transparency, size and position, startup/topmost choices, capture region or window, both selected prompts, and both terminology profiles. Screenshot output processing follows the selected prompt automatically.")
+    , "Saved settings include overlay appearance and placement, startup choices, capture target, both prompts, terminology profiles, and the active Study Library. Screenshot output processing follows the selected prompt automatically.")
 CPRegisterMutedControl(txtGameProfileDetails)
 
 ddlGameProfile.OnEvent("Change", GameProfileUpdateSummary)
@@ -8783,35 +13944,52 @@ SetTimer(_UpdateStatus, 1000)
 if (CP_BACKGROUND_START)
     ui.Opt("+ToolWindow +E0x08000000") ; WS_EX_NOACTIVATE
 
-; Show the window, restore saved bounds if valid; otherwise use hardcoded defaults and seed control.ini
-if (IsValidBounds(guiX_saved, guiY_saved, guiW_saved, guiH_saved)) {
-    ; If the INI was written before this fix, it likely holds OUTER sizes.
-    ; Measure non-client deltas and convert once to CLIENT size for Show().
+; Create the native window once, hidden, so client/outer frame measurements are
+; available before restored bounds are fitted to the current monitor work area.
+ui.Show("Hide")
+ui.GetPos(,, &cpMeasureOuterW, &cpMeasureOuterH)
+ui.GetClientPos(,, &cpMeasureClientW, &cpMeasureClientH)
+ui.Hide()
+cpNonClientW := cpMeasureOuterW - cpMeasureClientW
+cpNonClientH := cpMeasureOuterH - cpMeasureClientH
+
+; Restore saved bounds when possible; otherwise start with the design defaults.
+cpUsingSavedBounds := IsValidBounds(guiX_saved, guiY_saved, guiW_saved, guiH_saved)
+if cpUsingSavedBounds {
+    ; Older INI files stored outer sizes. Convert them once before fitting.
     if (bounds_mode != "client") {
-        ui.Show("Hide")                                  ; create handle and metrics
-        ui.GetPos(,, &ow, &oh)                           ; outer size
-        ui.GetClientPos(,, &cw, &ch)                     ; client size
-        ncW := ow - cw, ncH := oh - ch                   ; non-client deltas
-        ui.Hide()
-        guiW_saved := Max(0, guiW_saved - ncW)           ; convert outer->client
-        guiH_saved := Max(0, guiH_saved - ncH)
+        guiW_saved := Max(0, guiW_saved - cpNonClientW)
+        guiH_saved := Max(0, guiH_saved - cpNonClientH)
         IniWrite("client", iniPath, "gui_bounds", "bounds_mode")
-        DbgCP("Converted saved bounds from OUTER to CLIENT using ncW=" ncW " ncH=" ncH)
+        DbgCP("Converted saved bounds from OUTER to CLIENT using ncW=" cpNonClientW " ncH=" cpNonClientH)
     }
-    DbgCP("Restore saved panel bounds (client): x=" guiX_saved " y=" guiY_saved " w=" guiW_saved " h=" guiH_saved)
-    cpShowOptions := "w" guiW_saved " h" guiH_saved " x" guiX_saved " y" guiY_saved
-    ui.Show((CP_BACKGROUND_START ? "NA Hide " : "") cpShowOptions)
-    if (CP_BACKGROUND_START)
-        ui.Hide()
+    cpPanelX := guiX_saved, cpPanelY := guiY_saved
+    cpPanelW := guiW_saved, cpPanelH := guiH_saved
 } else {
-    DbgCP("Use default panel bounds: x=" defGuiX " y=" defGuiY " w=" defGuiW " h=" defGuiH)
-    cpShowOptions := "w" defGuiW " h" defGuiH " x" defGuiX " y" defGuiY
-    ui.Show((CP_BACKGROUND_START ? "NA Hide " : "") cpShowOptions)
-    if (CP_BACKGROUND_START)
-        ui.Hide()
-    ; Seed control.ini [gui_bounds] immediately so subsequent launches restore these
-    SavePanelBounds()
+    cpPanelX := defGuiX, cpPanelY := defGuiY
+    cpPanelW := defGuiW, cpPanelH := defGuiH
 }
+
+cpBoundsAdjusted := CPConstrainPanelBoundsToWorkArea(
+    &cpPanelX, &cpPanelY, &cpPanelW, &cpPanelH, cpNonClientW, cpNonClientH)
+DbgCP((cpUsingSavedBounds ? "Restore" : "Use default")
+    " panel bounds (client): x=" cpPanelX " y=" cpPanelY " w=" cpPanelW " h=" cpPanelH
+    (cpBoundsAdjusted ? " [fitted to current work area]" : ""))
+cpShowOptions := "w" cpPanelW " h" cpPanelH " x" cpPanelX " y" cpPanelY
+ui.Show((CP_BACKGROUND_START ? "NA Hide " : "") cpShowOptions)
+if (CP_BACKGROUND_START)
+    ui.Hide()
+if !cpUsingSavedBounds
+    SavePanelBounds()
+
+; Do not depend on Windows delivering a final WM_SIZE after an off-screen or
+; DPI/resolution-adjusted restore. Lay out the full current client area now.
+ui.GetClientPos(,, &cpInitialClientW, &cpInitialClientH)
+ResizeUI(ui, 0, cpInitialClientW, cpInitialClientH)
+; ui.Show("Hide") used for frame measurement queues its own Size event. At
+; non-100% DPI that older event can arrive after the final Show and restore the
+; measurement layout. Reapply the actual final client size after the queue drains.
+SetTimer(CPApplyInitialPanelLayout, -75)
 ; Ensure first paint draws all children cleanly (fixes clipped checkbox text/box)
 DllCall("RedrawWindow"
     , "ptr", ui.Hwnd
@@ -8839,12 +14017,20 @@ OnMessage(0x004A, CPControlPanelCopyData)
 if (CP_START_PROFILE != "")
     CPApplyExternalProfile(CP_START_PROFILE)
 
+if (CP_STUDY_START_MODE = "library")
+    SetTimer(OpenStandaloneStudyLibrary, -100)
+else if (CP_STUDY_START_MODE = "reader")
+    SetTimer(OpenStandaloneStudyReader, -100)
+
 ; A front end can explicitly request the Translator on a cold background start.
 ; This keeps the control panel hidden while still giving the game its overlay.
-if (CP_START_TRANSLATOR || Integer(IniRead(iniPath, "cfg", "openTranslatorOnLaunch", 0))) {
+if (CP_STUDY_START_MODE = ""
+    && (CP_START_TRANSLATOR
+        || Integer(IniRead(iniPath, "cfg", "openTranslatorOnLaunch", 0)))) {
     SetTimer(LaunchOverlay, -100)
 }
-if (Integer(IniRead(iniPath, "cfg", "openExplainerOnLaunch", 0))) {
+if (CP_STUDY_START_MODE = ""
+    && Integer(IniRead(iniPath, "cfg", "openExplainerOnLaunch", 0))) {
     SetTimer(LaunchExplainerOverlay, -200)
 }
 
@@ -9049,18 +14235,25 @@ ToggleExplanationControls(){
 SyncExplanationFromIni(){
     global iniPath
     global ddlEProv, ddlEOpenAI, ddlEGem
+    global explainProvider, explainOpenAIModel, explainGeminiModel
     global model_openai_explain, model_gemini_explain
 
     prov := StrLower(Trim(IniRead(iniPath, "cfg_explainer", "explainProvider", "")))
     gm   := Trim(IniRead(iniPath, "cfg_explainer", "explainGeminiModel", ""))
     om   := Trim(IniRead(iniPath, "cfg_explainer", "explainOpenAIModel", ""))
 
-    if (prov != "")
+    if (prov = "gemini" || prov = "openai") {
+        explainProvider := prov
         ddlEProv.Choose(prov = "gemini" ? 1 : 2)
-    if (gm != "")
+    }
+    if (gm != "") {
+        explainGeminiModel := gm
         SetComboToExistingItem(ddlEGem, model_gemini_explain, gm)
-    if (om != "")
+    }
+    if (om != "") {
+        explainOpenAIModel := om
         SetComboToExistingItem(ddlEOpenAI, model_openai_explain, om)
+    }
     ToggleExplanationControls()
 }
 

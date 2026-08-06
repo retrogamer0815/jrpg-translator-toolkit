@@ -672,10 +672,37 @@ EnsureBoundsOnScreen(bounds, dpi := 96) {
     return bounds
 }
 
-; Delete a batch of files (used by delete-after-use scheduling)
-DeleteFiles(list) {
-    for f in list {
-        try FileDelete(f)
+ScreenshotCleanupLedgerPath() {
+    global APP_ROOT
+    return APP_ROOT "\Settings\screenshot_cleanup_pending.txt"
+}
+
+CanonicalScreenshotPath(path) {
+    resolved := ResolvePath(path)
+    if (resolved = "")
+        return ""
+    required := DllCall("Kernel32\GetFullPathNameW"
+        , "str", resolved, "uint", 0, "ptr", 0, "ptr", 0, "uint")
+    if !required
+        return resolved
+    fullPathBuffer := Buffer((required + 1) * 2, 0)
+    if !DllCall("Kernel32\GetFullPathNameW"
+        , "str", resolved, "uint", required + 1, "ptr", fullPathBuffer, "ptr", 0, "uint")
+        return resolved
+    return StrGet(fullPathBuffer)
+}
+
+RegisterScreenshotForStartupCleanup(path) {
+    global APP_ROOT
+    canonicalPath := CanonicalScreenshotPath(path)
+    if (canonicalPath = "" || !RegExMatch(canonicalPath, 'i)\.png$'))
+        return
+    ledgerPath := ScreenshotCleanupLedgerPath()
+    try {
+        ledgerDir := APP_ROOT "\Settings"
+        if !DirExist(ledgerDir)
+            DirCreate(ledgerDir)
+        FileAppend(canonicalPath "`r`n", ledgerPath, "UTF-8")
     }
 }
 
@@ -847,16 +874,6 @@ cap := ResolvePath(captureDir)
 if !DirExist(cap)
     DirCreate(cap)
 captureDir := cap
-
-; Screenshot lifecycle defaults (write to INI if missing)
-EnsureIniDefault(ControlIni, "paths", "deleteAfterUse", 1)      ; 1 = delete each batch after use, 0 = keep
-EnsureIniDefault(ControlIni, "paths", "deleteDelayMs", 10000)  ; 10 seconds
-EnsureIniDefault(ControlIni, "paths", "captureRetentionDays", 0)
-
-; Screenshot lifecycle settings
-deleteAfterUse := Integer(IniRead(ControlIni, "paths", "deleteAfterUse", 1))  ; 1 = delete each batch
-deleteDelayMs  := Integer(IniRead(ControlIni, "paths", "deleteDelayMs", 10000)) ; wait 10 sec by default
-retentionDays  := Integer(IniRead(ControlIni, "paths", "captureRetentionDays", 0))
 
 ; --- Native Capture (GDI+) ----------------------------------------------------
 ; Persisted selection + limits (same INI as Control Panel "capture" section)
@@ -2231,6 +2248,8 @@ CaptureOnceToFile(&outPath, &failureReason) {
         }
         ok := SaveBitmapPngUnderKB(hb, w, h, outPath, Cap_MaxKB, &failureReason)
         DllCall("DeleteObject", "Ptr", hb)
+        if ok
+            RegisterScreenshotForStartupCleanup(outPath)
         return ok
     } else if (Cap_Mode = "window") {
         MouseGetPos ,, &hw := 0
@@ -2254,6 +2273,8 @@ CaptureOnceToFile(&outPath, &failureReason) {
         }
         ok := SaveBitmapPngUnderKB(hb, ww, wh, outPath, Cap_MaxKB, &failureReason)
         DllCall("DeleteObject", "Ptr", hb)
+        if ok
+            RegisterScreenshotForStartupCleanup(outPath)
         return ok
     } else {
         failureReason := "missing_target"
@@ -3714,6 +3735,7 @@ appendLatestShot(*) {
         return
     }
     ShotBuf.Push(f)
+    RegisterScreenshotForStartupCleanup(f)
     ToolTip("Buffered shots: " ShotBuf.Length)
     SetTimer(() => ToolTip(""), -700)
 }
@@ -3729,7 +3751,6 @@ redefineRegion(*) {
 
 flushTranslate(files := unset) {
     global ShotBuf, pythonExe, translatorPy, ControlIni
-    global deleteAfterUse, deleteDelayMs
     local fileList, n
 
     px := ResolvePath(pythonExe)
@@ -3747,6 +3768,11 @@ flushTranslate(files := unset) {
         return
     }
 
+    ; Keep an exact-path ledger for cleanup on the next application start.
+    ; Register before the model request so slow responses cannot race deletion.
+    for screenshotPath in fileList
+        RegisterScreenshotForStartupCleanup(screenshotPath)
+
     if !FileExist(tp) {
         showText("(Config error) translatorPy not found:`n" tp)
         ShotBuf := []
@@ -3760,10 +3786,6 @@ flushTranslate(files := unset) {
 
     provider := StrLower(Trim(IniRead(ControlIni, "cfg", "imgProvider", "openai")))
     if !OverlayApiKeyConfigured(provider) {
-        if (IsSet(files) && deleteAfterUse) {
-            filesToDelete := fileList.Clone()
-            SetTimer(() => DeleteFiles(filesToDelete), -deleteDelayMs)
-        }
         showText(OverlayMissingApiKeyText(provider))
         Dbg("Translation blocked: " provider " API key is missing")
         return
@@ -3818,12 +3840,6 @@ ExportGlossaryEnv()
 
     cmd := Format('cmd /c chcp 65001>nul & "{}" "{}"{}', px, tp, args)
     Run(cmd, , "Hide")
-
-    ; Schedule deletion of this batch (optional)
-    if (deleteAfterUse) {
-        toDelete := fileList.Clone()
-        SetTimer(() => DeleteFiles(toDelete), -deleteDelayMs)
-    }
 
     ShotBuf := []
 }

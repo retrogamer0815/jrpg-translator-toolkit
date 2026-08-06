@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using System.Xml.Serialization;
 using System.Windows;
+using System.Windows.Controls;
 using JrpgTranslator.LaunchBox;
 using Unbroken.LaunchBox.Plugins;
 
@@ -71,12 +72,33 @@ internal static class Program
         GameSetupWindow setupWindow = new GameSetupWindow(restored, game.Clone());
         Require(string.Equals(setupWindow.Title, "JRPG Translator Setup", StringComparison.Ordinal),
             "The setup window did not initialize correctly.");
-        FrameworkElement content = (FrameworkElement)setupWindow.Content;
-        content.Measure(new Size(setupWindow.Width, double.PositiveInfinity));
-        Require(content.DesiredSize.Height <= setupWindow.Height - 36,
-            "The setup window's default height is too small for its content: "
-                + content.DesiredSize.Height + " required, "
-                + (setupWindow.Height - 36) + " available.");
+        Require(setupWindow.Height <= SystemParameters.WorkArea.Height,
+            "The setup window is taller than the visible desktop work area.");
+        Require(setupWindow.MinHeight <= setupWindow.Height,
+            "The setup window's minimum height prevents its adaptive startup size.");
+
+        Grid setupRoot = (Grid)setupWindow.Content;
+        ScrollViewer? setupScroller = setupRoot.Children
+            .OfType<ScrollViewer>()
+            .SingleOrDefault();
+        Require(setupScroller != null
+            && setupScroller.VerticalScrollBarVisibility == ScrollBarVisibility.Auto,
+            "The setup window does not provide an automatic vertical scrolling region.");
+        Require(!setupScroller!.CanContentScroll,
+            "The setup window must use pixel-based scrolling so large sections remain reachable.");
+        Require(Grid.GetRow(setupScroller!) == 2,
+            "The setup window scrolling region is not in the expected flexible row.");
+
+        StackPanel? setupFooter = setupRoot.Children
+            .OfType<StackPanel>()
+            .FirstOrDefault(panel =>
+                Grid.GetRow(panel) == 3
+                && panel.Children.OfType<Button>().Any(button =>
+                    string.Equals(button.Content as string, "Save", StringComparison.Ordinal))
+                && panel.Children.OfType<Button>().Any(button =>
+                    string.Equals(button.Content as string, "Cancel", StringComparison.Ordinal)));
+        Require(setupFooter != null,
+            "The setup window Save/Cancel footer is not pinned outside the scrolling region.");
 
         IGameMenuItemPlugin menuItem = new GameSetupMenuItem();
         Require(menuItem.ShowInLaunchBox && menuItem.ShowInBigBox,

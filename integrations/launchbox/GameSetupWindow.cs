@@ -3,9 +3,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -38,6 +40,7 @@ namespace JrpgTranslator.LaunchBox
         private readonly TextBlock _translatorProfileStatus;
         private readonly TextBlock _joyToKeyProfileStatus;
         private readonly TextBlock _readiness;
+        private readonly ScrollViewer _contentScroller;
         private readonly List<Control[]> _focusRows;
         private readonly DispatcherTimer _controllerTimer;
         private readonly bool _nativeControllerNavigationEnabled;
@@ -59,11 +62,16 @@ namespace JrpgTranslator.LaunchBox
             _nativeControllerNavigationEnabled = IsBigBoxHost();
 
             Title = "JRPG Translator Setup";
-            Width = 840;
-            Height = 900;
-            MinWidth = 720;
-            MinHeight = 800;
-            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            Rect workArea = SystemParameters.WorkArea;
+            double availableWidth = Math.Max(1, workArea.Width - 24);
+            double availableHeight = Math.Max(1, workArea.Height - 24);
+            Width = Math.Min(840, availableWidth);
+            Height = Math.Min(900, availableHeight);
+            MinWidth = Math.Min(720, availableWidth);
+            MinHeight = Math.Min(500, availableHeight);
+            MaxWidth = availableWidth;
+            MaxHeight = availableHeight;
+            WindowStartupLocation = WindowStartupLocation.CenterOwner;
             ResizeMode = ResizeMode.CanResize;
             ShowInTaskbar = false;
             Background = WindowBackground;
@@ -74,8 +82,6 @@ namespace JrpgTranslator.LaunchBox
             FontSize = 18;
 
             Grid root = new Grid { Margin = new Thickness(28, 24, 28, 24) };
-            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -103,13 +109,27 @@ namespace JrpgTranslator.LaunchBox
             Grid.SetRow(introduction, 1);
             root.Children.Add(introduction);
 
+            StackPanel scrollingContent = new StackPanel();
+            _contentScroller = new ScrollViewer
+            {
+                Content = scrollingContent,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                // The content is composed of a few large panels. Logical scrolling
+                // would jump from one whole panel to the next and skip the controls
+                // between them, so use physical (pixel-based) scrolling here.
+                CanContentScroll = false,
+                Focusable = false
+            };
+            Grid.SetRow(_contentScroller, 2);
+            root.Children.Add(_contentScroller);
+
             StackPanel options = new StackPanel
             {
                 Background = PanelBackground,
                 Margin = new Thickness(0, 0, 0, 14)
             };
-            Grid.SetRow(options, 2);
-            root.Children.Add(options);
+            scrollingContent.Children.Add(options);
 
             _translatorEnabled = MakeCheckBox("Use JRPG Translator with this game", game.TranslatorEnabled);
             _translatorEnabled.Margin = new Thickness(18, 17, 18, 10);
@@ -208,8 +228,7 @@ namespace JrpgTranslator.LaunchBox
             locationButtons.Children.Add(_browseProfiles);
 
             StackPanel statusPanel = new StackPanel();
-            Grid.SetRow(statusPanel, 3);
-            root.Children.Add(statusPanel);
+            scrollingContent.Children.Add(statusPanel);
 
             _readiness = new TextBlock
             {
@@ -235,7 +254,7 @@ namespace JrpgTranslator.LaunchBox
                 HorizontalAlignment = HorizontalAlignment.Left,
                 Margin = new Thickness(0, 18, 0, 0)
             };
-            Grid.SetRow(buttons, 5);
+            Grid.SetRow(buttons, 3);
             root.Children.Add(buttons);
 
             _save = MakeButton("Save", 150);
@@ -260,6 +279,11 @@ namespace JrpgTranslator.LaunchBox
                 new Control[] { _save, _cancel }
             };
 
+            foreach (Control control in _focusRows.SelectMany(row => row))
+            {
+                control.GotKeyboardFocus += BringFocusedControlIntoView;
+            }
+
             _controllerTimer = new DispatcherTimer(DispatcherPriority.Input)
             {
                 Interval = TimeSpan.FromMilliseconds(20)
@@ -270,6 +294,7 @@ namespace JrpgTranslator.LaunchBox
             PreviewKeyUp += HandlePreviewKeyUp;
             Loaded += (_, _) =>
             {
+                FitWindowToVisibleWorkArea();
                 // LaunchBox can keep its busy cursor active while a synchronous
                 // plugin command is open. This dialog has no background work.
                 Mouse.OverrideCursor = null;
@@ -287,6 +312,143 @@ namespace JrpgTranslator.LaunchBox
             UpdateTranslatorControls();
             UpdateJoyToKeyControls();
         }
+
+        private void BringFocusedControlIntoView(object sender, KeyboardFocusChangedEventArgs e)
+        {
+            if (sender is not FrameworkElement element)
+            {
+                return;
+            }
+
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(element.BringIntoView));
+        }
+
+        private void FitWindowToVisibleWorkArea()
+        {
+            IntPtr windowHandle = new WindowInteropHelper(this).Handle;
+            if (windowHandle == IntPtr.Zero)
+            {
+                return;
+            }
+
+            IntPtr referenceHandle = Owner == null
+                ? windowHandle
+                : new WindowInteropHelper(Owner).Handle;
+            IntPtr monitor = MonitorFromWindow(
+                referenceHandle == IntPtr.Zero ? windowHandle : referenceHandle,
+                MonitorDefaultToNearest);
+            MonitorInfo monitorInfo = new MonitorInfo
+            {
+                Size = Marshal.SizeOf<MonitorInfo>()
+            };
+            if (monitor == IntPtr.Zero || !GetMonitorInfo(monitor, ref monitorInfo))
+            {
+                return;
+            }
+
+            DpiScale dpi = VisualTreeHelper.GetDpi(this);
+            double scaleX = Math.Max(1, dpi.DpiScaleX);
+            double scaleY = Math.Max(1, dpi.DpiScaleY);
+            const double logicalMargin = 12;
+            double availableWidth = Math.Max(
+                1,
+                (monitorInfo.WorkArea.Right - monitorInfo.WorkArea.Left) / scaleX
+                    - logicalMargin * 2);
+            double availableHeight = Math.Max(
+                1,
+                (monitorInfo.WorkArea.Bottom - monitorInfo.WorkArea.Top) / scaleY
+                    - logicalMargin * 2);
+
+            MaxWidth = availableWidth;
+            MaxHeight = availableHeight;
+            MinWidth = Math.Min(720, availableWidth);
+            MinHeight = Math.Min(500, availableHeight);
+
+            double targetWidth = Math.Min(
+                double.IsNaN(Width) || Width <= 0 ? 840 : Width,
+                availableWidth);
+            double targetHeight = Math.Min(
+                double.IsNaN(Height) || Height <= 0 ? 900 : Height,
+                availableHeight);
+            Width = targetWidth;
+            Height = targetHeight;
+
+            int physicalWidth = Math.Max(1, (int)Math.Round(targetWidth * scaleX));
+            int physicalHeight = Math.Max(1, (int)Math.Round(targetHeight * scaleY));
+            int centerX = (monitorInfo.WorkArea.Left + monitorInfo.WorkArea.Right) / 2;
+            int centerY = (monitorInfo.WorkArea.Top + monitorInfo.WorkArea.Bottom) / 2;
+            if (Owner != null
+                && referenceHandle != IntPtr.Zero
+                && GetWindowRect(referenceHandle, out NativeRect ownerBounds))
+            {
+                centerX = (ownerBounds.Left + ownerBounds.Right) / 2;
+                centerY = (ownerBounds.Top + ownerBounds.Bottom) / 2;
+            }
+
+            int marginX = Math.Max(0, (int)Math.Round(logicalMargin * scaleX));
+            int marginY = Math.Max(0, (int)Math.Round(logicalMargin * scaleY));
+            int left = centerX - physicalWidth / 2;
+            int top = centerY - physicalHeight / 2;
+            left = Math.Max(
+                monitorInfo.WorkArea.Left + marginX,
+                Math.Min(left, monitorInfo.WorkArea.Right - marginX - physicalWidth));
+            top = Math.Max(
+                monitorInfo.WorkArea.Top + marginY,
+                Math.Min(top, monitorInfo.WorkArea.Bottom - marginY - physicalHeight));
+
+            SetWindowPos(
+                windowHandle,
+                IntPtr.Zero,
+                left,
+                top,
+                physicalWidth,
+                physicalHeight,
+                SetWindowPositionNoActivate | SetWindowPositionNoZOrder);
+        }
+
+        private const uint MonitorDefaultToNearest = 2;
+        private const uint SetWindowPositionNoZOrder = 0x0004;
+        private const uint SetWindowPositionNoActivate = 0x0010;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeRect
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MonitorInfo
+        {
+            public int Size;
+            public NativeRect MonitorArea;
+            public NativeRect WorkArea;
+            public uint Flags;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromWindow(IntPtr windowHandle, uint flags);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo monitorInfo);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetWindowRect(IntPtr windowHandle, out NativeRect bounds);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetWindowPos(
+            IntPtr windowHandle,
+            IntPtr insertAfter,
+            int left,
+            int top,
+            int width,
+            int height,
+            uint flags);
 
         private void RefreshTranslatorProfiles(string preferredProfile)
         {
@@ -572,10 +734,18 @@ namespace JrpgTranslator.LaunchBox
             ComboBox? openProfile = GetOpenProfile();
             if (openProfile != null)
             {
-                if (e.Key == Key.Enter || e.Key == Key.Escape)
+                if (e.Key == Key.Escape)
                 {
                     CloseProfileDropDown(openProfile);
                     e.Handled = true;
+                }
+                else if (e.Key == Key.Enter || e.Key == Key.Space)
+                {
+                    // Let the ComboBox process the key itself. WPF keeps keyboard
+                    // navigation as a highlighted candidate while the popup is
+                    // open and commits it on Enter/Space. Consuming the preview
+                    // event here used to close the popup before that commit.
+                    ReleaseProfileDropDownGuard(openProfile);
                 }
                 return;
             }
@@ -780,12 +950,19 @@ namespace JrpgTranslator.LaunchBox
 
         private void CloseProfileDropDown(ComboBox profile)
         {
-            if (ReferenceEquals(_guardedControllerProfile, profile))
-            {
-                _guardedControllerProfile = null;
-                _guardedControllerProfileUntil = 0;
-            }
+            ReleaseProfileDropDownGuard(profile);
             profile.IsDropDownOpen = false;
+        }
+
+        private void ReleaseProfileDropDownGuard(ComboBox profile)
+        {
+            if (!ReferenceEquals(_guardedControllerProfile, profile))
+            {
+                return;
+            }
+
+            _guardedControllerProfile = null;
+            _guardedControllerProfileUntil = 0;
         }
 
         private void HandleProfileDropDownClosed(object? sender, EventArgs e)

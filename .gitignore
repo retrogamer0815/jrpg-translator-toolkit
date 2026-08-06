@@ -5,9 +5,11 @@ Settings/*.json
 
 # Runtime and user state
 Settings/control.ini
+Settings/screenshot_cleanup_pending.txt
 Settings/overlay_*.ini
 Settings/Screenshots/
 Settings/Explanations/
+Settings/Study Library/
 Settings/profiles/
 Settings/profiles_explainer/
 Settings/prompts/*
