@@ -70,6 +70,31 @@ Profile automatically for each game.
   </tr>
 </table>
 
+### Study Library and Reader
+
+Save explanations together with their Japanese source and optional screenshots,
+organize them with searchable metadata, and revisit them in a focused reading
+view. Click either image to view it at full size.
+
+<table>
+  <tr>
+    <th width="50%">Study Library</th>
+    <th width="50%">Study Reader</th>
+  </tr>
+  <tr>
+    <td>
+      <a href="docs/media/study-library.png">
+        <img src="docs/media/study-library.png" alt="Searchable Study Library with saved explanations, source screenshots, metadata, and Anki status">
+      </a>
+    </td>
+    <td>
+      <a href="docs/media/study-reader.png">
+        <img src="docs/media/study-reader.png" alt="Study Reader showing a Japanese explanation beside its source screenshot and context">
+      </a>
+    </td>
+  </tr>
+</table>
+
 ## Features
 
 - Screenshot translation with OpenAI and Google Gemini vision models.
@@ -77,7 +102,9 @@ Profile automatically for each game.
   Translate models, without a separate transcription step.
 - A dedicated Explainer for vocabulary, kanji readings, grammar, literal
   meaning, natural translations, nuance, and cultural context.
-- Optional automatic saving of explanations as text files for later study.
+- A searchable Study Library and focused Study Reader with optional source
+  screenshots, metadata, version history, editing, copying, and Anki status.
+- Optional automatic saving of plain-text explanation copies for later study.
 - Independent Translator and Explainer overlays with configurable colors,
   fonts, borders, transparency, position, and size.
 - Translation and explanation prompts editable from the control panel.
@@ -164,6 +191,8 @@ learning-focused explanation without replacing the translation.
 
 Explanation prompts are independent from translation prompts, so they can be
 tuned for a learner's level and preferred amount of detail.
+
+### Study Library and Reader
 
 Enable **Save explanations to Study Library** to keep the Japanese source,
 explanation, Profile, provider/model details, and optional source screenshots in
