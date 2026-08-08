@@ -16,7 +16,7 @@ global CP_START_PROFILE := ""
 global CP_START_TRANSLATOR := false
 global CP_STUDY_START_MODE := ""
 global CP_STUDY_ONLY_PROCESS := false
-global APP_VERSION := "0.9.4-dev"
+global APP_VERSION := "0.9.4"
 global PROJECT_URL := "https://github.com/retrogamer0815/jrpg-translator-toolkit"
 global BUG_REPORT_URL := PROJECT_URL "/issues/new"
 global WRITTEN_GUIDE_URL := PROJECT_URL "#quick-start"
@@ -70,6 +70,7 @@ global CPControllerNavHeldDirection := ""
 global CPControllerNavNextRepeatAt := 0
 global CPControllerNavHeldSince := 0
 global CPControllerLastNativeNavigationAt := Map()
+global CPKeyboardSliderRepeatState := Map("active", false)
 global CPFontSizeAdjustState := Map("active", false)
 global CPFontSizeAdjustSyncing := false
 global CPMaxPngAdjustState := Map("active", false)
@@ -275,6 +276,7 @@ global CPThemeBrushSurface := 0
 global CPThemeBrushFocus := 0
 global CPThemeMutedHwnds := Map()
 global CPThemedDialogHwnds := Map()
+global CPThemedPopupButtons := Map()
 global CPStudyThemedComboHwnds := Map()
 global CPStudyThemedHeaderHwnds := Map()
 global CPStudyThemedListHwnds := Map()
@@ -320,6 +322,10 @@ global CPWindowWidthSnapActive := false
 global CPWindowHeightSnapActive := false
 global CPWindowSnapRange := 14
 global CPWindowSnapReleaseRange := 24
+global CPPanelInteractiveResize := false
+global CPPanelResizeOpacitySuspended := false
+global CPPanelLastLayoutW := 0
+global CPPanelLastLayoutH := 0
 
 CPRegisterCanvasMessages() {
     global ui, CPCanvasMessagesRegistered
@@ -878,9 +884,27 @@ CPWindowSnapShouldApply(distance, &active) {
 
 CPOnWindowEnterSizeMove(wParam, lParam, msg, hwnd) {
     global ui, CPWindowWidthSnapActive, CPWindowHeightSnapActive
+    global CPPanelInteractiveResize, CPPanelResizeOpacitySuspended
+    global controlPanelOpacity
     if (IsSet(ui) && ui && hwnd = ui.Hwnd) {
         CPWindowWidthSnapActive := false
         CPWindowHeightSnapActive := false
+        CPPanelInteractiveResize := true
+        CPPanelResizeOpacitySuspended := false
+
+        ; A top-level window using alpha transparency is a layered window.
+        ; Windows recomposes every moved child HWND separately during a live
+        ; resize, which produces unavoidable flashing below 100% opacity.
+        ; Temporarily remove only that layered style for the drag; the exact
+        ; configured opacity is restored immediately when resizing finishes.
+        if (controlPanelOpacity < 100) {
+            try {
+                WinSetTransparent("Off", "ahk_id " hwnd)
+                CPPanelResizeOpacitySuspended := true
+                DllCall("user32\RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0
+                    , "uint", 0x0001 | 0x0004 | 0x0080 | 0x0100)
+            }
+        }
     }
 }
 
@@ -929,10 +953,50 @@ CPOnWindowSizing(wParam, lParam, msg, hwnd) {
 
 CPOnWindowExitSizeMove(wParam, lParam, msg, hwnd) {
     global ui, CPWindowWidthSnapActive, CPWindowHeightSnapActive
+    global CPPanelInteractiveResize
     if (IsSet(ui) && ui && hwnd = ui.Hwnd) {
         CPWindowWidthSnapActive := false
         CPWindowHeightSnapActive := false
+        CPPanelInteractiveResize := false
+        ; Let the non-client resize loop finish before the one full cleanup
+        ; repaint. Live WM_SIZE passes intentionally avoid synchronous erases.
+        SetTimer(CPFinalizeInteractiveResize, -1)
     }
+}
+
+CPFinalizeInteractiveResize(*) {
+    global ui, CPPanelResizeOpacitySuspended
+    if !(IsSet(ui) && ui)
+        return
+    try hwnd := ui.Hwnd
+    catch
+        return
+    if !hwnd
+        return
+    try DllCall("user32\RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0
+        , "uint", 0x0001 | 0x0004 | 0x0080 | 0x0100) ; INVALIDATE|ERASE|ALLCHILDREN|UPDATENOW
+    if CPPanelResizeOpacitySuspended
+        SetTimer(CPRestoreOpacityAfterResize, -25)
+}
+
+CPRestoreOpacityAfterResize(*) {
+    global ui, CPPanelResizeOpacitySuspended
+    if !CPPanelResizeOpacitySuspended
+        return
+    CPPanelResizeOpacitySuspended := false
+    if !(IsSet(ui) && ui)
+        return
+    try hwnd := ui.Hwnd
+    catch
+        return
+    if !hwnd
+        return
+
+    CPApplyControlPanelOpacity(false)
+    ; Re-adding alpha transparency needs only one compositor update; do not
+    ; erase the already complete child-control frame again.
+    try DllCall("user32\RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0
+        , "uint", 0x0001 | 0x0020 | 0x0080) ; INVALIDATE|NOERASE|ALLCHILDREN
 }
 
 CPPalette(darkMode := -1) {
@@ -1783,7 +1847,7 @@ CPThemeCtlColor(wParam, lParam, msg, parentHwnd) {
 CPThemedWindowDestroyed(wParam, lParam, msg, hwnd) {
     global CPThemedDialogHwnds, CPStudyThemedComboHwnds, CPStudyThemedHeaderHwnds
         , CPStudyThemedListHwnds
-        , CPStudyVisualOverlays, CPStudyTransparentHwnds
+        , CPStudyVisualOverlays, CPStudyTransparentHwnds, CPThemedPopupButtons
     try {
         if IsSet(CPThemedDialogHwnds) && IsObject(CPThemedDialogHwnds)
             && CPThemedDialogHwnds.Has(hwnd)
@@ -1814,6 +1878,11 @@ CPThemedWindowDestroyed(wParam, lParam, msg, hwnd) {
             && CPStudyTransparentHwnds.Has(hwnd)
             CPStudyTransparentHwnds.Delete(hwnd)
     }
+    try {
+        if IsSet(CPThemedPopupButtons) && IsObject(CPThemedPopupButtons)
+            && CPThemedPopupButtons.Has(hwnd)
+            CPThemedPopupButtons.Delete(hwnd)
+    }
 }
 
 CPThemeMeasureItem(wParam, lParam, msg, parentHwnd) {
@@ -1827,11 +1896,21 @@ CPThemeMeasureItem(wParam, lParam, msg, parentHwnd) {
 
 CPThemeDrawItem(wParam, lParam, msg, parentHwnd) {
     global ui, controlDarkMode, CPThemeBrushSurface, CPThemeBrushFocus
+        , CPThemedPopupButtons
     if !lParam
         return
     cpDrawType := NumGet(lParam, 0, "uint")
     if (cpDrawType = 100) ; ODT_HEADER
         return CPThemeDrawHeaderItem(lParam)
+    if (cpDrawType = 4) { ; ODT_BUTTON
+        cpButtonHwndOffset := (A_PtrSize = 8) ? 24 : 20
+        cpButtonHwnd := NumGet(lParam, cpButtonHwndOffset, "ptr")
+        if cpButtonHwnd && IsSet(CPThemedPopupButtons)
+            && IsObject(CPThemedPopupButtons)
+            && CPThemedPopupButtons.Has(cpButtonHwnd)
+            return CPThemeDrawPopupButton(lParam)
+        return
+    }
     if (cpDrawType != 3) ; ODT_COMBOBOX
         return
     if !(IsSet(ui) && ui && ui.Hwnd)
@@ -1889,6 +1968,83 @@ CPThemeDrawItem(wParam, lParam, msg, parentHwnd) {
         DllCall("gdi32\SelectObject", "ptr", cpDrawHdc, "ptr", cpDrawOldFont, "ptr")
     if (cpDrawState & 0x0010)
         DllCall("user32\DrawFocusRect", "ptr", cpDrawHdc, "ptr", lParam + cpDrawRectOffset)
+    return true
+}
+
+CPThemeDrawPopupButton(cpButtonDraw) {
+    global controlDarkMode, CPThemedPopupButtons
+    cpButtonHwndOffset := (A_PtrSize = 8) ? 24 : 20
+    cpButtonHdcOffset := (A_PtrSize = 8) ? 32 : 24
+    cpButtonRectOffset := (A_PtrSize = 8) ? 40 : 28
+    cpButtonHwnd := NumGet(cpButtonDraw, cpButtonHwndOffset, "ptr")
+    cpButtonHdc := NumGet(cpButtonDraw, cpButtonHdcOffset, "ptr")
+    if !cpButtonHwnd || !cpButtonHdc || !CPThemedPopupButtons.Has(cpButtonHwnd)
+        return
+
+    cpButtonState := NumGet(cpButtonDraw, 16, "uint")
+    cpButtonPressed := (cpButtonState & 0x0001) != 0 ; ODS_SELECTED
+    cpButtonDisabled := (cpButtonState & 0x0002) != 0
+        || (cpButtonState & 0x0004) != 0
+    cpButtonFocused := (cpButtonState & 0x0010) != 0 ; ODS_FOCUS
+    cpButtonColors := CPPalette(controlDarkMode)
+    cpButtonBackHex := cpButtonPressed
+        ? cpButtonColors["accentFocus"]
+        : (cpButtonFocused ? cpButtonColors["focus"] : cpButtonColors["surface"])
+    cpButtonTextHex := cpButtonDisabled
+        ? cpButtonColors["muted"]
+        : (cpButtonPressed ? cpButtonColors["accentText"] : cpButtonColors["text"])
+
+    cpButtonBackBrush := DllCall(
+        "gdi32\CreateSolidBrush", "uint", CPColorRef(cpButtonBackHex), "ptr"
+    )
+    try DllCall(
+        "user32\FillRect", "ptr", cpButtonHdc,
+        "ptr", cpButtonDraw + cpButtonRectOffset, "ptr", cpButtonBackBrush
+    )
+    finally DllCall("gdi32\DeleteObject", "ptr", cpButtonBackBrush)
+
+    cpButtonBorderBrush := DllCall(
+        "gdi32\CreateSolidBrush", "uint", CPColorRef(cpButtonColors["border"]), "ptr"
+    )
+    try DllCall(
+        "user32\FrameRect", "ptr", cpButtonHdc,
+        "ptr", cpButtonDraw + cpButtonRectOffset, "ptr", cpButtonBorderBrush
+    )
+    finally DllCall("gdi32\DeleteObject", "ptr", cpButtonBorderBrush)
+
+    DllCall(
+        "gdi32\SetTextColor", "ptr", cpButtonHdc,
+        "uint", CPColorRef(cpButtonTextHex)
+    )
+    DllCall("gdi32\SetBkMode", "ptr", cpButtonHdc, "int", 1) ; TRANSPARENT
+    cpButtonFont := SendMessage(0x0031, 0, 0, cpButtonHwnd) ; WM_GETFONT
+    cpButtonOldFont := cpButtonFont
+        ? DllCall("gdi32\SelectObject", "ptr", cpButtonHdc, "ptr", cpButtonFont, "ptr") : 0
+    cpButtonTextRect := Buffer(16, 0)
+    cpButtonLeft := NumGet(cpButtonDraw, cpButtonRectOffset, "int") + 10
+    cpButtonTop := NumGet(cpButtonDraw, cpButtonRectOffset + 4, "int")
+    cpButtonRight := NumGet(cpButtonDraw, cpButtonRectOffset + 8, "int") - 8
+    cpButtonBottom := NumGet(cpButtonDraw, cpButtonRectOffset + 12, "int")
+    if cpButtonPressed
+        cpButtonLeft += 1, cpButtonTop += 1
+    NumPut(
+        "int", cpButtonLeft, "int", cpButtonTop,
+        "int", cpButtonRight, "int", cpButtonBottom,
+        cpButtonTextRect, 0
+    )
+    DllCall(
+        "user32\DrawTextW", "ptr", cpButtonHdc,
+        "wstr", CPThemedPopupButtons[cpButtonHwnd], "int", -1,
+        "ptr", cpButtonTextRect.Ptr,
+        "uint", 0x0020 | 0x0004 | 0x0800 | 0x8000
+    ) ; SINGLELINE | VCENTER | NOPREFIX | END_ELLIPSIS
+    if cpButtonOldFont
+        DllCall("gdi32\SelectObject", "ptr", cpButtonHdc, "ptr", cpButtonOldFont, "ptr")
+    if cpButtonFocused
+        DllCall(
+            "user32\DrawFocusRect", "ptr", cpButtonHdc,
+            "ptr", cpButtonDraw + cpButtonRectOffset
+        )
     return true
 }
 
@@ -2279,7 +2435,11 @@ Rebind_ExplainLastTranslation() {
     if (newHK != "") {
         try {
             ; Call the same function as the "Explain last jp. Text" buttonâ€”no window toggling.
-            Hotkey(newHK, (*) => SafeCall(ExplainNow))
+            ; While the control-panel workflow owns the foreground, native
+            ; shoulder buttons change tabs instead. Suppress a matching
+            ; keyboard-emulated/JoyToKey hotkey so it cannot also request an
+            ; explanation in the background.
+            Hotkey(newHK, CPExplainLastHotkey)
             __HK_EXPLAIN_LAST := newHK
         } catch as ex {
             ; If user typed an invalid AHK key string, donâ€™t crash the panel
@@ -2362,6 +2522,12 @@ HideControlPanel(*) {
             SetTimer(RestoreControlPanelReturnWindow, -1)
         }
     }
+}
+
+CPExplainLastHotkey(*) {
+    if CPControllerNavigationTarget()
+        return
+    SafeCall(ExplainNow)
 }
 
 CaptureControlPanelReturnWindow() {
@@ -2651,6 +2817,25 @@ CPSelectCustomTab(cpTabIndex, *) {
     try tab.Value := cpTabIndex
     CPSetTabFocusIndicator(false)
     CPRenderCustomTabBar(true)
+    SetTimer(CPRedrawActiveTabPage, -1)
+}
+
+CPRedrawActiveTabPage(*) {
+    global ui, tab
+    if !(IsSet(ui) && ui && IsSet(tab) && tab)
+        return
+    try hwnd := ui.Hwnd
+    catch
+        return
+    if !hwnd
+        return
+
+    ; AHK shows/hides the native tab-page controls after the selected page
+    ; changes. Invalidate every child once after that visibility update so a
+    ; layered panel does not leave the new controls blank until mouse-over.
+    try tab.Redraw()
+    try DllCall("user32\RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0
+        , "uint", 0x0001 | 0x0080 | 0x0100) ; INVALIDATE|ALLCHILDREN|UPDATENOW
 }
 
 CPMouseTabClick(*) {
@@ -3581,6 +3766,82 @@ CPControllerKeyboardMirrorActive(command) {
         && cpMirrorNow <= cpMirrorGraceUntil[command]
 }
 
+CPKeyboardSliderRepeatStop(*) {
+    global CPKeyboardSliderRepeatState
+    try SetTimer(CPKeyboardSliderRepeatTick, 0)
+    CPKeyboardSliderRepeatState := Map("active", false)
+}
+
+CPKeyboardSliderRepeatRelease(direction, *) {
+    global CPKeyboardSliderRepeatState
+    if (CPKeyboardSliderRepeatState.Has("active")
+     && CPKeyboardSliderRepeatState["active"]
+     && CPKeyboardSliderRepeatState.Has("direction")
+     && CPKeyboardSliderRepeatState["direction"] = direction)
+        CPKeyboardSliderRepeatStop()
+}
+
+CPKeyboardSliderRepeatStart(direction, stepCallback) {
+    global CPKeyboardSliderRepeatState
+    cpKeyboardRepeatTarget := CPControllerNavigationTarget()
+    if (!cpKeyboardRepeatTarget
+     || !CPControllerAcceleratedSliderRepeatActive(cpKeyboardRepeatTarget, direction))
+        return false
+
+    if (CPKeyboardSliderRepeatState.Has("active")
+     && CPKeyboardSliderRepeatState["active"]) {
+        if (CPKeyboardSliderRepeatState.Has("direction")
+         && CPKeyboardSliderRepeatState["direction"] = direction
+         && CPKeyboardSliderRepeatState.Has("targetHwnd")
+         && CPKeyboardSliderRepeatState["targetHwnd"] = cpKeyboardRepeatTarget)
+            return true
+        CPKeyboardSliderRepeatStop()
+    }
+
+    try stepCallback.Call()
+    catch {
+        return false
+    }
+    cpKeyboardRepeatNow := A_TickCount
+    CPKeyboardSliderRepeatState := Map(
+        "active", true,
+        "direction", direction,
+        "targetHwnd", cpKeyboardRepeatTarget,
+        "step", stepCallback,
+        "heldSince", cpKeyboardRepeatNow,
+        "nextAt", cpKeyboardRepeatNow + 280)
+    SetTimer(CPKeyboardSliderRepeatTick, 15)
+    return true
+}
+
+CPKeyboardSliderRepeatTick(*) {
+    global CPKeyboardSliderRepeatState
+    cpKeyboardRepeatState := CPKeyboardSliderRepeatState
+    if !(cpKeyboardRepeatState.Has("active") && cpKeyboardRepeatState["active"])
+        return CPKeyboardSliderRepeatStop()
+
+    cpKeyboardRepeatTarget := CPControllerNavigationTarget()
+    if (!cpKeyboardRepeatTarget
+     || cpKeyboardRepeatTarget != cpKeyboardRepeatState["targetHwnd"]
+     || !CPControllerAcceleratedSliderRepeatActive(cpKeyboardRepeatTarget
+        , cpKeyboardRepeatState["direction"]))
+        return CPKeyboardSliderRepeatStop()
+
+    cpKeyboardRepeatNow := A_TickCount
+    if (cpKeyboardRepeatNow < cpKeyboardRepeatState["nextAt"])
+        return
+
+    cpKeyboardHeldMs := cpKeyboardRepeatNow - cpKeyboardRepeatState["heldSince"]
+    cpKeyboardRepeatSteps := cpKeyboardHeldMs >= 1100 ? 4 : (cpKeyboardHeldMs >= 650 ? 2 : 1)
+    try {
+        Loop cpKeyboardRepeatSteps
+            cpKeyboardRepeatState["step"].Call()
+    } catch {
+        return CPKeyboardSliderRepeatStop()
+    }
+    CPKeyboardSliderRepeatState["nextAt"] := cpKeyboardRepeatNow + 55
+}
+
 CPNavUp(*) {
     if CPControllerKeyboardMirrorActive("Up")
         return
@@ -3596,11 +3857,15 @@ CPNavDown(*) {
 CPNavLeft(*) {
     if CPControllerKeyboardMirrorActive("Left")
         return
+    if CPKeyboardSliderRepeatStart("Left", CPNavMove.Bind("Left"))
+        return
     CPNavMove("Left")
 }
 
 CPNavRight(*) {
     if CPControllerKeyboardMirrorActive("Right")
+        return
+    if CPKeyboardSliderRepeatStart("Right", CPNavMove.Bind("Right"))
         return
     CPNavMove("Right")
 }
@@ -3695,6 +3960,7 @@ CPNavSwitchTab(dir) {
     CPFocusVisualNavHwnd := tab.Hwnd
     CPSetTabFocusIndicator(true)
     CPRenderCustomTabBar(true)
+    SetTimer(CPRedrawActiveTabPage, -1)
     SetTimer(CPEnsureFocusedControlVisible, -1)
 }
 
@@ -3719,6 +3985,8 @@ try Hotkey("$Down", CPNavDown, "On")
 try Hotkey("$Up", CPNavUp, "On")
 try Hotkey("$Right", CPNavRight, "On")
 try Hotkey("$Left", CPNavLeft, "On")
+    try Hotkey("$Right Up", CPKeyboardSliderRepeatRelease.Bind("Right"), "On")
+    try Hotkey("$Left Up", CPKeyboardSliderRepeatRelease.Bind("Left"), "On")
     try Hotkey("$Enter", CPNavEnter, "On")
     try Hotkey("$NumpadEnter", CPNavEnter, "On")
     try Hotkey("$Space", CPNavSpace, "On")
@@ -6329,14 +6597,17 @@ StudyLibraryRunBridge(slState, slAction, slGroupId := 0, slVersion := 0) {
         slPython, slBridge, slAction, slState["database"], slState["outputDir"]
     )
     if (slAction = "detail" || slAction = "set-metadata"
-        || slAction = "set-anki" || slAction = "remove-version") {
+        || slAction = "set-anki" || slAction = "save-edit"
+        || slAction = "revert-edit" || slAction = "remove-version") {
         slCommand .= " --group-id " Integer(slGroupId)
     }
-    if (slAction = "detail" || slAction = "remove-version")
+    if (slAction = "detail" || slAction = "save-edit"
+        || slAction = "revert-edit" || slAction = "remove-version")
         slCommand .= " --version " Integer(slVersion)
     DbgCP("Study Library bridge -> " slCommand)
     slBridgeOperation := (slAction = "set-metadata" || slAction = "bulk-metadata"
-        || slAction = "set-anki" || slAction = "remove-version")
+        || slAction = "set-anki" || slAction = "save-edit"
+        || slAction = "revert-edit" || slAction = "remove-version")
         ? "updated" : "read"
     try slExitCode := RunWait(slCommand, A_ScriptDir, "Hide")
     catch as slBridgeError {
@@ -6375,6 +6646,7 @@ StudyLibraryClearDetail(slState, slMessage := "Select an explanation.") {
     slState["currentProvider"] := ""
     slState["currentModel"] := ""
     slState["currentPrompt"] := ""
+    slState["currentManuallyEditedAt"] := ""
     slState["detailTitle"].Value := slMessage
     slState["metadata"].Value := ""
     slState["source"].Value := ""
@@ -6388,6 +6660,10 @@ StudyLibraryClearDetail(slState, slMessage := "Select an explanation.") {
     StudyLibrarySyncVersionNavigation(slState)
     if slState.Has("studyButton")
         slState["studyButton"].Enabled := false
+    if slState.Has("editExplanationButton")
+        slState["editExplanationButton"].Enabled := false
+    if slState.Has("copyButton")
+        slState["copyButton"].Enabled := false
     slState["sectionDdl"].Delete()
     slState["sectionDdl"].Add(["Full explanation"])
     slState["sectionDdl"].Choose(1)
@@ -6415,6 +6691,8 @@ StudyLibrarySyncVersionNavigation(slState) {
         )
         if slVersionEntry["preferred"]
             slLabel .= "  (latest)"
+        if slVersionEntry.Has("manuallyEdited") && slVersionEntry["manuallyEdited"]
+            slLabel .= "  •  manually edited"
     }
     if slState.Has("versionView")
         slState["versionView"].Value := slLabel
@@ -6431,6 +6709,8 @@ StudyLibrarySyncVersionNavigation(slState) {
 }
 
 StudyLibraryStepVersion(slState, slDirection, *) {
+    if (slState.Has("editing") && slState["editing"])
+        return
     slIndex := slState["versionDdl"].Value
     slTargetIndex := slIndex + slDirection
     if (slIndex < 1 || slTargetIndex < 1
@@ -6597,6 +6877,8 @@ StudyLibraryLoadGroup(slState, slGroupId, slVersion := 0) {
     slSpeaker := slDetail.Length >= 12 ? StudyLibraryHexDecode(slDetail[12]) : ""
     slTags := slDetail.Length >= 13 ? StudyLibraryHexDecode(slDetail[13]) : ""
     slAddedToAnkiAt := slDetail.Length >= 14 ? StudyLibraryHexDecode(slDetail[14]) : ""
+    slManuallyEditedAt := slDetail.Length >= 15
+        ? StudyLibraryHexDecode(slDetail[15]) : ""
     slState["currentVersion"] := slSelectedVersion
     slState["currentChapter"] := slChapter
     slState["currentSpeaker"] := slSpeaker
@@ -6606,6 +6888,7 @@ StudyLibraryLoadGroup(slState, slGroupId, slVersion := 0) {
     slState["currentProvider"] := slProvider
     slState["currentModel"] := slModel
     slState["currentPrompt"] := slPrompt
+    slState["currentManuallyEditedAt"] := slManuallyEditedAt
 
     slState["suspend"] := true
     slState["versions"] := []
@@ -6617,16 +6900,21 @@ StudyLibraryLoadGroup(slState, slGroupId, slVersion := 0) {
         slVersionNumber := Integer(slVersionRow[2])
         slVersionDate := StudyLibraryHexDecode(slVersionRow[4])
         slPreferred := Integer(slVersionRow[3])
+        slManuallyEditedAt := slVersionRow.Length >= 5
+            ? StudyLibraryHexDecode(slVersionRow[5]) : ""
         slVersionEntry := Map(
             "id", Integer(slVersionRow[1]),
             "version", slVersionNumber,
             "preferred", slPreferred,
-            "created", slVersionDate
+            "created", slVersionDate,
+            "manuallyEdited", slManuallyEditedAt != ""
         )
         slState["versions"].Push(slVersionEntry)
         slVersionLabel := Format("v{1:02}  •  {2}", slVersionNumber, slVersionDate)
         if slPreferred
             slVersionLabel .= "  (latest)"
+        if (slManuallyEditedAt != "")
+            slVersionLabel .= "  •  manually edited"
         slVersionLabels.Push(slVersionLabel)
         if (slVersionNumber = slSelectedVersion)
             slVersionIndex := slVersionLabels.Length
@@ -6645,6 +6933,10 @@ StudyLibraryLoadGroup(slState, slGroupId, slVersion := 0) {
         slState["removeVersionButton"].Enabled := slVersionLabels.Length > 0
     if slState.Has("studyButton")
         slState["studyButton"].Enabled := true
+    if slState.Has("editExplanationButton")
+        slState["editExplanationButton"].Enabled := true
+    if slState.Has("copyButton")
+        slState["copyButton"].Enabled := true
     slState["suspend"] := false
     StudyLibrarySyncVersionNavigation(slState)
 
@@ -6769,6 +7061,8 @@ StudyReaderSyncSectionNavigation(srState, *) {
 }
 
 StudyReaderSelectFullSection(srState, *) {
+    if (srState.Has("editing") && srState["editing"])
+        return
     if (srState["currentGroupId"] <= 0 || !srState["sections"].Length)
         return
     srState["sectionDdl"].Choose(1)
@@ -6776,6 +7070,8 @@ StudyReaderSelectFullSection(srState, *) {
 }
 
 StudyReaderStepSection(srState, srDirection, *) {
+    if (srState.Has("editing") && srState["editing"])
+        return
     srSectionCount := Max(0, srState["sections"].Length - 1)
     if (srSectionCount <= 0)
         return
@@ -6889,6 +7185,8 @@ StudyReaderRestoreEntryView(srState, srGroupId) {
 }
 
 StudyReaderStepEntry(srState, srDirection, *) {
+    if (srState.Has("editing") && srState["editing"])
+        return
     srIndex := StudyReaderEntryIndex(srState)
     srTargetIndex := srIndex + srDirection
     if (srIndex <= 0 || srTargetIndex < 1
@@ -6905,7 +7203,8 @@ StudyReaderStepEntry(srState, srDirection, *) {
 
 StudyReaderAnkiChanged(srState, *) {
     global CPStudyLibraryState
-    if (srState["suspendAnki"] || srState["currentGroupId"] <= 0)
+    if ((srState.Has("editing") && srState["editing"])
+        || srState["suspendAnki"] || srState["currentGroupId"] <= 0)
         return
     srDesired := srState["ankiCheck"].Value ? 1 : 0
     srPrevious := srState["currentAddedToAnkiAt"]
@@ -6938,10 +7237,301 @@ StudyReaderAnkiChanged(srState, *) {
 }
 
 StudyReaderToggleAnki(srState, *) {
-    if (srState["currentGroupId"] <= 0)
+    if ((srState.Has("editing") && srState["editing"])
+        || srState["currentGroupId"] <= 0)
         return
     srState["ankiCheck"].Value := srState["ankiCheck"].Value ? 0 : 1
     StudyReaderAnkiChanged(srState)
+}
+
+StudyReaderSetEditing(srState, srEditing) {
+    srState["editing"] := srEditing
+    srState["explanation"].Opt(srEditing ? "-ReadOnly" : "+ReadOnly")
+    srState["copyButton"].Visible := !srEditing
+    srState["editExplanationButton"].Visible := !srEditing
+    srState["saveEditButton"].Visible := srEditing
+    srState["cancelEditButton"].Visible := srEditing
+    for srControl in [
+        srState["previousEntry"], srState["nextEntry"], srState["ankiCheck"],
+        srState["previousVersion"], srState["nextVersion"],
+        srState["fullSectionButton"], srState["previousSection"],
+        srState["nextSection"]
+    ]
+        srControl.Enabled := !srEditing
+    if srEditing {
+        srState["explanationLabel"].Value := srState["editMode"] = "section"
+            ? "Editing section (heading protected)"
+            : "Editing full explanation (section headings affect navigation)"
+        srState["explanation"].Focus()
+    } else {
+        srState["explanationLabel"].Value := "Explanation"
+        StudyLibrarySyncVersionNavigation(srState)
+        StudyReaderSyncEntryNavigation(srState)
+        StudyReaderSyncSectionNavigation(srState)
+        srState["copyButton"].Enabled := srState["currentGroupId"] > 0
+        srState["editExplanationButton"].Enabled := srState["currentGroupId"] > 0
+    }
+    try {
+        srState["gui"].GetClientPos(,, &srClientW, &srClientH)
+        StudyReaderResize(srState, srState["gui"], 0, srClientW, srClientH)
+    }
+}
+
+StudyReaderBeginSectionEdit(srState, *) {
+    srIndex := srState["sectionDdl"].Value
+    if (srState["currentGroupId"] <= 0 || srIndex <= 1
+        || srIndex > srState["sections"].Length)
+        return
+    srSection := srState["sections"][srIndex]
+    srState["editMode"] := "section"
+    srState["editSectionIndex"] := srIndex
+    srState["editSectionKey"] := srSection["key"]
+    srState["editOriginalText"] := srSection["content"]
+    srState["explanation"].Value := srSection["content"]
+    StudyReaderSetEditing(srState, true)
+}
+
+StudyReaderBeginFullEdit(srState, *) {
+    if (srState["currentGroupId"] <= 0 || !srState["sections"].Length)
+        return
+    srWarning := "Full-explanation editing also allows section headings to be changed. "
+        . "Those headings are used for the Reader's section navigation, so deleting "
+        . "or renaming them may reduce the available sections.`n`nContinue?"
+    if (CPThemedOwnedMessage(
+        srState["gui"].Hwnd, srWarning, "Edit full explanation",
+        "yesno", "warning"
+    ) != "Yes")
+        return
+    srState["editMode"] := "full"
+    srState["editSectionIndex"] := 1
+    srState["editSectionKey"] := "full"
+    srState["editOriginalText"] := srState["sections"][1]["content"]
+    srState["explanation"].Value := srState["sections"][1]["content"]
+    StudyReaderSetEditing(srState, true)
+}
+
+StudyReaderRemoveJapaneseReadings(srText) {
+    ; Remove only kana parentheticals attached to a word containing kanji.
+    ; Ordinary explanatory parentheses, Latin abbreviations and translations
+    ; therefore remain untouched.
+    srReadingPattern := "([一-龯々〆ヵヶ][一-龯々〆ヵヶぁ-ゖー]*)[ \t]*[\(（][ぁ-ゖー・ \t]+[\)）]"
+    return RegExReplace(srText, srReadingPattern, "$1")
+}
+
+StudyReaderRestoreCopyButton(srState, srSerial, *) {
+    try {
+        if (!srState.Has("copyFeedbackSerial")
+            || srState["copyFeedbackSerial"] != srSerial)
+            return
+        srState["copyButton"].Text := "Copy..."
+    }
+}
+
+StudyReaderCopyText(srState, srText, *) {
+    srText := Trim(srText, " `t`r`n")
+    if (srText = "")
+        return
+    A_Clipboard := srText
+    srSerial := srState.Has("copyFeedbackSerial")
+        ? srState["copyFeedbackSerial"] + 1 : 1
+    srState["copyFeedbackSerial"] := srSerial
+    srState["copyButton"].Text := "Copied!"
+    SetTimer(StudyReaderRestoreCopyButton.Bind(srState, srSerial), -1100)
+}
+
+StudyReaderCopyJapaneseWithoutReadings(srState, srText, *) {
+    StudyReaderCopyText(srState, StudyReaderRemoveJapaneseReadings(srText))
+}
+
+StudyReaderShowCopyMenu(srState, *) {
+    if ((srState.Has("editing") && srState["editing"])
+        || srState["currentGroupId"] <= 0
+        || !srState["sections"].Length)
+        return
+    srSectionIndex := srState["sectionDdl"].Value
+    if (srSectionIndex < 1 || srSectionIndex > srState["sections"].Length)
+        return
+    srCurrentSection := srState["sections"][srSectionIndex]
+    srChoices := ["Copy current section", "Copy full explanation"]
+    srActions := [
+        StudyReaderCopyText.Bind(srState, srCurrentSection["content"]),
+        StudyReaderCopyText.Bind(srState, srState["sections"][1]["content"])
+    ]
+    if (srCurrentSection["key"] = "original") {
+        srChoices.Push("Copy Japanese without readings")
+        srActions.Push(StudyReaderCopyJapaneseWithoutReadings.Bind(
+            srState, srCurrentSection["content"]
+        ))
+    }
+    srChoice := CPThemedChoicePopup(
+        srState["gui"].Hwnd, srState["copyButton"].Hwnd, srChoices
+    )
+    if (srChoice >= 1 && srChoice <= srActions.Length)
+        srActions[srChoice].Call()
+}
+
+StudyReaderShowEditMenu(srState, *) {
+    if ((srState.Has("editing") && srState["editing"])
+        || srState["currentGroupId"] <= 0)
+        return
+    srChoices := []
+    srActions := []
+    srSectionIndex := srState["sectionDdl"].Value
+    if (srSectionIndex > 1 && srSectionIndex <= srState["sections"].Length) {
+        srChoices.Push("Edit current section...")
+        srActions.Push(StudyReaderBeginSectionEdit.Bind(srState))
+    }
+    srChoices.Push("Edit full explanation...")
+    srActions.Push(StudyReaderBeginFullEdit.Bind(srState))
+    if (srState.Has("currentManuallyEditedAt")
+        && srState["currentManuallyEditedAt"] != "") {
+        srChoices.Push("Revert manual edits...")
+        srActions.Push(StudyReaderRevertEdit.Bind(srState))
+    }
+    srChoice := CPThemedChoicePopup(
+        srState["gui"].Hwnd, srState["editExplanationButton"].Hwnd,
+        srChoices
+    )
+    if (srChoice >= 1 && srChoice <= srActions.Length)
+        srActions[srChoice].Call()
+}
+
+StudyReaderCancelEdit(srState, *) {
+    if !(srState.Has("editing") && srState["editing"])
+        return
+    StudyReaderSetEditing(srState, false)
+    StudyLibrarySectionChanged(srState)
+}
+
+StudyReaderWriteEditFile(srState, srText) {
+    srPath := srState["outputDir"] "\manual_edit.txt"
+    try FileDelete(srPath)
+    srFile := 0
+    try {
+        srFile := FileOpen(srPath, "w", "UTF-8-RAW")
+        if !srFile
+            throw Error("The temporary edit file could not be created.")
+        srFile.Write(srText)
+        srFile.Close()
+        return true
+    } catch as srWriteError {
+        try srFile.Close()
+        CPThemedOwnedMessage(
+            srState["gui"].Hwnd,
+            "The edited explanation could not be prepared for saving.`n`n"
+            . srWriteError.Message,
+            "Edit explanation", "ok", "error"
+        )
+        return false
+    }
+}
+
+StudyReaderRestoreSectionAfterReload(srState, srSectionKey) {
+    srTargetIndex := 1
+    if (srSectionKey != "full") {
+        for srIndex, srSection in srState["sections"] {
+            if (srSection["key"] = srSectionKey) {
+                srTargetIndex := srIndex
+                break
+            }
+        }
+    }
+    srState["sectionDdl"].Choose(srTargetIndex)
+    StudyLibrarySectionChanged(srState)
+}
+
+StudyReaderReloadAfterEdit(srState, srSectionKey) {
+    global CPStudyLibraryState
+    srGroupId := srState["currentGroupId"]
+    srVersion := srState["currentVersion"]
+    StudyLibraryLoadGroup(srState, srGroupId, srVersion)
+    StudyReaderRestoreSectionAfterReload(srState, srSectionKey)
+    if (CPStudyLibraryState && CPStudyLibraryState.Has("gui")
+        && CPStudyLibraryState["currentGroupId"] = srGroupId) {
+        try StudyLibraryLoadGroup(CPStudyLibraryState, srGroupId, srVersion)
+    }
+}
+
+StudyReaderSaveEdit(srState, *) {
+    if !(srState.Has("editing") && srState["editing"])
+        return
+    srEditedText := srState["explanation"].Value
+    srSectionKey := srState["editSectionKey"]
+    if (srState["editMode"] = "full") {
+        if (Trim(srEditedText) = "") {
+            CPThemedOwnedMessage(
+                srState["gui"].Hwnd, "An explanation cannot be saved empty.",
+                "Edit explanation", "ok", "warning"
+            )
+            return
+        }
+        srUpdatedFullText := srEditedText
+    } else {
+        srOldSectionText := srState["editOriginalText"]
+        srFullText := srState["sections"][1]["content"]
+        if (srOldSectionText = "") {
+            CPThemedOwnedMessage(
+                srState["gui"].Hwnd,
+                "This section cannot be replaced safely. Use Edit full explanation instead.",
+                "Edit explanation", "ok", "warning"
+            )
+            return
+        }
+        srFirstPos := InStr(srFullText, srOldSectionText, true)
+        srSecondPos := srFirstPos
+            ? InStr(srFullText, srOldSectionText, true,
+                srFirstPos + StrLen(srOldSectionText))
+            : 0
+        if (!srFirstPos || srSecondPos) {
+            CPThemedOwnedMessage(
+                srState["gui"].Hwnd,
+                "The selected section could not be matched uniquely in the full "
+                . "explanation. No change was made; use Edit full explanation instead.",
+                "Edit explanation", "ok", "warning"
+            )
+            return
+        }
+        srUpdatedFullText := SubStr(srFullText, 1, srFirstPos - 1)
+            . srEditedText
+            . SubStr(srFullText, srFirstPos + StrLen(srOldSectionText))
+    }
+    if (srUpdatedFullText = srState["sections"][1]["content"])
+        return StudyReaderCancelEdit(srState)
+    if !StudyReaderWriteEditFile(srState, srUpdatedFullText)
+        return
+
+    srState["saveEditButton"].Enabled := false
+    srSaved := StudyLibraryRunBridge(
+        srState, "save-edit", srState["currentGroupId"], srState["currentVersion"]
+    )
+    srState["saveEditButton"].Enabled := true
+    if !srSaved
+        return
+    StudyReaderSetEditing(srState, false)
+    StudyReaderReloadAfterEdit(srState, srSectionKey)
+}
+
+StudyReaderRevertEdit(srState, *) {
+    if (srState["currentGroupId"] <= 0
+        || !srState.Has("currentManuallyEditedAt")
+        || srState["currentManuallyEditedAt"] = "")
+        return
+    srQuestion := "Discard all manual changes to this generated version and restore "
+        . "the untouched model output?"
+    if (CPThemedOwnedMessage(
+        srState["gui"].Hwnd, srQuestion, "Revert manual edits",
+        "yesno", "warning"
+    ) != "Yes")
+        return
+    srSectionIndex := srState["sectionDdl"].Value
+    srSectionKey := (srSectionIndex >= 1
+        && srSectionIndex <= srState["sections"].Length)
+        ? srState["sections"][srSectionIndex]["key"] : "full"
+    if !StudyLibraryRunBridge(
+        srState, "revert-edit", srState["currentGroupId"], srState["currentVersion"]
+    )
+        return
+    StudyReaderReloadAfterEdit(srState, srSectionKey)
 }
 
 StudyReaderBindHotkeys(srState) {
@@ -6972,15 +7562,28 @@ StudyReaderUnbindHotkeys(srState) {
     srState["hotkeys"] := Map()
 }
 
-StudyReaderRedraw(srState, *) {
-    StudyLibraryRedraw(srState)
+StudyReaderRedraw(srState, srErase := true, *) {
+    StudyLibraryRedraw(srState, srErase)
 }
 
 StudyReaderResize(srState, srGui, srMinMax, srWidth, srHeight) {
     if (srMinMax = -1 || srWidth < 600 || srHeight < 400)
         return
     srHwnd := srGui.Hwnd
-    if srHwnd
+    srVisible := srHwnd
+        && DllCall("user32\IsWindowVisible", "ptr", srHwnd, "int")
+    srInteractive := srState.Has("interactiveResize")
+        && srState["interactiveResize"]
+    if srInteractive {
+        ; Native Edit controls and the screenshot preview are expensive to
+        ; continuously move and repaint inside Windows' modal sizing loop.
+        ; Keep the existing reader layout stable while the frame is dragged;
+        ; WM_EXITSIZEMOVE performs one exact layout at the released size.
+        srState["deferredResizeWidth"] := srWidth
+        srState["deferredResizeHeight"] := srHeight
+        return
+    }
+    if srVisible
         DllCall("user32\SendMessageW", "ptr", srHwnd, "uint", 0x000B,
             "ptr", 0, "ptr", 0) ; WM_SETREDRAW off
     try {
@@ -7036,10 +7639,32 @@ StudyReaderResize(srState, srGui, srMinMax, srWidth, srHeight) {
         srNextX := srSectionStatusX + srSectionStatusW + srNavGap
         srState["nextSection"].Move(srNextX, srSectionNavY, srArrowW, 30)
         srExplanationLabelY := srSectionNavY + 35
-        srState["explanationLabel"].Move(
-            srMargin, srExplanationLabelY, srLeftW, 22
+        srCopyButtonW := 88, srEditButtonW := 88
+        srSaveButtonW := 72, srCancelButtonW := 78
+        srEditButtonY := srExplanationLabelY - 3
+        srEditButtonX := srMargin + srLeftW - srEditButtonW
+        srCopyButtonX := srEditButtonX - 6 - srCopyButtonW
+        srState["copyButton"].Move(
+            srCopyButtonX, srEditButtonY, srCopyButtonW, 27
         )
-        srExplanationY := srExplanationLabelY + 23
+        srState["editExplanationButton"].Move(
+            srEditButtonX, srEditButtonY, srEditButtonW, 27
+        )
+        srCancelButtonX := srMargin + srLeftW - srCancelButtonW
+        srSaveButtonX := srCancelButtonX - 6 - srSaveButtonW
+        srState["saveEditButton"].Move(
+            srSaveButtonX, srEditButtonY, srSaveButtonW, 27
+        )
+        srState["cancelEditButton"].Move(
+            srCancelButtonX, srEditButtonY, srCancelButtonW, 27
+        )
+        srLabelReserve := srState.Has("editing") && srState["editing"]
+            ? srSaveButtonW + srCancelButtonW + 14
+            : srCopyButtonW + srEditButtonW + 14
+        srState["explanationLabel"].Move(
+            srMargin, srExplanationLabelY, Max(60, srLeftW - srLabelReserve), 22
+        )
+        srExplanationY := srExplanationLabelY + 28
         srState["explanation"].Move(
             srMargin, srExplanationY, srLeftW,
             Max(80, srBottom - srExplanationY)
@@ -7080,15 +7705,17 @@ StudyReaderResize(srState, srGui, srMinMax, srWidth, srHeight) {
             srContextX, srSourceY, srContextW,
             Max(60, srBottom - srSourceY)
         )
-        SetTimer(srState["imageLayoutCallback"], -100)
+        if srVisible
+            StudyLibraryQueueImageLayout(srState, 80)
     } finally {
-        if srHwnd {
+        if srVisible {
             DllCall("user32\SendMessageW", "ptr", srHwnd, "uint", 0x000B,
                 "ptr", 1, "ptr", 0) ; WM_SETREDRAW on
-            StudyReaderRedraw(srState)
+            StudyReaderRedraw(srState, true)
         }
     }
-    SetTimer(srState["redrawCallback"], -160)
+    if srVisible
+        SetTimer(srState["redrawCallback"], -160)
 }
 
 StudyReaderSaveBounds(srState) {
@@ -7148,8 +7775,90 @@ StudyReaderClampPosition(srGui, &srX, &srY) {
     }
 }
 
+StudyWindowRevealFinished(studyGui, positionOptions := "") {
+    if !(IsObject(studyGui) && studyGui.Hwnd)
+        return
+    ; Native ListView/combo/button surfaces are not fully composed while their
+    ; parent is hidden. Paint one complete frame just beyond the virtual desktop
+    ; so the first on-screen frame is already themed and populated.
+    studyGui.GetPos(,, &studyWarmW, &studyWarmH)
+    studyVirtualLeft := DllCall("user32\GetSystemMetrics", "int", 76, "int")
+    studyVirtualTop := DllCall("user32\GetSystemMetrics", "int", 77, "int")
+    studyVirtualW := DllCall("user32\GetSystemMetrics", "int", 78, "int")
+    studyWarmX := studyVirtualLeft + studyVirtualW + Max(100, studyWarmW)
+    studyGui.Show("NA x" studyWarmX " y" studyVirtualTop)
+    ; Several native controls create their final themed surfaces only on the
+    ; first visible Show. Reapply the palette while that Show is safely
+    ; off-screen so buttons, combo boxes and scrollbars do not retain their
+    ; default light appearance when moved on-screen.
+    CPApplyOwnedDialogTheme(studyGui)
+    try DllCall("user32\RedrawWindow", "ptr", studyGui.Hwnd, "ptr", 0, "ptr", 0
+        , "uint", 0x0001 | 0x0004 | 0x0080 | 0x0100 | 0x0400)
+    try DllCall("dwmapi\DwmFlush")
+    studyGui.Hide()
+
+    ; Establish the final bounds while the window is still hidden. Revealing it
+    ; without another geometry change prevents the first-frame position jump.
+    finalOptions := "Hide"
+    if (Trim(positionOptions) != "")
+        finalOptions .= " " positionOptions
+    studyGui.Show(finalOptions)
+    ; All painting and native theming has already happened while hidden. Avoid
+    ; another full parent/child erase here: on some Windows/DPI combinations it
+    ; exposes a white intermediate surface during the first composition frame.
+    studyGui.Show("NA")
+}
+
+StudyWindowEnableLiveResize(studyState, *) {
+    if !StudyLibraryStateAlive(studyState)
+        return
+    if !(studyState.Has("sizeCallback") && studyState["sizeCallback"])
+        return
+    try studyState["gui"].OnEvent("Size", studyState["sizeCallback"])
+}
+
+StudyWindowSizeMoveMessage(wParam, lParam, msg, hwnd) {
+    global CPStudyLibraryState, CPStudyReaderState
+    for studyState in [CPStudyLibraryState, CPStudyReaderState] {
+        if !StudyLibraryStateAlive(studyState)
+            continue
+        if (studyState["gui"].Hwnd != hwnd)
+            continue
+        if (msg = 0x0231) { ; WM_ENTERSIZEMOVE
+            studyState["interactiveResize"] := true
+            studyState["imageLayoutLastTick"] := 0
+            try SetTimer(studyState["imageLayoutCallback"], 0)
+            studyState["imageLayoutQueued"] := false
+            try SetTimer(studyState["redrawCallback"], 0)
+        } else if (msg = 0x0232) { ; WM_EXITSIZEMOVE
+            studyState["interactiveResize"] := false
+            ; The Size callback deliberately left all child controls untouched
+            ; during the drag. Lay them out once at the final client size now.
+            try {
+                studyState["gui"].GetClientPos(, , &studyFinalW, &studyFinalH)
+                studyState["sizeCallback"].Call(
+                    studyState["gui"], 0, studyFinalW, studyFinalH
+                )
+            }
+            ; Finish with the exact final preview size and one complete frame.
+            try SetTimer(studyState["imageLayoutCallback"], 0)
+            studyState["imageLayoutQueued"] := false
+            StudyLibraryShowImage(studyState)
+            StudyLibraryRedraw(studyState, true)
+        }
+        break
+    }
+}
+
 StudyReaderClose(srState, *) {
     global CPStudyReaderState
+    if (srState.Has("editing") && srState["editing"]
+        && CPThemedOwnedMessage(
+            srState["gui"].Hwnd,
+            "Discard the unsaved explanation edit?",
+            "Unsaved explanation edit", "yesno", "warning"
+        ) != "Yes")
+        return
     try SetTimer(srState["imageLayoutCallback"], 0)
     try SetTimer(srState["redrawCallback"], 0)
     try StudyReaderRememberEntryView(srState)
@@ -7336,11 +8045,23 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
     )
     srNextSection := srGui.Add("Button", "x630 y117 w34 h30 Disabled", "›")
     srExplanationLabel := srGui.Add(
-        "Text", "x14 y152 w650 h22", "Explanation"
+        "Text", "x14 y152 w470 h22", "Explanation"
     )
     srExplanationLabel.SetFont("Bold")
+    srCopyButton := srGui.Add(
+        "Button", "x482 y149 w88 h27 Disabled", "Copy..."
+    )
+    srEditExplanationButton := srGui.Add(
+        "Button", "x576 y149 w88 h27 Disabled", "Edit..."
+    )
+    srSaveEditButton := srGui.Add(
+        "Button", "x504 y149 w72 h27 Hidden", "Save"
+    )
+    srCancelEditButton := srGui.Add(
+        "Button", "x582 y149 w82 h27 Hidden", "Cancel"
+    )
     srExplanation := srGui.Add(
-        "Edit", "x14 y175 w650 h489 ReadOnly Multi VScroll"
+        "Edit", "x14 y180 w650 h484 ReadOnly Multi VScroll"
     )
     srExplanation.SetFont("s11", "Segoe UI")
 
@@ -7396,6 +8117,11 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
         "sectionStatus", srSectionStatus,
         "nextSection", srNextSection,
         "explanationLabel", srExplanationLabel,
+        "copyButton", srCopyButton,
+        "copyFeedbackSerial", 0,
+        "editExplanationButton", srEditExplanationButton,
+        "saveEditButton", srSaveEditButton,
+        "cancelEditButton", srCancelEditButton,
         "explanation", srExplanation,
         "contextTitle", srContextTitle,
         "metadata", srMetadata,
@@ -7409,6 +8135,9 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
         "imageArea", Map("x", 682, "y", 145, "w", 372, "h", 242),
         "media", [],
         "mediaIndex", 0,
+        "imageLayoutQueued", false,
+        "imageLayoutLastTick", 0,
+        "interactiveResize", false,
         "sourceLabel", srSourceLabel,
         "source", srSource,
         "currentGroupId", 0,
@@ -7421,10 +8150,17 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
         "currentProvider", "",
         "currentModel", "",
         "currentPrompt", "",
+        "currentManuallyEditedAt", "",
+        "editing", false,
+        "editMode", "",
+        "editSectionIndex", 1,
+        "editSectionKey", "full",
+        "editOriginalText", "",
         "suspend", false
     )
     srState["imageLayoutCallback"] := StudyLibraryShowImage.Bind(srState)
     srState["redrawCallback"] := StudyReaderRedraw.Bind(srState)
+    srState["sizeCallback"] := StudyReaderResize.Bind(srState)
     srState["sectionNavCallback"] := StudyReaderSyncSectionNavigation.Bind(srState)
     srState["entryNavCallback"] := StudyReaderSyncEntryNavigation.Bind(srState)
     StudyReaderSetEntrySequence(srState, srGroups, srGroupId)
@@ -7448,10 +8184,17 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
     srNextSection.OnEvent(
         "Click", StudyReaderStepSection.Bind(srState, 1)
     )
+    srCopyButton.OnEvent(
+        "Click", StudyReaderShowCopyMenu.Bind(srState)
+    )
+    srEditExplanationButton.OnEvent(
+        "Click", StudyReaderShowEditMenu.Bind(srState)
+    )
+    srSaveEditButton.OnEvent("Click", StudyReaderSaveEdit.Bind(srState))
+    srCancelEditButton.OnEvent("Click", StudyReaderCancelEdit.Bind(srState))
     srPreviousImage.OnEvent("Click", StudyLibraryPreviousImage.Bind(srState))
     srNextImage.OnEvent("Click", StudyLibraryNextImage.Bind(srState))
     srOpenImage.OnEvent("Click", StudyLibraryOpenImage.Bind(srState))
-    srGui.OnEvent("Size", StudyReaderResize.Bind(srState))
     srGui.OnEvent("Escape", StudyReaderClose.Bind(srState))
     srGui.OnEvent("Close", StudyReaderClose.Bind(srState))
     StudyReaderBindHotkeys(srState)
@@ -7483,17 +8226,25 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
     ; their native dark state after that transition so Windows does not repaint
     ; them with the default light button/check-box theme.
     CPApplyOwnedDialogTheme(srGui)
+    ; The explicit hidden sizing pass above queued image/repaint work intended
+    ; for interactive resizing. The loaded image is already laid out
+    ; synchronously, so do not let those startup timers rebuild the visible UI.
+    try SetTimer(srState["imageLayoutCallback"], 0)
+    try SetTimer(srState["redrawCallback"], 0)
 
     srSavedX := IniRead(iniPath, "study_reader_view", "x", "__missing__")
     srSavedY := IniRead(iniPath, "study_reader_view", "y", "__missing__")
     if ((srSavedX is number) && (srSavedY is number)) {
         srSavedX := Integer(srSavedX), srSavedY := Integer(srSavedY)
         StudyReaderClampPosition(srGui, &srSavedX, &srSavedY)
-        srGui.Show("x" srSavedX " y" srSavedY)
+        StudyWindowRevealFinished(srGui, "x" srSavedX " y" srSavedY)
     } else {
-        srGui.Show("Center")
+        StudyWindowRevealFinished(srGui, "Center")
     }
     WinActivate("ahk_id " srGui.Hwnd)
+    ; Show/activation can post one final native Size notification. Wait until
+    ; that startup queue has drained before enabling normal interactive resize.
+    SetTimer(StudyWindowEnableLiveResize.Bind(srState), -300)
 }
 
 StudyLibraryCloseDialog(slDialog, *) {
@@ -8685,18 +9436,24 @@ StudyLibraryRefresh(slState, *) {
         SetTimer(StudyLibraryRefreshStorage.Bind(slState, false), -10)
 }
 
-StudyLibraryRedraw(slState, *) {
+StudyLibraryRedraw(slState, slErase := true, *) {
     if !StudyLibraryStateAlive(slState)
         return
-    ; A full parent + child erase is important after Windows performs a single
-    ; maximize/restore jump. Without it, themed child controls can leave pieces
-    ; of their previous borders behind on the newly exposed dark background.
+    ; A full parent + child erase is useful after a discrete maximize/restore,
+    ; but doing it synchronously for every mouse-move is the source of visible
+    ; flashing in the large ListView/Edit regions. Interactive resizing uses a
+    ; non-erasing invalidation and receives one complete repaint on exit.
+    slFlags := slErase
+        ? (0x0001 | 0x0004 | 0x0080 | 0x0100 | 0x0400)
+        ; Clear the old child positions, but leave painting asynchronous so
+        ; successive mouse movements are composed into one frame.
+        : (0x0001 | 0x0004 | 0x0080)
     try DllCall(
         "user32\RedrawWindow",
         "ptr", slState["gui"].Hwnd,
         "ptr", 0,
         "ptr", 0,
-        "uint", 0x0001 | 0x0004 | 0x0080 | 0x0100 | 0x0400
+        "uint", slFlags
     )
 }
 
@@ -8704,7 +9461,20 @@ StudyLibraryResize(slState, slGui, slMinMax, slWidth, slHeight) {
     if (slMinMax = -1 || slWidth < 500 || slHeight < 350)
         return
     slHwnd := slGui.Hwnd
-    if slHwnd
+    slVisible := slHwnd
+        && DllCall("user32\IsWindowVisible", "ptr", slHwnd, "int")
+    slInteractive := slState.Has("interactiveResize")
+        && slState["interactiveResize"]
+    if slInteractive {
+        ; Defer the heavy ListView, Edit, and bitmap layout until the user
+        ; releases the sizing border. The frame remains responsive and newly
+        ; exposed space uses the window's normal background instead of forcing
+        ; every native child to erase and repaint for every mouse pixel.
+        slState["deferredResizeWidth"] := slWidth
+        slState["deferredResizeHeight"] := slHeight
+        return
+    }
+    if slVisible
         DllCall("user32\SendMessageW", "ptr", slHwnd, "uint", 0x000B,
             "ptr", 0, "ptr", 0) ; WM_SETREDRAW off
     try {
@@ -8834,17 +9604,19 @@ StudyLibraryResize(slState, slGui, slMinMax, slWidth, slHeight) {
     slState["storageButton"].Move(
         slWidth - slMargin - slStorageW, slFooterY, slStorageW, 27
     )
-    StudyLibraryQueueImageLayout(slState, 80)
+    if slVisible
+        StudyLibraryQueueImageLayout(slState, 80)
     } finally {
-        if slHwnd {
+        if slVisible {
             DllCall("user32\SendMessageW", "ptr", slHwnd, "uint", 0x000B,
                 "ptr", 1, "ptr", 0) ; WM_SETREDRAW on
-            StudyLibraryRedraw(slState)
+            StudyLibraryRedraw(slState, true)
         }
     }
     ; Maximize/restore composition can finish after the Size event returns.
     ; Coalesce one final repaint once Windows has settled on the new bounds.
-    SetTimer(slState["redrawCallback"], -160)
+    if slVisible
+        SetTimer(slState["redrawCallback"], -160)
 }
 
 StudyLibrarySaveBounds(slState) {
@@ -8901,12 +9673,16 @@ OpenStandaloneStudyLibrary(*) {
 }
 
 OpenStudyLibraryWindow(slStandalone := false) {
-    global CPStudyLibraryState, studyLibraryDir, ui, iniPath
+    global CPStudyLibraryState, studyLibraryDir, ui, iniPath, controlDarkMode
     if (CPStudyLibraryState && CPStudyLibraryState.Has("gui")) {
         try {
             CPStudyLibraryState["gui"].Show()
             WinActivate("ahk_id " CPStudyLibraryState["gui"].Hwnd)
             StudyLibraryRefresh(CPStudyLibraryState)
+            ; A programmatically selected ListView row remains an inactive gray
+            ; selection until the table owns keyboard focus. Without this,
+            ; Windows consumes the first double-click merely to focus it.
+            CPStudyLibraryState["list"].Focus()
             return
         }
     }
@@ -8925,6 +9701,12 @@ OpenStudyLibraryWindow(slStandalone := false) {
     )
     slGui.MarginX := 14, slGui.MarginY := 14
     slGui.SetFont("s10", "Segoe UI")
+    ; Establish the window palette before creating native child controls. If a
+    ; ListView is born with the default Windows palette, its first visible frame
+    ; can flash white even though the later dark-theme pass is done while hidden.
+    slInitialColors := CPPalette(controlDarkMode)
+    slGui.BackColor := slInitialColors["window"]
+    CPApplyOwnedDialogTheme(slGui)
 
     slColumns := StudyLibraryCreateColumns()
     slColumnLabels := []
@@ -8947,10 +9729,17 @@ OpenStudyLibraryWindow(slStandalone := false) {
     slColumnsButton := slGui.Add("Button", "x132 y52 w92 h30", "Columns...")
     slEditDetailsButton := slGui.Add("Button", "x232 y52 w140 h30 Disabled", "Edit details...")
     slStudyButton := slGui.Add("Button", "x380 y52 w82 h30 Disabled", "Study")
+    slListOptions := "x14 y94 w430 h530 Grid Multi"
+        . " Background" slInitialColors["surface"]
+        . " c" slInitialColors["text"]
     slList := slGui.Add(
-        "ListView", "x14 y94 w430 h530 Grid Multi",
+        "ListView", slListOptions,
         slColumnLabels
     )
+    ; The table is the largest repainted native surface in this window. Native
+    ; ListView double-buffering removes row/grid flashing during live resizing
+    ; without changing its dark-mode colors or selection behavior.
+    SendMessage(0x1036, 0x10000, 0x10000, slList.Hwnd)
     slList.ModifyCol(9, 0)
     slDetailTitle := slGui.Add("Text", "x468 y94 w638 h24 +0x200", "Select an explanation.")
     slDetailTitle.SetFont("s11 Bold")
@@ -9045,6 +9834,8 @@ OpenStudyLibraryWindow(slStandalone := false) {
         "headerHwnd", 0,
         "lockingInternalColumn", false,
         "imageLayoutQueued", false,
+        "imageLayoutLastTick", 0,
+        "interactiveResize", false,
         "layoutWidth", 900,
         "standaloneWindow", slStandalone,
         "groups", [],
@@ -9093,6 +9884,7 @@ OpenStudyLibraryWindow(slStandalone := false) {
     slState["imageLayoutCallback"] := StudyLibraryRunQueuedImageLayout.Bind(slState)
     slState["redrawCallback"] := StudyLibraryRedraw.Bind(slState)
     slState["listRedrawCallback"] := StudyLibraryRedrawList.Bind(slState)
+    slState["sizeCallback"] := StudyLibraryResize.Bind(slState)
     slState["headerNotifyCallback"] := StudyLibraryHeaderNotify.Bind(slState)
     CPStudyLibraryState := slState
 
@@ -9122,7 +9914,6 @@ OpenStudyLibraryWindow(slStandalone := false) {
     slPreviousImage.OnEvent("Click", StudyLibraryPreviousImage.Bind(slState))
     slNextImage.OnEvent("Click", StudyLibraryNextImage.Bind(slState))
     slOpenImage.OnEvent("Click", StudyLibraryOpenImage.Bind(slState))
-    slGui.OnEvent("Size", StudyLibraryResize.Bind(slState))
     slGui.OnEvent("Escape", StudyLibraryClose.Bind(slState))
     slGui.OnEvent("Close", StudyLibraryClose.Bind(slState))
 
@@ -9161,6 +9952,12 @@ OpenStudyLibraryWindow(slStandalone := false) {
     ; Theme application can recreate native header state, so restore the
     ; filter and sort indicators once the final theme pass is complete.
     StudyLibraryApplyHeaderIndicators(slState)
+    ; Complete startup image/layout work while hidden. Otherwise the deferred
+    ; resize timers can repaint and reposition controls just after first show.
+    try SetTimer(slState["imageLayoutCallback"], 0)
+    slState["imageLayoutQueued"] := false
+    try SetTimer(slState["redrawCallback"], 0)
+    StudyLibraryShowImage(slState)
     slSavedX := IniRead(
         iniPath, "study_library_view", "x", "__missing__"
     )
@@ -9170,10 +9967,17 @@ OpenStudyLibraryWindow(slStandalone := false) {
     if ((slSavedX is number) && (slSavedY is number)) {
         slSavedX := Integer(slSavedX), slSavedY := Integer(slSavedY)
         StudyReaderClampPosition(slGui, &slSavedX, &slSavedY)
-        slGui.Show("x" slSavedX " y" slSavedY)
+        StudyWindowRevealFinished(slGui, "x" slSavedX " y" slSavedY)
     } else
-        slGui.Show("Center")
+        StudyWindowRevealFinished(slGui, "Center")
     WinActivate("ahk_id " slGui.Hwnd)
+    ; Give the populated table focus immediately so its initial selected row is
+    ; active and the first double-click reaches the ListView event handler.
+    slList.Focus()
+    ; Delay live resizing for the same reason as in the Reader. In particular,
+    ; this prevents the native ListView from rebuilding against a briefly
+    ; erased right-hand surface immediately after first show.
+    SetTimer(StudyWindowEnableLiveResize.Bind(slState), -300)
 }
 
 ; Force the color swatches to repaint immediately (no warnings, no flicker)
@@ -9792,12 +10596,18 @@ CPControllerCaptureDialog(action) {
                         armed := true
                         status.Value := "Ready. Press one controller button."
                     }
-                } else if (snapshot["tokens"].Count > 0) {
+                } else if (result = "" && snapshot["tokens"].Count > 0) {
                     for token, _ in snapshot["tokens"] {
                         result := token
-                        closed := true
+                        status.Value := "Assigned " CPControllerTokenDisplay(token) ". Release it to finish."
                         break
                     }
+                } else if (result != "" && snapshot["tokens"].Count = 0) {
+                    ; Keep exclusive ownership of the captured press until it
+                    ; is released. Otherwise the same held shoulder reaches the
+                    ; main navigation poll after this dialog closes and changes
+                    ; the selected settings tab as an unintended second action.
+                    closed := true
                 }
             } else {
                 status.Value := "No compatible controller detected."
@@ -9805,8 +10615,9 @@ CPControllerCaptureDialog(action) {
             Sleep(20)
         }
     } finally {
-        CPControllerCaptureActive := false
         try dlg.Destroy()
+        CPControllerResetNavigation()
+        CPControllerCaptureActive := false
     }
     return result
 }
@@ -9999,6 +10810,8 @@ CPControllerNavigationState(snapshot) {
         "Down", cpNavDpadEnabled && cpNavTokens.Has(cpNavIsXInput ? "X:DPAD_DOWN" : "J:D-pad Down"),
         "Left", cpNavDpadEnabled && cpNavTokens.Has(cpNavIsXInput ? "X:DPAD_LEFT" : "J:D-pad Left"),
         "Right", cpNavDpadEnabled && cpNavTokens.Has(cpNavIsXInput ? "X:DPAD_RIGHT" : "J:D-pad Right"),
+        "PreviousTab", cpNavTokens.Has(cpNavIsXInput ? "X:LB" : "J:Button 5"),
+        "NextTab", cpNavTokens.Has(cpNavIsXInput ? "X:RB" : "J:Button 6"),
         "Activate", cpNavTokens.Has(cpNavIsXInput ? "X:A" : cpNavConfirmToken),
         "Cancel", cpNavTokens.Has(cpNavIsXInput ? "X:B" : cpNavCancelToken)
     )
@@ -10034,6 +10847,10 @@ CPControllerDispatchNavigation(command, targetHwnd) {
         switch command {
             case "Up", "Down", "Left", "Right":
                 CPNavMove(command)
+            case "PreviousTab":
+                CPNavSwitchTab(-1)
+            case "NextTab":
+                CPNavSwitchTab(1)
             case "Activate":
                 ; Bypass the keyboard mirror guard: this command originated
                 ; from the native controller path itself.
@@ -10115,6 +10932,15 @@ CPControllerHandleNavigation(snapshot, targetHwnd) {
         CPControllerDispatchNavigation("Activate", targetHwnd)
     if (cpNavState["Cancel"] && !CPControllerNavPreviousState["Cancel"])
         CPControllerDispatchNavigation("Cancel", targetHwnd)
+    ; Shoulder navigation is intentionally edge-triggered: holding a button
+    ; must never skip several settings tabs. Owned dialogs continue suppressing
+    ; gameplay actions but do not reinterpret the shoulders as dialog input.
+    if (targetHwnd = ui.Hwnd) {
+        if (cpNavState["PreviousTab"] && !CPControllerNavPreviousState["PreviousTab"])
+            CPControllerDispatchNavigation("PreviousTab", targetHwnd)
+        if (cpNavState["NextTab"] && !CPControllerNavPreviousState["NextTab"])
+            CPControllerDispatchNavigation("NextTab", targetHwnd)
+    }
 
     CPControllerNavPreviousState := cpNavState
 }
@@ -10342,6 +11168,283 @@ CPApplyOpenStudyWindowThemes() {
                 cpStudyState["redrawCallback"].Call()
         }
     }
+}
+
+CPThemedDialogFinish(cpDialogState, cpDialog, cpResult, *) {
+    if cpDialogState["closed"]
+        return
+    cpDialogState["result"] := cpResult
+    cpDialogState["closed"] := true
+    try cpDialog.Destroy()
+}
+
+CPThemedOwnedMessage(ownerHwnd, message, dialogTitle := ""
+    , buttons := "ok", icon := "warning", dialogWidth := 520) {
+    global controlDarkMode
+
+    cpOwnerValid := ownerHwnd
+        && DllCall("user32\IsWindow", "ptr", ownerHwnd, "int")
+    cpDefaultResult := buttons = "yesno" ? "No" : "OK"
+    cpDialogState := Map("closed", false, "result", cpDefaultResult)
+    cpOptions := "+AlwaysOnTop"
+    if cpOwnerValid
+        cpOptions .= " +Owner" ownerHwnd
+    cpDialog := Gui(cpOptions, dialogTitle)
+    cpDialog.MarginX := 18
+    cpDialog.MarginY := 16
+    cpColors := CPPalette(controlDarkMode)
+    cpDialog.BackColor := cpColors["window"]
+    cpDialog.SetFont("s10 c" cpColors["text"], "Segoe UI")
+
+    switch icon {
+        case "error":
+            cpIconGlyph := Chr(0x2715), cpIconColor := "F85149"
+        case "info":
+            cpIconGlyph := "i", cpIconColor := "58A6FF"
+        default:
+            cpIconGlyph := Chr(0x26A0), cpIconColor := "D29922"
+    }
+    cpIcon := cpDialog.Add(
+        "Text", "xm ym w42 h50 Center c" cpIconColor, cpIconGlyph
+    )
+    cpIcon.SetFont("s24 Bold c" cpIconColor, "Segoe UI Symbol")
+    cpMessageWidth := Max(300, dialogWidth - 78)
+    cpDialog.Add(
+        "Text", "x+12 yp+2 w" cpMessageWidth " c" cpColors["text"],
+        message
+    )
+
+    if (buttons = "yesno") {
+        cpYes := cpDialog.Add("Button", "xm y+18 w100", "Yes")
+        cpNo := cpDialog.Add("Button", "x+10 yp w100 Default", "No")
+        cpYes.OnEvent(
+            "Click", CPThemedDialogFinish.Bind(
+                cpDialogState, cpDialog, "Yes"
+            )
+        )
+        cpNo.OnEvent(
+            "Click", CPThemedDialogFinish.Bind(
+                cpDialogState, cpDialog, "No"
+            )
+        )
+        cpInitialButton := cpNo
+    } else {
+        cpOK := cpDialog.Add("Button", "xm y+18 w110 Default", "OK")
+        cpOK.OnEvent(
+            "Click", CPThemedDialogFinish.Bind(
+                cpDialogState, cpDialog, "OK"
+            )
+        )
+        cpInitialButton := cpOK
+    }
+    cpDialog.OnEvent(
+        "Escape", CPThemedDialogFinish.Bind(
+            cpDialogState, cpDialog, cpDefaultResult
+        )
+    )
+    cpDialog.OnEvent(
+        "Close", CPThemedDialogFinish.Bind(
+            cpDialogState, cpDialog, cpDefaultResult
+        )
+    )
+
+    cpDialog.Show("Hide AutoSize")
+    CPApplyOwnedDialogTheme(cpDialog)
+    if cpOwnerValid
+        try DllCall("user32\EnableWindow", "ptr", ownerHwnd, "int", 0)
+    try {
+        cpDialog.Show("Center")
+        try cpInitialButton.Focus()
+        while !cpDialogState["closed"]
+            Sleep(25)
+    } finally {
+        try cpDialog.Destroy()
+        if cpOwnerValid
+            try DllCall("user32\EnableWindow", "ptr", ownerHwnd, "int", 1)
+        if cpOwnerValid && DllCall("user32\IsWindow", "ptr", ownerHwnd, "int")
+            try WinActivate("ahk_id " ownerHwnd)
+    }
+    return cpDialogState["result"]
+}
+
+CPThemedChoicePopupFinish(cpPopupState, cpPopup, cpResult, *) {
+    if cpPopupState["closed"]
+        return
+    cpPopupState["result"] := cpResult
+    cpPopupState["closed"] := true
+    try cpPopup.Destroy()
+}
+
+CPThemedChoicePopupRegistry() {
+    static cpRegistry := Map()
+    return cpRegistry
+}
+
+CPThemedChoicePopupPaintFocus(cpPopupState, cpFocusIndex) {
+    cpColors := cpPopupState["colors"]
+    for cpRowIndex, cpRow in cpPopupState["rows"] {
+        cpRowBack := cpRowIndex = cpFocusIndex
+            ? cpColors["focus"] : cpColors["surface"]
+        try cpRow.Opt("+Background" cpRowBack)
+    }
+    cpPopupState["focusIndex"] := cpFocusIndex
+}
+
+CPThemedChoicePopupFocus(cpPopupState, cpFocusIndex) {
+    cpRowCount := cpPopupState["rows"].Length
+    if !cpRowCount
+        return
+    if (cpFocusIndex < 1)
+        cpFocusIndex := cpRowCount
+    else if (cpFocusIndex > cpRowCount)
+        cpFocusIndex := 1
+    CPThemedChoicePopupPaintFocus(cpPopupState, cpFocusIndex)
+    try cpPopupState["rows"][cpFocusIndex].Focus()
+}
+
+CPThemedChoicePopupOnKeyDown(wParam, lParam, msg, hwnd) {
+    cpRootHwnd := DllCall("user32\GetAncestor", "ptr", hwnd, "uint", 2, "ptr")
+    cpRegistry := CPThemedChoicePopupRegistry()
+    if !cpRootHwnd || !cpRegistry.Has(cpRootHwnd)
+        return
+    cpPopupState := cpRegistry[cpRootHwnd]
+    if cpPopupState["closed"]
+        return
+    switch wParam {
+        case 0x26, 0x25: ; Up / Left
+            CPThemedChoicePopupFocus(
+                cpPopupState, cpPopupState["focusIndex"] - 1
+            )
+            return true
+        case 0x28, 0x27: ; Down / Right
+            CPThemedChoicePopupFocus(
+                cpPopupState, cpPopupState["focusIndex"] + 1
+            )
+            return true
+        case 0x0D, 0x20: ; Enter / Space
+            CPThemedChoicePopupFinish(
+                cpPopupState, cpPopupState["gui"],
+                cpPopupState["focusIndex"]
+            )
+            return true
+    }
+}
+
+CPThemedChoicePopupRegister(cpPopupState) {
+    static cpKeyHandlerRegistered := false
+    if !cpKeyHandlerRegistered {
+        OnMessage(0x0100, CPThemedChoicePopupOnKeyDown) ; WM_KEYDOWN
+        cpKeyHandlerRegistered := true
+    }
+    CPThemedChoicePopupRegistry()[cpPopupState["gui"].Hwnd] := cpPopupState
+}
+
+CPThemedChoicePopupUnregister(cpPopupState) {
+    cpRegistry := CPThemedChoicePopupRegistry()
+    try {
+        cpPopupHwnd := cpPopupState["gui"].Hwnd
+        if cpRegistry.Has(cpPopupHwnd)
+            cpRegistry.Delete(cpPopupHwnd)
+    }
+}
+
+CPThemedChoicePopupWatch(cpPopupState, cpPopupHwnd, cpPopup, *) {
+    if cpPopupState["closed"]
+        return
+    if !DllCall("user32\IsWindow", "ptr", cpPopupHwnd, "int")
+        return CPThemedChoicePopupFinish(cpPopupState, cpPopup, 0)
+    if !WinActive("ahk_id " cpPopupHwnd)
+        CPThemedChoicePopupFinish(cpPopupState, cpPopup, 0)
+}
+
+CPThemedChoicePopup(ownerHwnd, anchorHwnd, choices) {
+    global controlDarkMode
+    if !choices.Length
+        return 0
+
+    cpOwnerValid := ownerHwnd
+        && DllCall("user32\IsWindow", "ptr", ownerHwnd, "int")
+    cpPopupState := Map("closed", false, "result", 0)
+    cpOptions := "+ToolWindow -Caption +Border +AlwaysOnTop"
+    if cpOwnerValid
+        cpOptions .= " +Owner" ownerHwnd
+    cpPopup := Gui(cpOptions)
+    cpPopup.MarginX := 3
+    cpPopup.MarginY := 3
+    cpColors := CPPalette(controlDarkMode)
+    cpPopup.BackColor := cpColors["window"]
+    cpPopup.SetFont("s10 c" cpColors["text"], "Segoe UI")
+    cpPopupState["gui"] := cpPopup
+    cpPopupState["colors"] := cpColors
+    cpPopupState["rows"] := []
+    cpPopupState["focusIndex"] := 1
+    for cpChoiceIndex, cpChoiceText in choices {
+        cpPosition := cpChoiceIndex = 1 ? "xm ym" : "xm y+1"
+        cpChoiceRow := cpPopup.Add(
+            "Text",
+            cpPosition " w250 h30 0x300 +Tabstop Border"
+                . " Background" cpColors["surface"]
+                . " c" cpColors["text"],
+            "  " cpChoiceText
+        )
+        cpChoiceRow.OnEvent(
+            "Click", CPThemedChoicePopupFinish.Bind(
+                cpPopupState, cpPopup, cpChoiceIndex
+            )
+        )
+        cpPopupState["rows"].Push(cpChoiceRow)
+    }
+    cpPopup.OnEvent(
+        "Escape", CPThemedChoicePopupFinish.Bind(cpPopupState, cpPopup, 0)
+    )
+    cpPopup.OnEvent(
+        "Close", CPThemedChoicePopupFinish.Bind(cpPopupState, cpPopup, 0)
+    )
+
+    cpPopup.Show("Hide AutoSize")
+    CPApplyOwnedDialogTheme(cpPopup)
+    ; CPApplyOwnedDialogTheme uses the normal window background for generic
+    ; text controls. Restore the menu-row surfaces afterward.
+    CPThemedChoicePopupPaintFocus(cpPopupState, 1)
+    cpPopup.GetPos(,, &cpPopupW, &cpPopupH)
+    cpAnchorRect := Buffer(16, 0)
+    if !(anchorHwnd && DllCall(
+        "user32\GetWindowRect", "ptr", anchorHwnd,
+        "ptr", cpAnchorRect.Ptr, "int"
+    )) {
+        CoordMode("Mouse", "Screen")
+        MouseGetPos(&cpX, &cpY)
+        cpAnchorTop := cpY
+    } else {
+        cpAnchorLeft := NumGet(cpAnchorRect, 0, "int")
+        cpAnchorTop := NumGet(cpAnchorRect, 4, "int")
+        cpAnchorRight := NumGet(cpAnchorRect, 8, "int")
+        cpAnchorBottom := NumGet(cpAnchorRect, 12, "int")
+        cpX := cpAnchorRight - cpPopupW
+        cpY := cpAnchorBottom
+    }
+    cpVirtualX := SysGet(76), cpVirtualY := SysGet(77)
+    cpVirtualW := SysGet(78), cpVirtualH := SysGet(79)
+    cpX := Max(cpVirtualX, Min(cpX, cpVirtualX + cpVirtualW - cpPopupW))
+    if (cpY + cpPopupH > cpVirtualY + cpVirtualH)
+        cpY := Max(cpVirtualY, cpAnchorTop - cpPopupH)
+    cpPopup.Show("x" cpX " y" cpY)
+    CPThemedChoicePopupRegister(cpPopupState)
+    CPThemedChoicePopupFocus(cpPopupState, 1)
+    try WinActivate("ahk_id " cpPopup.Hwnd)
+    cpWatch := CPThemedChoicePopupWatch.Bind(
+        cpPopupState, cpPopup.Hwnd, cpPopup
+    )
+    SetTimer(cpWatch, 80)
+    try {
+        while !cpPopupState["closed"]
+            Sleep(20)
+    } finally {
+        SetTimer(cpWatch, 0)
+        CPThemedChoicePopupUnregister(cpPopupState)
+        try cpPopup.Destroy()
+    }
+    return cpPopupState["result"]
 }
 
 CPThemedInputBox(promptText, dialogTitle, infoText := "", initialValue := "", dialogWidth := 420) {
@@ -13434,7 +14537,7 @@ global cbControllerDpadNavigationEnabled := CPAddControlsViewControl("controller
 cbControllerDpadNavigationEnabled.OnEvent("Click", CPControllerDpadNavigationChanged)
 TooltipBind(cbControllerDpadNavigationEnabled, "Turn this off when another app maps the D-pad to arrow keys, to prevent duplicate navigation. A / Cross, B / Circle, and keyboard controls remain available.")
 
-global txtControllerDpadNote := CPAddControlsViewControl("controller", ui.Add("Text", "x" controllerOptionsX " y" (controllerRowY + (controlsRowStep * 2) + 2) " w350 h42 cGray", "Disable D-pad navigation if another app also sends arrow keys. A / Cross and B / Circle remain available."))
+global txtControllerDpadNote := CPAddControlsViewControl("controller", ui.Add("Text", "x" controllerOptionsX " y" (controllerRowY + (controlsRowStep * 2) + 2) " w350 h72 cGray", "LB / L1 and RB / R1 switch main tabs while this panel is active. Disable D-pad navigation if another app also sends arrow keys; A / Cross and B / Circle remain available."))
 CPRegisterMutedControl(txtControllerDpadNote)
 
 for controllerActionKey in hotkeyActions {
@@ -13916,7 +15019,6 @@ CPRefreshThemeBrushes()
 
 ui.OnEvent("Close",  ClosePanel)
 ui.OnEvent("Escape", ExitControlPanel)
-ui.OnEvent("Size",   ResizeUI)
 
 ; wire buttons
 btnA_GM_Add   .OnEvent("Click", (*) => AddModelInteractive(model_gemini_audio, "gemini_audio", ddlA_GM, "gemini", "audio"))
@@ -13976,9 +15078,10 @@ DbgCP((cpUsingSavedBounds ? "Restore" : "Use default")
     " panel bounds (client): x=" cpPanelX " y=" cpPanelY " w=" cpPanelW " h=" cpPanelH
     (cpBoundsAdjusted ? " [fitted to current work area]" : ""))
 cpShowOptions := "w" cpPanelW " h" cpPanelH " x" cpPanelX " y" cpPanelY
-ui.Show((CP_BACKGROUND_START ? "NA Hide " : "") cpShowOptions)
-if (CP_BACKGROUND_START)
-    ui.Hide()
+; Assemble the complete first frame while hidden. Showing before the explicit
+; layout, theme, and opacity passes produces several visible intermediate
+; frames (and is particularly noticeable on a layered window).
+ui.Show("Hide " cpShowOptions)
 if !cpUsingSavedBounds
     SavePanelBounds()
 
@@ -13986,10 +15089,10 @@ if !cpUsingSavedBounds
 ; DPI/resolution-adjusted restore. Lay out the full current client area now.
 ui.GetClientPos(,, &cpInitialClientW, &cpInitialClientH)
 ResizeUI(ui, 0, cpInitialClientW, cpInitialClientH)
-; ui.Show("Hide") used for frame measurement queues its own Size event. At
-; non-100% DPI that older event can arrive after the final Show and restore the
-; measurement layout. Reapply the actual final client size after the queue drains.
-SetTimer(CPApplyInitialPanelLayout, -75)
+; Register live Size handling only after the hidden measurement/final layout
+; passes. Otherwise a stale measurement-size event can repaint the just-opened
+; panel with an intermediate layout at non-100% DPI.
+ui.OnEvent("Size", ResizeUI)
 ; Ensure first paint draws all children cleanly (fixes clipped checkbox text/box)
 DllCall("RedrawWindow"
     , "ptr", ui.Hwnd
@@ -14014,6 +15117,8 @@ UpdateCPActiveTabHighlight()
 ; the command-line selection here; a helper process sends the same request to
 ; this hidden window through WM_COPYDATA when the control panel already exists.
 OnMessage(0x004A, CPControlPanelCopyData)
+OnMessage(0x0231, StudyWindowSizeMoveMessage) ; WM_ENTERSIZEMOVE
+OnMessage(0x0232, StudyWindowSizeMoveMessage) ; WM_EXITSIZEMOVE
 if (CP_START_PROFILE != "")
     CPApplyExternalProfile(CP_START_PROFILE)
 
@@ -14060,6 +15165,14 @@ ClearAllComboSelections(*) {
 }
 
 SetGuiAndTrayIcon(ui, A_ScriptDir "\icon.ico")
+
+; A normal launch becomes visible only after layout, theme, opacity, custom
+; controls, and the title-bar icon are ready. Paint the completed frame once.
+if !CP_BACKGROUND_START {
+    ui.Show()
+    try DllCall("user32\RedrawWindow", "ptr", ui.Hwnd, "ptr", 0, "ptr", 0
+        , "uint", 0x0001 | 0x0004 | 0x0080 | 0x0100) ; INVALIDATE|ERASE|ALLCHILDREN|UPDATENOW
+}
 
 ; A normal first launch presents the compact setup guide. Background launches
 ; from LaunchBox/Big Box remain completely silent and hidden.
@@ -14544,18 +15657,29 @@ CPLayoutControllerOptions(rightEdge) {
     cbControllerDpadNavigationEnabled.Move(controllerOptionsX, dpadY, optionsW, checkboxH)
 
     if (optionsW >= 320)
-        noteLines := 2
-    else if (optionsW >= 250)
         noteLines := 3
-    else if (optionsW >= 200)
-        noteLines := 4
-    else
+    else if (optionsW >= 250)
         noteLines := 5
+    else if (optionsW >= 200)
+        noteLines := 6
+    else
+        noteLines := 8
     noteY := dpadY + checkboxH + 8
     txtControllerDpadNote.Move(controllerOptionsX, noteY, optionsW, noteLines * 19 + 4)
 }
 
 ResizeUI(gui, minMax, w, h){
+    global CPPanelInteractiveResize, CPPanelLastLayoutW, CPPanelLastLayoutH
+    if (minMax = -1 || w <= 0 || h <= 0)
+        return
+
+    layoutW := Round(w)
+    layoutH := Round(h)
+    ; Hidden startup measurement and DPI correction can queue duplicate Size
+    ; events. Avoid repainting the identical layout a second time.
+    if (layoutW = CPPanelLastLayoutW && layoutH = CPPanelLastLayoutH)
+        return
+
     ; --- Prevent flicker & â€œinvisible until hoverâ€ by suspending redraw during bulk moves ---
     hwnd := gui.Hwnd
     ; WM_SETREDRAW (0x000B) â†’ 0 = suspend redraw (call WinAPI directly with the HWND)
@@ -14703,9 +15827,19 @@ ResizeUI(gui, minMax, w, h){
     if (hwnd) {
         ; WM_SETREDRAW â†’ 1 = resume redraw (WinAPI with HWND)
         DllCall("SendMessage", "ptr", hwnd, "uint", 0x000B, "ptr", 1, "ptr", 0)
-        ; RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN|RDW_UPDATENOW)
-        DllCall("RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0, "uint", 0x0001|0x0004|0x0080|0x0100)
+        if CPPanelInteractiveResize {
+            ; Let Windows combine successive mouse-move paints. A synchronous
+            ; erase/update for every pixel is what makes a layered panel flash.
+            DllCall("RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0
+                , "uint", 0x0001 | 0x0020 | 0x0080) ; INVALIDATE|NOERASE|ALLCHILDREN
+        } else {
+            ; Programmatic/finished layouts still receive one complete repaint.
+            DllCall("RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0
+                , "uint", 0x0001 | 0x0004 | 0x0080 | 0x0100)
+        }
     }
+    CPPanelLastLayoutW := layoutW
+    CPPanelLastLayoutH := layoutH
 }
 
 ; =========================
@@ -14951,6 +16085,17 @@ CPControllerColorNavigate(direction, hueSlider, saturationSlider, brightnessSlid
     hueSlider.Focus()
 }
 
+CPControllerColorKeyboardNavigate(direction, hueSlider, saturationSlider, brightnessSlider
+    , applyButton, cancelButton, *) {
+    if CPControllerKeyboardMirrorActive(direction)
+        return
+    cpColorKeyboardStep := CPControllerColorNavigate.Bind(direction, hueSlider
+        , saturationSlider, brightnessSlider, applyButton, cancelButton)
+    if CPKeyboardSliderRepeatStart(direction, cpColorKeyboardStep)
+        return
+    cpColorKeyboardStep.Call()
+}
+
 CPControllerColorActivate(hueSlider, saturationSlider, brightnessSlider, applyButton, cancelButton, *) {
     focusHwnd := DllCall("user32\GetFocus", "ptr")
     if (focusHwnd = applyButton.Hwnd)
@@ -15093,8 +16238,10 @@ CPControllerColorDialog(initHex, dialogTitle := "Adjust color") {
     dialogArrowHotkeys := Map("$Up", "Up", "$Down", "Down", "$Left", "Left", "$Right", "Right")
     HotIfWinActive(dialogHotIf)
     for keyName, direction in dialogArrowHotkeys
-        try Hotkey(keyName, CPControllerColorNavigate.Bind(direction, hueSlider, saturationSlider
+        try Hotkey(keyName, CPControllerColorKeyboardNavigate.Bind(direction, hueSlider, saturationSlider
             , brightnessSlider, applyButton, cancelButton), "On")
+    try Hotkey("$Left Up", CPKeyboardSliderRepeatRelease.Bind("Left"), "On")
+    try Hotkey("$Right Up", CPKeyboardSliderRepeatRelease.Bind("Right"), "On")
     try Hotkey("$Enter", CPControllerColorActivate.Bind(hueSlider, saturationSlider
         , brightnessSlider, applyButton, cancelButton), "On")
     try Hotkey("$NumpadEnter", CPControllerColorActivate.Bind(hueSlider, saturationSlider
@@ -15111,12 +16258,15 @@ CPControllerColorDialog(initHex, dialogTitle := "Adjust color") {
             Sleep(30)
     } finally {
         CPControllerColorDialogState := Map("active", false)
+        CPKeyboardSliderRepeatStop()
         CPControllerResetNavigation()
         CPUnregisterColorSwatch(previewHwnd)
         CPUnregisterControllerColorGradients(gradientSliderHwnds*)
         HotIfWinActive(dialogHotIf)
         for keyName, direction in dialogArrowHotkeys
             try Hotkey(keyName, "Off")
+        try Hotkey("$Left Up", "Off")
+        try Hotkey("$Right Up", "Off")
         try Hotkey("$Enter", "Off")
         try Hotkey("$NumpadEnter", "Off")
         HotIfWinActive()

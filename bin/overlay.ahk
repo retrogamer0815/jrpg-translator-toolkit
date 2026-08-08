@@ -3560,8 +3560,45 @@ OverlayControllerAdjustmentActive() {
     return false
 }
 
-OverlayConfiguredHotkeyDispatch(callback, *) {
+OverlayControlPanelWorkflowForeground() {
+    foregroundHwnd := DllCall("user32\GetForegroundWindow", "ptr")
+    if !foregroundHwnd
+        return false
+
+    ; The settings window and its owned dialogs live in another process, so
+    ; the overlay cannot consult the control-panel Gui object directly. Resolve
+    ; its exact top-level HWND first, then follow the foreground owner chain.
+    panelHwnd := 0
+    oldDetectHidden := A_DetectHiddenWindows
+    oldTitleMode := A_TitleMatchMode
+    try {
+        DetectHiddenWindows true
+        SetTitleMatchMode 3
+        panelHwnd := WinExist("JRPG Translator")
+    } finally {
+        SetTitleMatchMode oldTitleMode
+        DetectHiddenWindows oldDetectHidden
+    }
+
+    candidateHwnd := foregroundHwnd
+    Loop 16 {
+        if (panelHwnd && candidateHwnd = panelHwnd)
+            return true
+        title := ""
+        try title := WinGetTitle("ahk_id " candidateHwnd)
+        if (title = "JRPG Translator" || InStr(title, "JRPG Translator - ") = 1)
+            return true
+        candidateHwnd := DllCall("user32\GetWindow", "ptr", candidateHwnd, "uint", 4, "ptr") ; GW_OWNER
+        if !candidateHwnd
+            break
+    }
+    return false
+}
+
+OverlayConfiguredHotkeyDispatch(callback, suppressInControlPanel := false, *) {
     if OverlayControllerAdjustmentActive()
+        return
+    if (suppressInControlPanel && OverlayControlPanelWorkflowForeground())
         return
     callback.Call()
 }
@@ -4004,7 +4041,11 @@ RegisterAllHotkeys() {
     ; ---
 
     try {
-        cb := OverlayConfiguredHotkeyDispatch.Bind(fun[action])
+        ; Screenshot + Translate is a gameplay action. If JoyToKey mirrors a
+        ; controller shoulder as its keyboard hotkey while the control panel is
+        ; active, let the panel use that shoulder for tab navigation only.
+        suppressInControlPanel := action = "oneshot_translate"
+        cb := OverlayConfiguredHotkeyDispatch.Bind(fun[action], suppressInControlPanel)
         Hotkey(hk, cb, "On")             ; bind (explicitly ON in v2)
         __HK_REG[hk] := cb               ; store callback object for proper unbind
     } catch as e {

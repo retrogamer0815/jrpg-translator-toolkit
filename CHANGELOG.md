@@ -2,6 +2,114 @@
 
 All notable changes to JRPG Translator are documented here.
 
+## 0.9.4 - 2026-08-08
+
+This release adds a persistent Study Library and dedicated Study Reader for
+turning gameplay explanations into organized learning material. It also
+improves controller navigation, low-resolution behavior, LaunchBox setup, and
+the visual stability of the control panel and study windows.
+
+### Study Library and saved explanations
+
+- Added an optional SQLite-backed Study Library that stores the original
+  Japanese, full explanation, parsed sections, active Profile, provider, model,
+  prompt, metadata, and optional source screenshots.
+- Repeated explanations of the same Japanese source are grouped as versions
+  instead of becoming unrelated files. Optional plain-text copies use matching
+  `_v02`, `_v03`, and later suffixes while the first attempt keeps its simple
+  filename.
+- Plain-text explanations are sorted into a subfolder for the active unified
+  Profile; explanations made without a Profile remain in the root explanation
+  folder.
+- Added local section parsing for the headings used by the bundled multilingual
+  explanation prompts, with the complete raw explanation retained as a safe
+  fallback.
+- Added search and filters for Profile, chapter, speaker, tags, generation date
+  and time, and Anki status. Active filters are reflected in the relevant table
+  headings.
+- Added sortable and configurable columns, persistent column widths, header-
+  aware automatic sizing, and protection for the hidden internal ID column.
+- Added single- and multi-selection metadata editing so chapter, speaker, tags,
+  and Anki status can be updated in bulk after a play session.
+- Added storage information and a library manager for creating, renaming,
+  switching, archiving, restoring, and opening separate Study Libraries.
+- The selected Study Library is saved in unified Profiles, so game Profiles
+  loaded through the LaunchBox plugin can select the appropriate library.
+
+### Study Reader
+
+- Added a reading-focused window with a large explanation area, source
+  screenshots, original Japanese, entry/version navigation, and permanent
+  navigation between parsed explanation sections.
+- Added next/previous navigation through the current filtered Library results,
+  screenshot navigation, an `Added to Anki` toggle, and remembered per-entry
+  reading position.
+- Added safe manual editing for either the current section or the complete
+  explanation. Manual changes are marked and can be reverted to the original
+  model output.
+- Added a `Copy...` menu for copying the current section, the complete
+  explanation, or Original Japanese with attached hiragana readings removed.
+  Ordinary explanatory parentheses are preserved.
+- Added standalone Study Library and Study Reader launchers for reviewing saved
+  material without first opening the control panel.
+- Improved dark-mode coverage, high-DPI and 720p layouts, window geometry
+  persistence, first-open focus, and repaint behavior during opening and
+  resizing.
+
+### Explanation workflow and provider handling
+
+- Replaced the single text-file option with separate controls for saving to the
+  Study Library, including source screenshots, and keeping optional plain-text
+  copies.
+- Added clearer profile-aware saving guidance directly in the Explanation tab.
+- Fixed an intermittent provider-state mismatch that could request an OpenAI
+  key even though Gemini was visibly selected. Explanation requests now resolve
+  the selected provider and model before validating credentials.
+- Preserved the immediate `Generating explanation...` feedback and provider-
+  specific missing-key messages across the expanded saving workflow.
+
+### Controller and control-panel refinements
+
+- LB / L1 and RB / R1 now move between the main control-panel tabs while the
+  panel is active.
+- Gameplay translation and explanation actions assigned to those buttons are
+  suppressed while navigating the control panel, including equivalent
+  JoyToKey keyboard hotkeys. Controller assignment dialogs temporarily suppress
+  tab switching as well.
+- Added held-key repeat for arrow keys emulated through keyboard mapping tools,
+  matching direct D-pad and physical-key behavior in sliders and color controls.
+- Protected the Maximum PNG size field from mapped numpad input while it is only
+  being traversed. Editing now begins only after the field is intentionally
+  activated.
+- Expanded the Controller inputs help text so controller-navigation guidance is
+  no longer clipped.
+- Changed screenshot cleanup to occur at application startup instead of
+  immediately after translation, allowing Study Library screenshots to be
+  imported first while still cleaning temporary captures automatically.
+- Improved low-resolution/high-scaling placement and scrolling, tab repainting,
+  translucent resize behavior, and startup flicker in the control panel.
+
+### LaunchBox / Big Box integration
+
+- Made the per-game setup window fit within the available working area at 720p
+  and high display scaling.
+- Added an adaptive content scrollbar that appears only when required while the
+  Save and Cancel footer remains reachable.
+- Fixed scrolling that previously jumped over the JoyToKey section.
+- Fixed keyboard/controller selection in the JRPG Translator and JoyToKey
+  Profile dropdowns so Enter and Space commit the highlighted Profile.
+
+### Reliability fixes
+
+- Hardened Study Library timers, redraws, close handling, and destroyed-control
+  checks to prevent delayed callbacks from acting on closed windows.
+- Fixed the first table double-click after opening the Study Library so an entry
+  opens reliably on the first attempt.
+- Reduced visible jumping, white flashes, resize trails, and stale screenshot
+  placement in the Study Library, Study Reader, and translucent control panel.
+- Guarded themed-dialog shutdown state to prevent a brief unassigned-variable
+  warning while closing the application.
+
 ## 0.9.3 - 2026-08-02
 
 This release expands terminology management, improves controller-only setup,

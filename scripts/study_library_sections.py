@@ -247,6 +247,20 @@ def parse_explanation_sections(raw_text: str) -> list[ExplanationSection]:
 
 def ensure_section_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(SECTION_SCHEMA)
+    explanation_columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(explanations)")
+    }
+    if "manual_original_text" not in explanation_columns:
+        connection.execute(
+            "ALTER TABLE explanations "
+            "ADD COLUMN manual_original_text TEXT NOT NULL DEFAULT ''"
+        )
+    if "manually_edited_at" not in explanation_columns:
+        connection.execute(
+            "ALTER TABLE explanations "
+            "ADD COLUMN manually_edited_at TEXT NOT NULL DEFAULT ''"
+        )
     detail_columns = {
         str(row[1])
         for row in connection.execute("PRAGMA table_info(explanation_group_details)")
@@ -271,9 +285,9 @@ def ensure_section_schema(connection: sqlite3.Connection) -> None:
             (canonical, int(group_id)),
         )
     connection.execute(
-        "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '4')"
+        "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '5')"
     )
-    connection.execute("PRAGMA user_version = 4")
+    connection.execute("PRAGMA user_version = 5")
 
 
 def replace_explanation_sections(

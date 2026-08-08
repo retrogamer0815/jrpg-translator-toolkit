@@ -165,8 +165,21 @@ learning-focused explanation without replacing the translation.
 Explanation prompts are independent from translation prompts, so they can be
 tuned for a learner's level and preferred amount of detail.
 
-When **Save explanations to textfiles** is enabled, generated explanations are
-also stored in `Settings/Explanations` for use as study material.
+Enable **Save explanations to Study Library** to keep the Japanese source,
+explanation, Profile, provider/model details, and optional source screenshots in
+a local searchable database. Repeated explanations of the same Japanese text
+are grouped as versions rather than becoming unrelated entries.
+
+**Open Study Library...** provides filters for Profile, chapter, speaker, tags,
+date/time, and Anki status, plus bulk metadata editing and configurable columns.
+Its **Study** action opens a reading-focused view with the explanation, parsed
+section navigation, screenshots, and original Japanese. Explanations can be
+edited safely or copied—including an option that removes attached hiragana
+readings from the Japanese text before it is pasted into an Anki card.
+
+Multiple named Study Libraries can be created and selected through unified
+Profiles. Optional **Save plain-text copies** continues to use
+`Settings/Explanations`, sorted into a subfolder for the active Profile.
 
 ### Terminology Overrides
 

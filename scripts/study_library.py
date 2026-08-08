@@ -24,6 +24,7 @@ from study_library_sections import (
     backfill_missing_sections,
     ensure_section_schema,
     normalize_tags,
+    replace_explanation_sections,
     replace_group_tags,
 )
 
@@ -446,7 +447,8 @@ def detail(database: Path, output_dir: Path, group_id: int, version: int) -> int
             return 0
 
         versions = connection.execute(
-            "SELECT id, version, preferred, created_at, provider, model, prompt_profile "
+            "SELECT id, version, preferred, created_at, provider, model, prompt_profile, "
+            "manually_edited_at "
             "FROM explanations WHERE group_id = ? ORDER BY version DESC",
             (group_id,),
         ).fetchall()
@@ -458,6 +460,7 @@ def detail(database: Path, output_dir: Path, group_id: int, version: int) -> int
                     int(row["version"]),
                     int(row["preferred"]),
                     encode_field(str(row["created_at"] or "").replace("T", " ")[:19]),
+                    encode_field(str(row["manually_edited_at"] or "").replace("T", " ")[:19]),
                 )
                 for row in versions
             ),
@@ -516,6 +519,9 @@ def detail(database: Path, output_dir: Path, group_id: int, version: int) -> int
                     encode_field(group["speaker"]),
                     encode_field(group["tags"]),
                     encode_field(group["added_to_anki_at"]),
+                    encode_field(
+                        str(selected["manually_edited_at"] or "").replace("T", " ")[:19]
+                    ),
                 ),
             ),
         )
@@ -831,6 +837,102 @@ def set_anki(database: Path, output_dir: Path, group_id: int) -> int:
         connection.close()
 
 
+def save_manual_edit(
+    database: Path, output_dir: Path, group_id: int, version: int
+) -> int:
+    """Save a reversible user edit and rebuild its derived section index."""
+    clear_outputs(output_dir, ("mutation.tsv",))
+    edit_path = output_dir / "manual_edit.txt"
+    if not edit_path.is_file():
+        raise ValueError("The edited explanation text was not supplied.")
+    edited_text = edit_path.read_text(encoding="utf-8")
+    try:
+        edit_path.unlink()
+    except OSError:
+        pass
+    edited_text = edited_text.replace("\r\n", "\n").replace("\r", "\n")
+    if not edited_text.strip():
+        raise ValueError("An explanation cannot be saved empty.")
+
+    connection = connect_write(database)
+    try:
+        ensure_section_schema(connection)
+        connection.commit()
+        connection.execute("BEGIN IMMEDIATE")
+        selected = connection.execute(
+            "SELECT id, raw_text, manual_original_text FROM explanations "
+            "WHERE group_id = ? AND version = ?",
+            (group_id, version),
+        ).fetchone()
+        if selected is None:
+            raise ValueError("The selected explanation version no longer exists.")
+        explanation_id = int(selected["id"])
+        current_text = str(selected["raw_text"] or "")
+        original_text = str(selected["manual_original_text"] or "") or current_text
+        edited_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        connection.execute(
+            "UPDATE explanations SET raw_text = ?, manual_original_text = ?, "
+            "manually_edited_at = ? WHERE id = ?",
+            (edited_text, original_text, edited_at, explanation_id),
+        )
+        section_count = replace_explanation_sections(
+            connection, explanation_id, edited_text
+        )
+        connection.commit()
+        write_rows(
+            output_dir / "mutation.tsv",
+            ((explanation_id, encode_field(edited_at), section_count),),
+        )
+        return 0
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def revert_manual_edit(
+    database: Path, output_dir: Path, group_id: int, version: int
+) -> int:
+    """Restore the untouched model output preserved by the first manual edit."""
+    clear_outputs(output_dir, ("mutation.tsv",))
+    connection = connect_write(database)
+    try:
+        ensure_section_schema(connection)
+        connection.commit()
+        connection.execute("BEGIN IMMEDIATE")
+        selected = connection.execute(
+            "SELECT id, manual_original_text FROM explanations "
+            "WHERE group_id = ? AND version = ?",
+            (group_id, version),
+        ).fetchone()
+        if selected is None:
+            raise ValueError("The selected explanation version no longer exists.")
+        original_text = str(selected["manual_original_text"] or "")
+        if not original_text:
+            raise ValueError("This explanation has no manual edits to revert.")
+        explanation_id = int(selected["id"])
+        connection.execute(
+            "UPDATE explanations SET raw_text = ?, manual_original_text = '', "
+            "manually_edited_at = '' WHERE id = ?",
+            (original_text, explanation_id),
+        )
+        section_count = replace_explanation_sections(
+            connection, explanation_id, original_text
+        )
+        connection.commit()
+        write_rows(
+            output_dir / "mutation.tsv",
+            ((explanation_id, "", section_count),),
+        )
+        return 0
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 def backup_database(connection: sqlite3.Connection, database: Path) -> Path:
     backup_dir = database.parent / "Backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -940,7 +1042,7 @@ def parse_args() -> argparse.Namespace:
         "command",
         choices=(
             "ensure", "snapshot", "detail", "set-metadata", "bulk-metadata",
-            "set-anki", "remove-version", "storage",
+            "set-anki", "save-edit", "revert-edit", "remove-version", "storage",
         ),
     )
     parser.add_argument("--db", required=True)
@@ -968,6 +1070,14 @@ def main() -> int:
         return set_metadata(database, output_dir, args.group_id)
     if args.command == "set-anki":
         return set_anki(database, output_dir, args.group_id)
+    if args.command in {"save-edit", "revert-edit"}:
+        if args.version <= 0:
+            raise ValueError(f"{args.command} requires a positive --version")
+        if args.command == "save-edit":
+            return save_manual_edit(
+                database, output_dir, args.group_id, args.version
+            )
+        return revert_manual_edit(database, output_dir, args.group_id, args.version)
     if args.command == "remove-version":
         if args.version <= 0:
             raise ValueError("remove-version requires a positive --version")
