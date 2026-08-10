@@ -332,10 +332,12 @@ def snapshot(database: Path, output_dir: Path) -> int:
                 "AND filter_t.name = ? COLLATE NOCASE)"
             )
             parameters.append(tag)
-        if anki_mode == "added":
-            where.append("COALESCE(d.added_to_anki_at, '') <> ''")
-        elif anki_mode == "not-added":
-            where.append("COALESCE(d.added_to_anki_at, '') = ''")
+        if anki_mode == "found":
+            where.append("COALESCE(a.status, 'not_checked') = 'found'")
+        elif anki_mode == "not-found":
+            where.append("COALESCE(a.status, 'not_checked') = 'not_found'")
+        elif anki_mode == "not-checked":
+            where.append("COALESCE(a.status, 'not_checked') = 'not_checked'")
         if generated_from is not None:
             where.append("julianday(g.updated_at) >= julianday(?)")
             parameters.append(generated_from.isoformat(timespec="seconds"))
@@ -373,10 +375,14 @@ def snapshot(database: Path, output_dir: Path) -> int:
                            ORDER BY display_t.name COLLATE NOCASE
                        )
                    ), COALESCE(d.tags, '')) AS tags,
-                   COALESCE(d.added_to_anki_at, '') AS added_to_anki_at
+                   COALESCE(d.added_to_anki_at, '') AS added_to_anki_at,
+                   COALESCE(a.status, 'not_checked') AS anki_status,
+                   COALESCE(a.note_id, 0) AS anki_note_id,
+                   COALESCE(a.checked_at, '') AS anki_checked_at
             FROM explanation_groups g
             JOIN explanations e ON e.group_id = g.id
             LEFT JOIN explanation_group_details d ON d.group_id = g.id
+            LEFT JOIN explanation_group_anki_links a ON a.group_id = g.id
         """
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -400,6 +406,9 @@ def snapshot(database: Path, output_dir: Path) -> int:
                     encode_field(row["speaker"]),
                     encode_field(row["tags"]),
                     encode_field(row["added_to_anki_at"]),
+                    encode_field(row["anki_status"]),
+                    int(row["anki_note_id"]),
+                    encode_field(row["anki_checked_at"]),
                 )
             )
         write_rows(output_dir / "groups.tsv", rows)
@@ -437,9 +446,13 @@ def detail(database: Path, output_dir: Path, group_id: int, version: int) -> int
             "JOIN study_tags detail_t ON detail_t.id = detail_gt.tag_id "
             "WHERE detail_gt.group_id = g.id "
             "ORDER BY detail_t.name COLLATE NOCASE)), COALESCE(d.tags, '')) AS tags, "
-            "COALESCE(d.added_to_anki_at, '') AS added_to_anki_at "
+            "COALESCE(d.added_to_anki_at, '') AS added_to_anki_at, "
+            "COALESCE(a.status, 'not_checked') AS anki_status, "
+            "COALESCE(a.note_id, 0) AS anki_note_id, "
+            "COALESCE(a.checked_at, '') AS anki_checked_at "
             "FROM explanation_groups g "
             "LEFT JOIN explanation_group_details d ON d.group_id = g.id "
+            "LEFT JOIN explanation_group_anki_links a ON a.group_id = g.id "
             "WHERE g.id = ?",
             (group_id,),
         ).fetchone()
@@ -522,6 +535,9 @@ def detail(database: Path, output_dir: Path, group_id: int, version: int) -> int
                     encode_field(
                         str(selected["manually_edited_at"] or "").replace("T", " ")[:19]
                     ),
+                    encode_field(group["anki_status"]),
+                    int(group["anki_note_id"]),
+                    encode_field(group["anki_checked_at"]),
                 ),
             ),
         )

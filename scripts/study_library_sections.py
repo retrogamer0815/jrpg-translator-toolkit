@@ -121,6 +121,21 @@ CREATE TABLE IF NOT EXISTS explanation_group_tags (
 
 CREATE INDEX IF NOT EXISTS idx_group_tags_tag_group
     ON explanation_group_tags(tag_id, group_id);
+
+CREATE TABLE IF NOT EXISTS explanation_group_anki_links (
+    group_id INTEGER PRIMARY KEY REFERENCES explanation_groups(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'not_checked',
+    note_id INTEGER,
+    checked_at TEXT NOT NULL DEFAULT '',
+    profile_name TEXT NOT NULL DEFAULT '',
+    deck_name TEXT NOT NULL DEFAULT '',
+    model_name TEXT NOT NULL DEFAULT '',
+    japanese_field TEXT NOT NULL DEFAULT '',
+    explanation_field TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_anki_links_status
+    ON explanation_group_anki_links(status);
 """
 
 
@@ -285,9 +300,9 @@ def ensure_section_schema(connection: sqlite3.Connection) -> None:
             (canonical, int(group_id)),
         )
     connection.execute(
-        "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '5')"
+        "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '6')"
     )
-    connection.execute("PRAGMA user_version = 5")
+    connection.execute("PRAGMA user_version = 6")
 
 
 def replace_explanation_sections(

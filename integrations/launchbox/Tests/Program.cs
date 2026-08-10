@@ -8,6 +8,8 @@ using System.Windows.Controls;
 using JrpgTranslator.LaunchBox;
 using Unbroken.LaunchBox.Plugins;
 
+// Companion source snapshot: JRPG Translator v0.9.5 testing.
+
 internal static class Program
 {
     [STAThread]

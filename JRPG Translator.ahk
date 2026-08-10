@@ -2,7 +2,7 @@
 #SingleInstance Off
 #Warn
 #NoTrayIcon
-;@Ahk2Exe-SetVersion 0.9.4.0
+;@Ahk2Exe-SetVersion 0.9.5.0
 ;@Ahk2Exe-SetName JRPG Translator
 ;@Ahk2Exe-SetDescription JRPG Translator
 ;@Ahk2Exe-SetCopyright Copyright (c) 2025 retrogamer0815
@@ -16,7 +16,7 @@ global CP_START_PROFILE := ""
 global CP_START_TRANSLATOR := false
 global CP_STUDY_START_MODE := ""
 global CP_STUDY_ONLY_PROCESS := false
-global APP_VERSION := "0.9.4"
+global APP_VERSION := "0.9.5-dev"
 global PROJECT_URL := "https://github.com/retrogamer0815/jrpg-translator-toolkit"
 global BUG_REPORT_URL := PROJECT_URL "/issues/new"
 global WRITTEN_GUIDE_URL := PROJECT_URL "#quick-start"
@@ -2492,6 +2492,49 @@ Rebind_HideShowControlPanel() {
     }
 }
 
+CPSetWindowCloaked(cpPanelHwnd, cpCloaked) {
+    if !cpPanelHwnd
+        return false
+    cpCloakValue := Buffer(4, 0)
+    NumPut("int", cpCloaked ? 1 : 0, cpCloakValue, 0)
+    try return DllCall(
+        "dwmapi\DwmSetWindowAttribute",
+        "ptr", cpPanelHwnd,
+        "uint", 13, ; DWMWA_CLOAK
+        "ptr", cpCloakValue.Ptr,
+        "uint", 4,
+        "int"
+    ) = 0
+    return false
+}
+
+CPShowControlPanelReady(activate := true) {
+    global ui, controlDarkMode
+    if !(IsSet(ui) && ui && ui.Hwnd)
+        return
+
+    ; Keep the window out of DWM composition until its complete dark/light frame
+    ; has been presented once. This prevents the native default (white) surface
+    ; and title bar from appearing between Show and the custom-control repaint.
+    cpPanelCloaked := CPSetWindowCloaked(ui.Hwnd, true)
+    ui.Show("NA")
+    CPApplyDarkTitleBar(ui.Hwnd, controlDarkMode)
+    try DllCall(
+        "user32\RedrawWindow",
+        "ptr", ui.Hwnd,
+        "ptr", 0,
+        "ptr", 0,
+        "uint", 0x0001 | 0x0020 | 0x0080 | 0x0100 | 0x0400
+        ; INVALIDATE | NOERASE | ALLCHILDREN | UPDATENOW | FRAME
+    )
+    if cpPanelCloaked {
+        try DllCall("dwmapi\DwmFlush")
+        CPSetWindowCloaked(ui.Hwnd, false)
+    }
+    if activate
+        try WinActivate("ahk_id " ui.Hwnd)
+}
+
 ToggleControlPanel(*) {
     global ui, ddlProv
 
@@ -2504,8 +2547,7 @@ ToggleControlPanel(*) {
             SetTimer(RestoreControlPanelReturnWindow, -1)
         } else {
             CaptureControlPanelReturnWindow()
-            ui.Show()
-            try WinActivate("ahk_id " ui.Hwnd)
+            CPShowControlPanelReady(true)
             try (IsSet(ddlProv) && ddlProv) ? ddlProv.Focus() : 0
         }
     } catch as ex {
@@ -2815,9 +2857,12 @@ CPSelectCustomTab(cpTabIndex, *) {
 
     CPFocusVisualNavHwnd := 0
     try tab.Value := cpTabIndex
+    ; Complete the native page visibility change and its paint in this same
+    ; event-loop turn. Yielding to a timer here lets DWM briefly composite the
+    ; layered parent after the old page is hidden but before the new one draws.
+    CPRedrawActiveTabPage()
     CPSetTabFocusIndicator(false)
     CPRenderCustomTabBar(true)
-    SetTimer(CPRedrawActiveTabPage, -1)
 }
 
 CPRedrawActiveTabPage(*) {
@@ -2835,7 +2880,7 @@ CPRedrawActiveTabPage(*) {
     ; layered panel does not leave the new controls blank until mouse-over.
     try tab.Redraw()
     try DllCall("user32\RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0
-        , "uint", 0x0001 | 0x0080 | 0x0100) ; INVALIDATE|ALLCHILDREN|UPDATENOW
+        , "uint", 0x0001 | 0x0020 | 0x0080 | 0x0100) ; INVALIDATE|NOERASE|ALLCHILDREN|UPDATENOW
 }
 
 CPMouseTabClick(*) {
@@ -3956,11 +4001,11 @@ CPNavSwitchTab(dir) {
 
     nextVisibleIndex := Mod(visibleIndex - 1 + dir + count, count) + 1
     try tab.Value := CPTabVisiblePages[nextVisibleIndex]
+    CPRedrawActiveTabPage()
     try tab.Focus()
     CPFocusVisualNavHwnd := tab.Hwnd
     CPSetTabFocusIndicator(true)
     CPRenderCustomTabBar(true)
-    SetTimer(CPRedrawActiveTabPage, -1)
     SetTimer(CPEnsureFocusedControlVisible, -1)
 }
 
@@ -6383,6 +6428,1240 @@ StudyLibraryReadRows(slPath) {
     return slRows
 }
 
+StudyAnkiConfigPath() {
+    return A_ScriptDir "\Settings\anki.ini"
+}
+
+StudyAnkiProfileSection(saProfile) {
+    ; Keep the human-readable profile name in the values as well, so the safe
+    ; INI section cannot silently link the wrong profile after a name collision.
+    return "profile_" GameProfileSafeName(saProfile)
+}
+
+StudyAnkiEmptyMapping(saProfile := "") {
+    return Map(
+        "profile", Trim(saProfile),
+        "deck", "",
+        "addDeck", "",
+        "vocabularyDeck", "",
+        "model", "Basic",
+        "japaneseField", "Front",
+        "explanationField", "Back"
+    )
+}
+
+StudyAnkiIncludeScreenshotDefault() {
+    return IniRead(StudyAnkiConfigPath(), "settings", "includeScreenshot", "1") = "1"
+}
+
+StudyAnkiSaveIncludeScreenshot(saEnabled) {
+    DirCreate(A_ScriptDir "\Settings")
+    IniWrite(saEnabled ? "1" : "0", StudyAnkiConfigPath(),
+        "settings", "includeScreenshot")
+}
+
+StudyAnkiLoadMapping(saProfile) {
+    saProfile := Trim(saProfile)
+    saMapping := StudyAnkiEmptyMapping(saProfile)
+    if (saProfile = "")
+        return saMapping
+    saPath := StudyAnkiConfigPath()
+    saSection := StudyAnkiProfileSection(saProfile)
+    saStoredProfile := Trim(IniRead(saPath, saSection, "profile", ""))
+    if (saStoredProfile != "" && StrLower(saStoredProfile) = StrLower(saProfile)) {
+        saMapping["deck"] := Trim(IniRead(saPath, saSection, "deck", ""))
+        saMapping["addDeck"] := Trim(IniRead(saPath, saSection, "addDeck", ""))
+        saMapping["vocabularyDeck"] := Trim(
+            IniRead(saPath, saSection, "vocabularyDeck", "")
+        )
+        saMapping["model"] := Trim(IniRead(saPath, saSection, "model", "Basic"))
+        saMapping["japaneseField"] := Trim(
+            IniRead(saPath, saSection, "japaneseField", "Front")
+        )
+        saMapping["explanationField"] := Trim(
+            IniRead(saPath, saSection, "explanationField", "Back")
+        )
+        return saMapping
+    }
+
+    ; A unified Profile is portable through the LaunchBox plugin. Import its
+    ; optional Anki mapping the first time this installation needs it.
+    saProfilePath := GameProfilePath(saProfile)
+    if FileExist(saProfilePath) {
+        saDeck := Trim(IniRead(saProfilePath, "anki", "deck", ""))
+        if (saDeck != "") {
+            saMapping["deck"] := saDeck
+            saMapping["addDeck"] := Trim(
+                IniRead(saProfilePath, "anki", "addDeck", "")
+            )
+            saMapping["vocabularyDeck"] := Trim(
+                IniRead(saProfilePath, "anki", "vocabularyDeck", "")
+            )
+            saMapping["model"] := Trim(
+                IniRead(saProfilePath, "anki", "model", "Basic")
+            )
+            saMapping["japaneseField"] := Trim(
+                IniRead(saProfilePath, "anki", "japaneseField", "Front")
+            )
+            saMapping["explanationField"] := Trim(
+                IniRead(saProfilePath, "anki", "explanationField", "Back")
+            )
+        }
+    }
+    return saMapping
+}
+
+StudyAnkiSaveMapping(saMapping, saWriteUnifiedProfile := true) {
+    saProfile := Trim(saMapping["profile"])
+    if (saProfile = "")
+        return false
+    saPath := StudyAnkiConfigPath()
+    saSection := StudyAnkiProfileSection(saProfile)
+    DirCreate(A_ScriptDir "\Settings")
+    IniWrite(saProfile, saPath, saSection, "profile")
+    IniWrite(saMapping["deck"], saPath, saSection, "deck")
+    IniWrite(
+        saMapping.Has("addDeck") ? saMapping["addDeck"] : "",
+        saPath, saSection, "addDeck"
+    )
+    IniWrite(
+        saMapping.Has("vocabularyDeck") ? saMapping["vocabularyDeck"] : "",
+        saPath, saSection, "vocabularyDeck"
+    )
+    IniWrite(saMapping["model"], saPath, saSection, "model")
+    IniWrite(saMapping["japaneseField"], saPath, saSection, "japaneseField")
+    IniWrite(
+        saMapping["explanationField"], saPath, saSection,
+        "explanationField"
+    )
+    if saWriteUnifiedProfile {
+        saProfilePath := GameProfilePath(saProfile)
+        if FileExist(saProfilePath) {
+            IniWriteRetry(saMapping["deck"], saProfilePath, "anki", "deck")
+            IniWriteRetry(
+                saMapping.Has("addDeck") ? saMapping["addDeck"] : "",
+                saProfilePath, "anki", "addDeck"
+            )
+            IniWriteRetry(
+                saMapping.Has("vocabularyDeck")
+                    ? saMapping["vocabularyDeck"] : "",
+                saProfilePath, "anki", "vocabularyDeck"
+            )
+            IniWriteRetry(saMapping["model"], saProfilePath, "anki", "model")
+            IniWriteRetry(
+                saMapping["japaneseField"], saProfilePath,
+                "anki", "japaneseField"
+            )
+            IniWriteRetry(
+                saMapping["explanationField"], saProfilePath,
+                "anki", "explanationField"
+            )
+        }
+    }
+    return true
+}
+
+StudyAnkiStatusLabel(saStatus, saManualAddedAt := "") {
+    saStatus := StrLower(Trim(saStatus))
+    if (saStatus = "found")
+        return "Found in Anki"
+    if (saStatus = "not_found")
+        return saManualAddedAt != ""
+            ? "Not found (manual marker)" : "Not found"
+    if (saManualAddedAt != "")
+        return "Added (manual)"
+    return "Not checked"
+}
+
+StudyAnkiRunBridge(saState, saAction) {
+    global pythonExe
+    saPython := ResolvePath(pythonExe)
+    saBridge := A_ScriptDir "\scripts\anki_bridge.py"
+    if !(FileExist(saPython) && FileExist(saBridge)) {
+        MsgBox(
+            "The Anki integration needs valid Python and bridge paths.`n`n"
+            . "Python:`n" saPython "`n`nBridge:`n" saBridge,
+            "Study Library - Anki",
+            "OK Icon!"
+        )
+        return false
+    }
+    saCommand := Format(
+        '"{1}" "{2}" {3} --db "{4}" --output-dir "{5}"',
+        saPython, saBridge, saAction, saState["database"], saState["outputDir"]
+    )
+    DbgCP("Anki bridge -> " saCommand)
+    try saExitCode := RunWait(saCommand, A_ScriptDir, "Hide")
+    catch as saError {
+        MsgBox(saError.Message, "Study Library - Anki", "OK Iconx")
+        return false
+    }
+    return saExitCode = 0
+}
+
+StudyAnkiReadStatus(saState) {
+    saRows := StudyLibraryReadRows(saState["outputDir"] "\anki_status.tsv")
+    if !saRows.Length
+        return Map("code", "error", "version", "", "message", "No Anki status was returned.")
+    saRow := saRows[1]
+    return Map(
+        "code", saRow.Length >= 1 ? saRow[1] : "error",
+        "version", saRow.Length >= 2 ? saRow[2] : "",
+        "message", saRow.Length >= 3 ? StudyLibraryHexDecode(saRow[3]) : ""
+    )
+}
+
+StudyAnkiExactDeckSuggestion(saProfile, saDecks) {
+    saProfile := StrLower(Trim(saProfile))
+    if (saProfile = "")
+        return ""
+    for saDeck in saDecks {
+        saParts := StrSplit(saDeck, "::")
+        saCandidate := ""
+        for saPart in saParts {
+            saCandidate .= (saCandidate = "" ? "" : "::") saPart
+            if (StrLower(Trim(saPart)) = saProfile)
+                return saCandidate
+        }
+    }
+    return ""
+}
+
+StudyAnkiChooseText(saDdl, saValues, saWanted, saFallback := 1) {
+    saTarget := 0
+    for saIndex, saValue in saValues {
+        if (StrLower(Trim(saValue)) = StrLower(Trim(saWanted))) {
+            saTarget := saIndex
+            break
+        }
+    }
+    if (!saTarget && saValues.Length && saFallback > 0)
+        saTarget := Max(1, Min(saValues.Length, saFallback))
+    if saTarget
+        saDdl.Choose(saTarget)
+    else
+        saDdl.Choose(0)
+    return saTarget
+}
+
+StudyAnkiProfiles(saState) {
+    saProfiles := []
+    saSeen := Map()
+    for saChoice in saState["profileChoices"] {
+        if (saChoice["mode"] != "profile")
+            continue
+        saProfile := Trim(saChoice["value"])
+        saKey := StrLower(saProfile)
+        if (saProfile != "" && !saSeen.Has(saKey)) {
+            saSeen[saKey] := true
+            saProfiles.Push(saProfile)
+        }
+    }
+    return saProfiles
+}
+
+StudyAnkiSetFields(saDialogState, saJapaneseWanted := "", saExplanationWanted := "") {
+    saModelIndex := saDialogState["modelDdl"].Value
+    saFields := []
+    if (saModelIndex >= 1 && saModelIndex <= saDialogState["models"].Length) {
+        saModel := saDialogState["models"][saModelIndex]
+        if saDialogState["modelFields"].Has(saModel)
+            saFields := saDialogState["modelFields"][saModel]
+    }
+    saDialogState["fieldNames"] := saFields
+    for saDdl in [saDialogState["japaneseDdl"], saDialogState["explanationDdl"]] {
+        saDdl.Delete()
+        if saFields.Length
+            saDdl.Add(saFields)
+        saDdl.Enabled := saFields.Length > 0
+    }
+    StudyAnkiChooseText(
+        saDialogState["japaneseDdl"], saFields,
+        saJapaneseWanted != "" ? saJapaneseWanted : "Front"
+    )
+    StudyAnkiChooseText(
+        saDialogState["explanationDdl"], saFields,
+        saExplanationWanted != "" ? saExplanationWanted : "Back",
+        saFields.Length >= 2 ? 2 : 1
+    )
+}
+
+StudyAnkiModelChanged(saDialogState, *) {
+    StudyAnkiSetFields(saDialogState)
+}
+
+StudyAnkiApplyProfileMapping(saDialogState, *) {
+    saIndex := saDialogState["profileDdl"].Value
+    if (saIndex < 1 || saIndex > saDialogState["profiles"].Length)
+        return
+    saProfile := saDialogState["profiles"][saIndex]
+    saMapping := StudyAnkiLoadMapping(saProfile)
+    saDeck := saMapping["deck"]
+    if (saDeck = "")
+        saDeck := StudyAnkiExactDeckSuggestion(saProfile, saDialogState["decks"])
+    StudyAnkiChooseText(
+        saDialogState["deckDdl"], saDialogState["decks"], saDeck, 0
+    )
+    StudyAnkiChooseText(
+        saDialogState["modelDdl"], saDialogState["models"],
+        saMapping["model"] != "" ? saMapping["model"] : "Basic"
+    )
+    StudyAnkiSetFields(
+        saDialogState, saMapping["japaneseField"],
+        saMapping["explanationField"]
+    )
+}
+
+StudyAnkiCurrentMapping(saDialogState) {
+    saProfileIndex := saDialogState["profileDdl"].Value
+    saDeckIndex := saDialogState["deckDdl"].Value
+    saModelIndex := saDialogState["modelDdl"].Value
+    saJapaneseIndex := saDialogState["japaneseDdl"].Value
+    saExplanationIndex := saDialogState["explanationDdl"].Value
+    if (saProfileIndex < 1 || saProfileIndex > saDialogState["profiles"].Length
+        || saDeckIndex < 1 || saDeckIndex > saDialogState["decks"].Length
+        || saModelIndex < 1 || saModelIndex > saDialogState["models"].Length
+        || saJapaneseIndex < 1 || saJapaneseIndex > saDialogState["fieldNames"].Length
+        || saExplanationIndex < 1 || saExplanationIndex > saDialogState["fieldNames"].Length)
+        return false
+    saProfile := saDialogState["profiles"][saProfileIndex]
+    saExisting := StudyAnkiLoadMapping(saProfile)
+    return Map(
+        "profile", saProfile,
+        "deck", saDialogState["decks"][saDeckIndex],
+        "addDeck", saExisting.Has("addDeck") ? saExisting["addDeck"] : "",
+        "vocabularyDeck", saExisting.Has("vocabularyDeck")
+            ? saExisting["vocabularyDeck"] : "",
+        "model", saDialogState["models"][saModelIndex],
+        "japaneseField", saDialogState["fieldNames"][saJapaneseIndex],
+        "explanationField", saDialogState["fieldNames"][saExplanationIndex]
+    )
+}
+
+StudyAnkiUpdateConnectionText(saDialogState, saStatus) {
+    saCode := saStatus["code"]
+    if (saCode = "connected") {
+        saText := "Connected to AnkiConnect"
+        if (saStatus["version"] != "")
+            saText .= " (API " saStatus["version"] ")"
+    } else
+        saText := saStatus["message"] != "" ? saStatus["message"] : "Anki is unavailable."
+    saDialogState["status"].Value := saText
+    saConnected := saCode = "connected"
+    for saControl in [
+        saDialogState["profileDdl"], saDialogState["deckDdl"],
+        saDialogState["modelDdl"], saDialogState["japaneseDdl"],
+        saDialogState["explanationDdl"], saDialogState["saveButton"],
+        saDialogState["refreshButton"]
+    ]
+        saControl.Enabled := saConnected
+}
+
+StudyAnkiDiscover(saDialogState, *) {
+    if !StudyAnkiRunBridge(saDialogState["libraryState"], "discover") {
+        saDialogState["status"].Value :=
+            "The Anki check failed. Please try Test connection again."
+        return
+    }
+    saLibraryState := saDialogState["libraryState"]
+    saStatus := StudyAnkiReadStatus(saLibraryState)
+    saDialogState["decks"] := []
+    for saRow in StudyLibraryReadRows(saLibraryState["outputDir"] "\anki_decks.tsv") {
+        if saRow.Length
+            saDialogState["decks"].Push(StudyLibraryHexDecode(saRow[1]))
+    }
+    saDialogState["models"] := []
+    saDialogState["modelFields"] := Map()
+    for saRow in StudyLibraryReadRows(saLibraryState["outputDir"] "\anki_models.tsv") {
+        if (saRow.Length < 1)
+            continue
+        saModel := StudyLibraryHexDecode(saRow[1])
+        saField := saRow.Length >= 2 ? StudyLibraryHexDecode(saRow[2]) : ""
+        if !saDialogState["modelFields"].Has(saModel) {
+            saDialogState["models"].Push(saModel)
+            saDialogState["modelFields"][saModel] := []
+        }
+        if (saField != "")
+            saDialogState["modelFields"][saModel].Push(saField)
+    }
+    saDialogState["deckDdl"].Delete()
+    saDialogState["modelDdl"].Delete()
+    if saDialogState["decks"].Length
+        saDialogState["deckDdl"].Add(saDialogState["decks"])
+    if saDialogState["models"].Length
+        saDialogState["modelDdl"].Add(saDialogState["models"])
+    StudyAnkiUpdateConnectionText(saDialogState, saStatus)
+    if (saStatus["code"] = "connected")
+        StudyAnkiApplyProfileMapping(saDialogState)
+}
+
+StudyAnkiSaveDialogMapping(saDialogState, saAnnounce := true, *) {
+    saMapping := StudyAnkiCurrentMapping(saDialogState)
+    if !IsObject(saMapping) {
+        if saAnnounce
+            MsgBox(
+                "Select a Profile, deck, note type, and fields first.",
+                "Study Library - Anki", "OK Icon!"
+            )
+        return false
+    }
+    StudyAnkiSaveMapping(saMapping)
+    if saAnnounce
+        saDialogState["status"].Value := "Mapping saved for " saMapping["profile"] "."
+    return saMapping
+}
+
+StudyAnkiRefreshLinks(saDialogState, *) {
+    global CPStudyReaderState
+    saMapping := StudyAnkiSaveDialogMapping(saDialogState, false)
+    if !IsObject(saMapping) {
+        MsgBox(
+            "Select a Profile, deck, note type, and fields first.",
+            "Study Library - Anki", "OK Icon!"
+        )
+        return
+    }
+    saEnvironment := Map(
+        "STUDY_ANKI_PROFILE", saMapping["profile"],
+        "STUDY_ANKI_DECK", saMapping["deck"],
+        "STUDY_ANKI_MODEL", saMapping["model"],
+        "STUDY_ANKI_JAPANESE_FIELD", saMapping["japaneseField"],
+        "STUDY_ANKI_EXPLANATION_FIELD", saMapping["explanationField"]
+    )
+    for saName, saValue in saEnvironment
+        EnvSet(saName, saValue)
+    try saRan := StudyAnkiRunBridge(saDialogState["libraryState"], "refresh")
+    finally {
+        for saName, saValue in saEnvironment
+            EnvSet(saName, "")
+    }
+    if !saRan
+        return
+    saStatus := StudyAnkiReadStatus(saDialogState["libraryState"])
+    StudyAnkiUpdateConnectionText(saDialogState, saStatus)
+    if (saStatus["code"] != "connected")
+        return
+    saRows := StudyLibraryReadRows(
+        saDialogState["libraryState"]["outputDir"] "\anki_refresh.tsv"
+    )
+    if saRows.Length && saRows[1].Length >= 4 {
+        saRow := saRows[1]
+        saDialogState["status"].Value := "Checked " saRow[1] " explanation"
+            . (saRow[1] = "1" ? "" : "s") ": " saRow[2] " found, "
+            . saRow[3] " not found."
+        if (Integer(saRow[4]) > 0)
+            saDialogState["status"].Value .= " " saRow[4] " duplicate match(es)."
+    }
+    saLibraryState := saDialogState["libraryState"]
+    StudyLibraryRefresh(saLibraryState)
+    if (CPStudyReaderState && CPStudyReaderState.Has("gui")) {
+        try StudyLibraryLoadGroup(
+            CPStudyReaderState, CPStudyReaderState["currentGroupId"],
+            CPStudyReaderState["currentVersion"]
+        )
+    }
+}
+
+StudyLibraryOpenAnki(slState, *) {
+    global iniPath
+    saProfiles := StudyAnkiProfiles(slState)
+    if !saProfiles.Length {
+        MsgBox(
+            "No named Study Library Profiles are available yet.`n`n"
+            . "Generate an explanation while a unified Profile is active first.",
+            "Study Library - Anki", "OK Icon!"
+        )
+        return
+    }
+    saGui := Gui(
+        "+Owner" slState["gui"].Hwnd " +OwnDialogs",
+        "Study Library - Anki"
+    )
+    saGui.MarginX := 18, saGui.MarginY := 16
+    saGui.SetFont("s10", "Segoe UI")
+    saGui.Add("Text", "xm ym w590", "Read-only Anki link check").SetFont("s11 Bold")
+    saGui.Add(
+        "Text", "xm y+6 w590 h42",
+        "This checks for exact normalized Japanese matches and does not change "
+        . "anything in Anki. A parent deck also includes its subdecks."
+    )
+    saStatusText := saGui.Add("Text", "xm y+12 w430 h42 cGray", "Checking AnkiConnect...")
+    CPRegisterMutedControl(saStatusText)
+    saTest := saGui.Add("Button", "x+10 yp w140 h30", "Test connection")
+    ; Leave the profile row below the taller connection-status text as well as
+    ; the shorter Test button, so the themed DropDownList border cannot overlap.
+    saGui.Add("Text", "xm y+22 w130", "Study Profile:")
+    saProfileDdl := saGui.Add("DropDownList", "x+10 yp-4 w450 0x210", saProfiles)
+    saGui.Add("Text", "xm y+14 w130", "Anki deck / parent:")
+    saDeckDdl := saGui.Add("DropDownList", "x+10 yp-4 w450 0x210", [])
+    saGui.Add("Text", "xm y+14 w130", "Note type:")
+    saModelDdl := saGui.Add("DropDownList", "x+10 yp-4 w450 0x210", [])
+    saGui.Add("Text", "xm y+14 w130", "Japanese field:")
+    saJapaneseDdl := saGui.Add("DropDownList", "x+10 yp-4 w450 0x210", [])
+    saGui.Add("Text", "xm y+14 w130", "Explanation field:")
+    saExplanationDdl := saGui.Add("DropDownList", "x+10 yp-4 w450 0x210", [])
+    saRefresh := saGui.Add("Button", "xm y+18 w190 h32 Default", "Refresh Anki status")
+    saSave := saGui.Add("Button", "x+10 yp w130 h32", "Save mapping")
+    saClose := saGui.Add("Button", "x+10 yp w100 h32", "Close")
+    saState := Map(
+        "gui", saGui,
+        "libraryState", slState,
+        "status", saStatusText,
+        "testButton", saTest,
+        "profileDdl", saProfileDdl,
+        "deckDdl", saDeckDdl,
+        "modelDdl", saModelDdl,
+        "japaneseDdl", saJapaneseDdl,
+        "explanationDdl", saExplanationDdl,
+        "refreshButton", saRefresh,
+        "saveButton", saSave,
+        "profiles", saProfiles,
+        "decks", [],
+        "models", [],
+        "modelFields", Map(),
+        "fieldNames", []
+    )
+    saActiveProfile := Trim(IniRead(iniPath, "game_profiles", "active", ""))
+    StudyAnkiChooseText(saProfileDdl, saProfiles, saActiveProfile)
+    saProfileDdl.OnEvent("Change", StudyAnkiApplyProfileMapping.Bind(saState))
+    saModelDdl.OnEvent("Change", StudyAnkiModelChanged.Bind(saState))
+    saTest.OnEvent("Click", StudyAnkiDiscover.Bind(saState))
+    saRefresh.OnEvent("Click", StudyAnkiRefreshLinks.Bind(saState))
+    saSave.OnEvent("Click", StudyAnkiSaveDialogMapping.Bind(saState, true))
+    saClose.OnEvent("Click", StudyLibraryCloseDialog.Bind(saGui))
+    saGui.OnEvent("Escape", StudyLibraryCloseDialog.Bind(saGui))
+    saGui.OnEvent("Close", StudyLibraryCloseDialog.Bind(saGui))
+    saGui.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(saGui)
+    StudyAnkiDiscover(saState)
+}
+
+StudyAnkiDeckScope(saParentDeck, saDecks) {
+    saScoped := []
+    saParentFolded := StrLower(Trim(saParentDeck))
+    if (saParentFolded = "")
+        return saScoped
+    saPrefix := saParentFolded "::"
+    for saDeck in saDecks {
+        saDeckFolded := StrLower(Trim(saDeck))
+        if (saDeckFolded = saParentFolded
+            || SubStr(saDeckFolded, 1, StrLen(saPrefix)) = saPrefix)
+            saScoped.Push(saDeck)
+    }
+    return saScoped
+}
+
+StudyAnkiTextInList(saValues, saWanted) {
+    saWanted := StrLower(Trim(saWanted))
+    for saValue in saValues {
+        if (StrLower(Trim(saValue)) = saWanted)
+            return true
+    }
+    return false
+}
+
+StudyAnkiReadAddResult(saState) {
+    saRows := StudyLibraryReadRows(saState["outputDir"] "\anki_add.tsv")
+    if !saRows.Length
+        return Map(
+            "code", "error", "noteId", "",
+            "message", "Anki did not return a result for this entry."
+        )
+    saRow := saRows[1]
+    return Map(
+        "code", saRow.Length >= 1 ? saRow[1] : "error",
+        "noteId", saRow.Length >= 2 ? saRow[2] : "",
+        "message", saRow.Length >= 3
+            ? StudyLibraryHexDecode(saRow[3]) : ""
+    )
+}
+
+StudyReaderWriteAnkiReviewFile(saPath, saText, saOwnerHwnd) {
+    saFile := 0
+    try {
+        try FileDelete(saPath)
+        saFile := FileOpen(saPath, "w", "UTF-8-RAW")
+        if !saFile
+            throw Error("The temporary review file could not be created.")
+        saFile.Write(saText)
+        saFile.Close()
+        return true
+    } catch as saWriteError {
+        try saFile.Close()
+        CPThemedOwnedMessage(
+            saOwnerHwnd,
+            "The reviewed Anki entry could not be prepared.`n`n"
+                . saWriteError.Message,
+            "Add to Anki", "ok", "error"
+        )
+        return false
+    }
+}
+
+StudyReaderCloseAnkiAddDialog(saAddState, *) {
+    if saAddState["closed"]
+        return
+    saAddState["closed"] := true
+    try saAddState["gui"].Destroy()
+    saOwnerHwnd := saAddState["readerState"]["gui"].Hwnd
+    if saOwnerHwnd && DllCall("user32\IsWindow", "ptr", saOwnerHwnd, "int") {
+        try DllCall("user32\EnableWindow", "ptr", saOwnerHwnd, "int", 1)
+        try WinActivate("ahk_id " saOwnerHwnd)
+    }
+}
+
+StudyReaderRefreshAfterAnkiAdd(saReaderState) {
+    global CPStudyLibraryState
+    saGroupId := saReaderState["currentGroupId"]
+    saVersion := saReaderState["currentVersion"]
+    try StudyLibraryLoadGroup(saReaderState, saGroupId, saVersion)
+    if (CPStudyLibraryState && CPStudyLibraryState.Has("gui")) {
+        try StudyLibraryRefresh(CPStudyLibraryState)
+        if (CPStudyLibraryState["currentGroupId"] = saGroupId)
+            try StudyLibraryLoadGroup(CPStudyLibraryState, saGroupId, saVersion)
+    }
+}
+
+StudyReaderCurrentScreenshot(saReaderState) {
+    saIndex := saReaderState["mediaIndex"]
+    if (saIndex < 1 || saIndex > saReaderState["media"].Length)
+        return ""
+    saPath := saReaderState["media"][saIndex]["path"]
+    return FileExist(saPath) ? saPath : ""
+}
+
+StudyReaderAnkiScreenshotPreferenceChanged(saAddState, *) {
+    if (saAddState["closed"] || !saAddState["includeScreenshot"].Enabled)
+        return
+    StudyAnkiSaveIncludeScreenshot(saAddState["includeScreenshot"].Value != 0)
+}
+
+StudyReaderStripGeneratedExample(saBack) {
+    ; Generated examples always occupy a clearly labelled final section.  This
+    ; also lets regeneration replace a manually adjusted generated example
+    ; without disturbing the reviewed vocabulary definition above it.
+    return RTrim(
+        RegExReplace(
+            saBack,
+            "s)(?:\R{2}|^)Example sentence:\R.*\z",
+            ""
+        ),
+        " `t`r`n"
+    )
+}
+
+StudyReaderHasGeneratedExample(saBack) {
+    return RegExMatch(
+        saBack,
+        "s)(?:\R{2}|^)Example sentence:\R.*\z"
+    ) != 0
+}
+
+StudyReaderGenerateVocabularyExample(saAddState, *) {
+    global pythonExe, explainProvider, explainOpenAIModel, explainGeminiModel
+    if saAddState["closed"] || saAddState["cardKind"] != "vocabulary"
+        return
+
+    saProvider := CPSyncExplanationSelectionFromControls()
+    if !CPApiKeyConfigured(saProvider) {
+        saProviderLabel := saProvider = "gemini" ? "Gemini" : "OpenAI"
+        CPThemedOwnedMessage(
+            saAddState["gui"].Hwnd,
+            saProviderLabel " API key missing.`n`nAdd it in the API Keys tab, "
+                . "or set the corresponding Windows environment variable and "
+                . "restart JRPG Translator.",
+            "Generate example sentence", "ok", "error"
+        )
+        return
+    }
+
+    saPython := ResolvePath(pythonExe)
+    saExampleScript := A_ScriptDir "\scripts\example_sentence.py"
+    if !(FileExist(saPython) && FileExist(saExampleScript)) {
+        CPThemedOwnedMessage(
+            saAddState["gui"].Hwnd,
+            "The configured Python runtime or example-sentence helper could not be found.",
+            "Generate example sentence", "ok", "error"
+        )
+        return
+    }
+
+    saFront := Trim(saAddState["front"].Value, " `t`r`n")
+    saCurrentBack := saAddState["back"].Value
+    saDefinition := StudyReaderStripGeneratedExample(saCurrentBack)
+    if (saFront = "" || Trim(saDefinition) = "") {
+        saAddState["status"].Value := "Enter the vocabulary term and definition first."
+        return
+    }
+
+    saReaderState := saAddState["readerState"]
+    saOutputDir := saReaderState["outputDir"]
+    saTermFile := saOutputDir "\example_term.txt"
+    saDefinitionFile := saOutputDir "\example_definition.txt"
+    saContextFile := saOutputDir "\example_context.txt"
+    saResultFile := saOutputDir "\example_sentence.tsv"
+    saOutFile := saOutputDir "\example_sentence_out.txt"
+    saErrFile := saOutputDir "\example_sentence_err.txt"
+    saContext := saReaderState["sections"].Length
+        ? saReaderState["sections"][1]["content"] : ""
+    if !StudyReaderWriteAnkiReviewFile(
+        saTermFile, saFront, saAddState["gui"].Hwnd
+    ) || !StudyReaderWriteAnkiReviewFile(
+        saDefinitionFile, saDefinition, saAddState["gui"].Hwnd
+    ) || !StudyReaderWriteAnkiReviewFile(
+        saContextFile, saContext, saAddState["gui"].Hwnd
+    )
+        return
+    for saTempFile in [saResultFile, saOutFile, saErrFile]
+        try FileDelete(saTempFile)
+
+    saEnvironmentNames := [
+        "EXPLAIN_PROVIDER", "EXPLAIN_MODEL", "GEMINI_EXPLAIN_MODEL",
+        "EXAMPLE_TERM_FILE", "EXAMPLE_DEFINITION_FILE",
+        "EXAMPLE_CONTEXT_FILE", "EXAMPLE_RESULT_FILE",
+        "SETTINGS_DIR", "PYTHONIOENCODING"
+    ]
+    saOldEnvironment := Map()
+    for saEnvironmentName in saEnvironmentNames
+        saOldEnvironment[saEnvironmentName] := EnvGet(saEnvironmentName)
+
+    saExampleButton := saAddState["exampleButton"]
+    saExampleButton.Enabled := false
+    saAddState["addButton"].Enabled := false
+    saAddState["status"].Value := "Generating a learner-friendly example sentence..."
+    try DllCall(
+        "user32\RedrawWindow", "ptr", saAddState["gui"].Hwnd,
+        "ptr", 0, "ptr", 0, "uint", 0x185
+    )
+    saExitCode := -1
+    try {
+        EnvSet("EXPLAIN_PROVIDER", saProvider)
+        if (saProvider = "gemini") {
+            saModel := explainGeminiModel
+            if (SubStr(saModel, 1, 7) != "models/")
+                saModel := "models/" saModel
+            EnvSet("GEMINI_EXPLAIN_MODEL", saModel)
+            EnvSet("EXPLAIN_MODEL", "")
+        } else {
+            EnvSet("EXPLAIN_MODEL", explainOpenAIModel)
+            EnvSet("GEMINI_EXPLAIN_MODEL", "")
+        }
+        EnvSet("EXAMPLE_TERM_FILE", saTermFile)
+        EnvSet("EXAMPLE_DEFINITION_FILE", saDefinitionFile)
+        EnvSet("EXAMPLE_CONTEXT_FILE", saContextFile)
+        EnvSet("EXAMPLE_RESULT_FILE", saResultFile)
+        EnvSet("SETTINGS_DIR", A_ScriptDir "\Settings")
+        EnvSet("PYTHONIOENCODING", "utf-8")
+        saCommand := Format(
+            'cmd /c chcp 65001>nul & "{1}" "{2}" 1>"{3}" 2>"{4}"',
+            saPython, saExampleScript, saOutFile, saErrFile
+        )
+        DbgCP("Vocabulary example -> " saCommand)
+        saExitCode := RunWait(saCommand, , "Hide")
+    } finally {
+        for saEnvironmentName, saEnvironmentValue in saOldEnvironment
+            EnvSet(saEnvironmentName, saEnvironmentValue)
+    }
+
+    saExampleButton.Enabled := true
+    saAddState["addButton"].Enabled := true
+    saRows := StudyLibraryReadRows(saResultFile)
+    if (saExitCode != 0 || !saRows.Length || saRows[1].Length < 4
+        || saRows[1][1] != "ok") {
+        saError := FileExist(saErrFile)
+            ? Trim(FileRead(saErrFile, "UTF-8")) : ""
+        saOutput := FileExist(saOutFile)
+            ? Trim(FileRead(saOutFile, "UTF-8")) : ""
+        saAddState["status"].Value := "Example generation failed."
+        CPThemedOwnedMessage(
+            saAddState["gui"].Hwnd,
+            "The example sentence could not be generated.`n`n"
+                . (saError != "" ? saError : saOutput),
+            "Generate example sentence", "ok", "error", 650
+        )
+        return
+    }
+
+    saPlain := StudyLibraryHexDecode(saRows[1][2])
+    saReading := StudyLibraryHexDecode(saRows[1][3])
+    saTranslation := StudyLibraryHexDecode(saRows[1][4])
+    saExampleBlock := "Example sentence:`r`n" saPlain
+        . "`r`n`r`n" saReading "`r`n`r`n" saTranslation
+    saNewBack := saDefinition
+        . (saDefinition != "" ? "`r`n`r`n" : "")
+        . saExampleBlock
+    saAddState["back"].Value := saNewBack
+    saAddState["exampleGenerated"] := true
+    saExampleButton.Text := "Regenerate example…"
+    ; Put the newly generated section in view immediately for review.
+    try {
+        saAddState["back"].Focus()
+        saEnd := StrLen(saNewBack)
+        SendMessage(0x00B1, saEnd, saEnd, saAddState["back"].Hwnd) ; EM_SETSEL
+        SendMessage(0x00B7, 0, 0, saAddState["back"].Hwnd) ; EM_SCROLLCARET
+    }
+    saAddState["status"].Value := "Example generated. Review it before adding."
+}
+
+StudyReaderAddReviewedAnkiNote(saAddState, *) {
+    if saAddState["closed"]
+        return
+    saDeckIndex := saAddState["deckDdl"].Value
+    if (saDeckIndex < 1 || saDeckIndex > saAddState["decks"].Length) {
+        saAddState["status"].Value := "Select a destination deck."
+        return
+    }
+    saDeck := saAddState["decks"][saDeckIndex]
+    saFront := Trim(saAddState["front"].Value, " `t`r`n")
+    saBack := Trim(saAddState["back"].Value, " `t`r`n")
+    if (saFront = "" || saBack = "") {
+        saAddState["status"].Value := "Both the Japanese and explanation fields are required."
+        return
+    }
+    saMapping := saAddState["mapping"]
+    saCardKind := saAddState.Has("cardKind")
+        ? saAddState["cardKind"] : "explanation"
+    saIsVocabulary := saCardKind = "vocabulary"
+    saIncludeScreenshot := saAddState["includeScreenshot"].Enabled
+        && saAddState["includeScreenshot"].Value
+        && FileExist(saAddState["screenshotPath"])
+    saConfirm := "Add this "
+        . (saIsVocabulary ? "vocabulary" : "explanation")
+        . " entry to Anki?`n`n"
+        . "Deck: " saDeck "`n"
+        . "Note type: " saMapping["model"] "`n"
+        . "Fields: " saMapping["japaneseField"] " / "
+        . saMapping["explanationField"] "`n"
+        . "Source screenshot: " (saIncludeScreenshot
+            ? "Include compact JPEG on the back" : "Do not include")
+    if (CPThemedOwnedMessage(
+        saAddState["gui"].Hwnd, saConfirm, "Add to Anki",
+        "yesno", "info", 560
+    ) != "Yes")
+        return
+
+    saReaderState := saAddState["readerState"]
+    saFrontPath := saReaderState["outputDir"] "\anki_review_front.txt"
+    saBackPath := saReaderState["outputDir"] "\anki_review_back.txt"
+    if !StudyReaderWriteAnkiReviewFile(
+        saFrontPath, saFront, saAddState["gui"].Hwnd
+    ) || !StudyReaderWriteAnkiReviewFile(
+        saBackPath, saBack, saAddState["gui"].Hwnd
+    )
+        return
+
+    saEnvironment := Map(
+        "STUDY_ANKI_PROFILE", saMapping["profile"],
+        "STUDY_ANKI_PARENT_DECK", saMapping["deck"],
+        "STUDY_ANKI_DECK", saDeck,
+        "STUDY_ANKI_MODEL", saMapping["model"],
+        "STUDY_ANKI_JAPANESE_FIELD", saMapping["japaneseField"],
+        "STUDY_ANKI_EXPLANATION_FIELD", saMapping["explanationField"],
+        "STUDY_ANKI_GROUP_ID", saReaderState["currentGroupId"],
+        "STUDY_ANKI_VERSION", saReaderState["currentVersion"],
+        "STUDY_ANKI_FRONT_PATH", saFrontPath,
+        "STUDY_ANKI_BACK_PATH", saBackPath,
+        "STUDY_ANKI_CARD_KIND", saCardKind,
+        "STUDY_ANKI_INCLUDE_SCREENSHOT", saIncludeScreenshot ? "1" : "0",
+        "STUDY_ANKI_SCREENSHOT_PATH", saIncludeScreenshot
+            ? saAddState["screenshotPath"] : ""
+    )
+    saAddState["addButton"].Enabled := false
+    saAddState["status"].Value := "Checking for duplicates and adding to Anki..."
+    for saName, saValue in saEnvironment
+        EnvSet(saName, saValue)
+    try saRan := StudyAnkiRunBridge(saReaderState, "add-note")
+    finally {
+        for saName, saValue in saEnvironment
+            EnvSet(saName, "")
+    }
+    if !saRan {
+        saAddState["status"].Value := "The Anki bridge could not be started. Nothing was added to Anki."
+        saAddState["addButton"].Enabled := true
+        return
+    }
+    saResult := StudyAnkiReadAddResult(saReaderState)
+    saCode := StrLower(saResult["code"])
+    if (saCode = "added" || saCode = "duplicate"
+        || saCode = "added_unlinked") {
+        if saIsVocabulary
+            saMapping["vocabularyDeck"] := saDeck
+        else
+            saMapping["addDeck"] := saDeck
+        StudyAnkiSaveMapping(saMapping)
+        StudyReaderCloseAnkiAddDialog(saAddState)
+        if !saIsVocabulary
+            StudyReaderRefreshAfterAnkiAdd(saReaderState)
+        if (saCode = "added") {
+            CPThemedOwnedMessage(
+                saReaderState["gui"].Hwnd,
+                saResult["message"] != "" ? saResult["message"]
+                    : "The reviewed " (saIsVocabulary
+                        ? "vocabulary card" : "explanation")
+                        . " was added to Anki.",
+                "Added to Anki", "ok", "info"
+            )
+        } else if (saCode = "duplicate") {
+            CPThemedOwnedMessage(
+                saReaderState["gui"].Hwnd,
+                "Nothing new was added to Anki.`n`n" saResult["message"],
+                "Already in Anki", "ok", "info"
+            )
+        } else {
+            CPThemedOwnedMessage(
+                saReaderState["gui"].Hwnd, saResult["message"],
+                "Added, but not linked", "ok", "warning"
+            )
+        }
+        return
+    }
+    saAddState["status"].Value := saResult["message"] != ""
+        ? saResult["message"] : "Anki rejected the entry. Nothing was added to Anki."
+    saAddState["addButton"].Enabled := true
+}
+
+StudyReaderOpenAnkiAddDialog(srState, *) {
+    StudyReaderOpenReviewedAnkiDialog(srState, "explanation", "", "")
+}
+
+StudyReaderControlText(srControl) {
+    if !(IsObject(srControl) && srControl.Hwnd)
+        return ""
+    srLength := DllCall(
+        "user32\GetWindowTextLengthW", "ptr", srControl.Hwnd, "int"
+    )
+    if (srLength <= 0)
+        return ""
+    srBuffer := Buffer((srLength + 1) * 2, 0)
+    DllCall(
+        "user32\GetWindowTextW", "ptr", srControl.Hwnd,
+        "ptr", srBuffer.Ptr, "int", srLength + 1
+    )
+    return StrGet(srBuffer, srLength, "UTF-16")
+}
+
+StudyReaderSelectedExplanationText(srState) {
+    if !(srState.Has("explanation") && srState["explanation"].Hwnd)
+        return ""
+    srStart := Buffer(4, 0), srEnd := Buffer(4, 0)
+    DllCall(
+        "user32\SendMessageW", "ptr", srState["explanation"].Hwnd,
+        "uint", 0x00B0, "ptr", srStart.Ptr, "ptr", srEnd.Ptr
+    ) ; EM_GETSEL
+    srStartIndex := NumGet(srStart, 0, "UInt")
+    srEndIndex := NumGet(srEnd, 0, "UInt")
+    if (srEndIndex <= srStartIndex)
+        return ""
+    srText := StudyReaderControlText(srState["explanation"])
+    return Trim(
+        SubStr(srText, srStartIndex + 1, srEndIndex - srStartIndex),
+        " `t`r`n"
+    )
+}
+
+StudyReaderInferVocabularyCard(srSelection) {
+    srBack := Trim(srSelection, " `t`r`n")
+    srLine := ""
+    Loop Parse srBack, "`n", "`r" {
+        if (Trim(A_LoopField) != "") {
+            srLine := Trim(A_LoopField)
+            break
+        }
+    }
+    srLine := RegExReplace(srLine, "^\s*(?:[*•●▪◦]|[-–—]\s+)")
+    srDelimiter := 0
+    if RegExMatch(srLine, "\s*[—–―]\s*|\s+-\s+", &srDash)
+        srDelimiter := srDash.Pos(0)
+    srHead := srDelimiter > 0
+        ? Trim(SubStr(srLine, 1, srDelimiter - 1)) : ""
+    if InStr(srHead, "→")
+        srHead := Trim(RegExReplace(srHead, "^.*→\s*"))
+    srFront := StudyReaderRemoveJapaneseReadings(srHead)
+    ; This is only the isolated term heading, so kana-only parentheticals are
+    ; readings as well (for example a custom prompt's katakana spelling note).
+    srFront := RegExReplace(
+        srFront, "[\(（][ぁ-ゖァ-ヺー・･ /]+[\)）]", ""
+    )
+    srFront := Trim(srFront, " `t`r`n*•●▪◦")
+    srConfident := srFront != ""
+        && RegExMatch(srFront, "[ぁ-ゖァ-ヺ一-龯々〆ヵヶ]")
+    return Map(
+        "front", srConfident ? srFront : "",
+        "back", srBack,
+        "confident", srConfident
+    )
+}
+
+StudyReaderOpenVocabularyAnkiDialog(srState, *) {
+    srSelection := StudyReaderSelectedExplanationText(srState)
+    if (srSelection = "") {
+        CPThemedOwnedMessage(
+            srState["gui"].Hwnd,
+            "Select one complete vocabulary entry in the explanation text "
+                . "first, then choose Add selected vocabulary again.",
+            "Add vocabulary to Anki", "ok", "info"
+        )
+        return
+    }
+    srCard := StudyReaderInferVocabularyCard(srSelection)
+    StudyReaderOpenReviewedAnkiDialog(
+        srState, "vocabulary", srCard["front"], srCard["back"],
+        srCard["confident"]
+    )
+}
+
+StudyReaderShowAnkiMenu(srState, *) {
+    if ((srState.Has("editing") && srState["editing"])
+        || srState["currentGroupId"] <= 0)
+        return
+    srChoices := [
+        "Add full explanation...",
+        "Add selected vocabulary..."
+    ]
+    srActions := [
+        StudyReaderOpenAnkiAddDialog.Bind(srState),
+        StudyReaderOpenVocabularyAnkiDialog.Bind(srState)
+    ]
+    srChoice := CPThemedChoicePopup(
+        srState["gui"].Hwnd, srState["addAnkiButton"].Hwnd, srChoices
+    )
+    if (srChoice >= 1 && srChoice <= srActions.Length)
+        srActions[srChoice].Call()
+}
+
+StudyReaderOpenReviewedAnkiDialog(
+    srState, saCardKind, saReviewedFront, saReviewedBack,
+    saInferenceConfident := true
+) {
+    saIsVocabulary := saCardKind = "vocabulary"
+    if ((srState.Has("editing") && srState["editing"])
+        || srState["currentGroupId"] <= 0)
+        return
+    if (!saIsVocabulary && srState["currentAnkiStatus"] = "found") {
+        CPThemedOwnedMessage(
+            srState["gui"].Hwnd,
+            "An exact normalized Japanese match is already linked in Anki.",
+            "Already in Anki", "ok", "info"
+        )
+        return
+    }
+    saProfile := Trim(srState["currentProfile"])
+    if (saProfile = "") {
+        CPThemedOwnedMessage(
+            srState["gui"].Hwnd,
+            "This explanation has no named Profile. Assign a Profile before "
+                . "adding it to Anki so its deck mapping is unambiguous.",
+            "Add to Anki", "ok", "warning"
+        )
+        return
+    }
+    saMapping := StudyAnkiLoadMapping(saProfile)
+    if (saMapping["deck"] = "" || saMapping["model"] = ""
+        || saMapping["japaneseField"] = ""
+        || saMapping["explanationField"] = "") {
+        CPThemedOwnedMessage(
+            srState["gui"].Hwnd,
+            "No complete Anki mapping is saved for '" saProfile "'.`n`n"
+                . "Open Study Library > Libraries... > Anki setup first.",
+            "Add to Anki", "ok", "warning"
+        )
+        return
+    }
+
+    if !StudyAnkiRunBridge(srState, "discover")
+        return
+    saStatus := StudyAnkiReadStatus(srState)
+    if (saStatus["code"] != "connected") {
+        CPThemedOwnedMessage(
+            srState["gui"].Hwnd, saStatus["message"],
+            "Anki unavailable", "ok", "warning"
+        )
+        return
+    }
+    saAllDecks := []
+    for saRow in StudyLibraryReadRows(srState["outputDir"] "\anki_decks.tsv") {
+        if saRow.Length
+            saAllDecks.Push(StudyLibraryHexDecode(saRow[1]))
+    }
+    saDecks := StudyAnkiDeckScope(saMapping["deck"], saAllDecks)
+    if !saDecks.Length {
+        CPThemedOwnedMessage(
+            srState["gui"].Hwnd,
+            "The mapped Anki parent deck was not found:`n`n" saMapping["deck"],
+            "Add to Anki", "ok", "warning"
+        )
+        return
+    }
+    saModelFields := Map()
+    for saRow in StudyLibraryReadRows(srState["outputDir"] "\anki_models.tsv") {
+        if (saRow.Length < 1)
+            continue
+        saModel := StudyLibraryHexDecode(saRow[1])
+        saField := saRow.Length >= 2 ? StudyLibraryHexDecode(saRow[2]) : ""
+        if !saModelFields.Has(saModel)
+            saModelFields[saModel] := []
+        if (saField != "")
+            saModelFields[saModel].Push(saField)
+    }
+    if (!saModelFields.Has(saMapping["model"])
+        || !StudyAnkiTextInList(
+            saModelFields[saMapping["model"]], saMapping["japaneseField"]
+        ) || !StudyAnkiTextInList(
+            saModelFields[saMapping["model"]], saMapping["explanationField"]
+        )) {
+        CPThemedOwnedMessage(
+            srState["gui"].Hwnd,
+            "The saved note type or field mapping no longer exists in Anki.`n`n"
+                . "Open the Anki setup and update the mapping first.",
+            "Add to Anki", "ok", "warning"
+        )
+        return
+    }
+
+    saFront := saIsVocabulary ? saReviewedFront
+        : StudyReaderRemoveJapaneseReadings(srState["source"].Value)
+    saBack := saIsVocabulary ? saReviewedBack
+        : (srState["sections"].Length
+            ? srState["sections"][1]["content"] : "")
+    saGui := Gui(
+        "+Owner" srState["gui"].Hwnd " +OwnDialogs +AlwaysOnTop",
+        saIsVocabulary ? "Add vocabulary to Anki" : "Add explanation to Anki"
+    )
+    saGui.MarginX := 16, saGui.MarginY := 14
+    saGui.SetFont("s10", "Segoe UI")
+    saGui.Add("Text", "xm ym w560", "Review Anki entry").SetFont("s11 Bold")
+    saHint := saGui.Add(
+        "Text", "xm y+4 w560 h34 cGray",
+        saIsVocabulary
+            ? "The selected entry was parsed locally. Review the inferred term "
+                . "and definition before adding; both fields remain editable."
+            : "Nothing is sent until you confirm Add to Anki. The Japanese field starts "
+                . "without attached kana readings; both fields remain editable."
+    )
+    CPRegisterMutedControl(saHint)
+    saGui.Add(
+        "Text", "xm y+6 w560 h36",
+        "Profile: " saProfile "    Note type: " saMapping["model"] "`n"
+            . "Fields: " saMapping["japaneseField"] " / "
+            . saMapping["explanationField"]
+    )
+    saGui.Add("Text", "xm y+6 w120", "Destination deck:")
+    saDeckDdl := saGui.Add("DropDownList", "x+8 yp-4 w430 0x210", saDecks)
+    saPreferredDeck := saIsVocabulary
+        && saMapping.Has("vocabularyDeck")
+        && saMapping["vocabularyDeck"] != ""
+            ? saMapping["vocabularyDeck"]
+            : (saMapping["addDeck"] != ""
+                ? saMapping["addDeck"] : saMapping["deck"])
+    StudyAnkiChooseText(saDeckDdl, saDecks, saPreferredDeck)
+    saGui.Add("Text", "xm y+8 w560", saMapping["japaneseField"] " (Japanese)")
+    saFrontEdit := saGui.Add(
+        "Edit", "xm y+3 w560 h58 Multi VScroll", saFront
+    )
+    saBackLabel := saGui.Add(
+        "Text", "xm y+7 w560 h20",
+        saMapping["explanationField"] " (explanation)"
+    )
+    saBackLabel.GetPos(&saBackLabelX, &saBackLabelY, &saBackLabelW, &saBackLabelH)
+    saExampleButton := 0
+    if saIsVocabulary {
+        saExampleButton := saGui.Add(
+            "Button", "x386 y" (saBackLabelY - 5) " w190 h28",
+            StudyReaderHasGeneratedExample(saBack)
+                ? "Regenerate example…" : "Generate example…"
+        )
+    }
+    saBackEdit := saGui.Add(
+        "Edit", "xm y" (saBackLabelY + 23) " w560 h118 Multi VScroll", saBack
+    )
+    saScreenshotPath := StudyReaderCurrentScreenshot(srState)
+    saHasScreenshot := saScreenshotPath != ""
+    saGui.Add("Text", "xm y+7 w560", "Source screenshot")
+    saPreviewFrame := saGui.Add(
+        "Text", "xm y+3 w132 h78 Border Background101010", ""
+    )
+    saPreviewFrame.GetPos(&saFrameX, &saFrameY, &saFrameW, &saFrameH)
+    saPreviewPicture := saGui.Add(
+        "Picture", "x" (saFrameX + 3) " y" (saFrameY + 3) " w1 h1 Hidden", ""
+    )
+    if saHasScreenshot {
+        saNativeW := 0, saNativeH := 0
+        StudyLibraryImageDimensions(saScreenshotPath, &saNativeW, &saNativeH)
+        if (saNativeW <= 0 || saNativeH <= 0)
+            saNativeW := 126, saNativeH := 72
+        saPreviewScale := Min(126 / saNativeW, 72 / saNativeH)
+        saPreviewW := Max(1, Round(saNativeW * saPreviewScale))
+        saPreviewH := Max(1, Round(saNativeH * saPreviewScale))
+        saPreviewX := saFrameX + 3 + Floor((126 - saPreviewW) / 2)
+        saPreviewY := saFrameY + 3 + Floor((72 - saPreviewH) / 2)
+        saPreviewDpi := GetWindowDPI(saGui.Hwnd)
+        saPreviewLoadW := Max(1, Round(saPreviewW * saPreviewDpi / 96))
+        saPreviewLoadH := Max(1, Round(saPreviewH * saPreviewDpi / 96))
+        try {
+            saPreviewPicture.Value := "*w" saPreviewLoadW " *h"
+                . saPreviewLoadH " " saScreenshotPath
+            saPreviewPicture.Move(saPreviewX, saPreviewY, saPreviewW, saPreviewH)
+            saPreviewPicture.Visible := true
+        }
+    }
+    saIncludeScreenshot := saGui.Add(
+        "CheckBox", "x160 y" saFrameY " w400 h24",
+        "Include current screenshot on the card back"
+    )
+    saIncludeScreenshot.Enabled := saHasScreenshot
+    saIncludeScreenshot.Value := saHasScreenshot
+        && StudyAnkiIncludeScreenshotDefault() ? 1 : 0
+    saScreenshotHint := saGui.Add(
+        "Text", "x160 y" (saFrameY + 28) " w400 h45 cGray",
+        saHasScreenshot
+            ? "A compact JPEG copy (maximum 1280 px) is created for Anki. "
+                . "The Study Library original remains unchanged."
+            : "No source screenshot is saved for this explanation version."
+    )
+    CPRegisterMutedControl(saScreenshotHint)
+    saStatusText := saGui.Add(
+        "Text", "xm y+9 w560 h28 cGray",
+        !saIsVocabulary || saInferenceConfident
+            ? "Exact normalized Japanese duplicates are rejected before creation."
+            : "The term could not be inferred confidently. Enter the front field manually."
+    )
+    CPRegisterMutedControl(saStatusText)
+    saAddButton := saGui.Add("Button", "xm y+8 w110 h32 Default", "Add to Anki")
+    saCancelButton := saGui.Add("Button", "x+10 yp w100 h32", "Cancel")
+    saAddState := Map(
+        "gui", saGui,
+        "readerState", srState,
+        "mapping", saMapping,
+        "cardKind", saCardKind,
+        "decks", saDecks,
+        "deckDdl", saDeckDdl,
+        "front", saFrontEdit,
+        "back", saBackEdit,
+        "screenshotPath", saScreenshotPath,
+        "includeScreenshot", saIncludeScreenshot,
+        "status", saStatusText,
+        "addButton", saAddButton,
+        "exampleButton", saExampleButton,
+        "exampleGenerated", StudyReaderHasGeneratedExample(saBack),
+        "closed", false
+    )
+    saIncludeScreenshot.OnEvent(
+        "Click", StudyReaderAnkiScreenshotPreferenceChanged.Bind(saAddState)
+    )
+    saAddButton.OnEvent("Click", StudyReaderAddReviewedAnkiNote.Bind(saAddState))
+    if saIsVocabulary
+        saExampleButton.OnEvent(
+            "Click", StudyReaderGenerateVocabularyExample.Bind(saAddState)
+        )
+    saCancelButton.OnEvent("Click", StudyReaderCloseAnkiAddDialog.Bind(saAddState))
+    saGui.OnEvent("Escape", StudyReaderCloseAnkiAddDialog.Bind(saAddState))
+    saGui.OnEvent("Close", StudyReaderCloseAnkiAddDialog.Bind(saAddState))
+    try DllCall("user32\EnableWindow", "ptr", srState["gui"].Hwnd, "int", 0)
+    saGui.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(saGui)
+    saFrontEdit.Focus()
+}
+
 StudyLibraryFormatBytes(slBytes) {
     try slBytes := Max(0, Integer(slBytes))
     catch
@@ -6642,6 +7921,9 @@ StudyLibraryClearDetail(slState, slMessage := "Select an explanation.") {
     slState["currentSpeaker"] := ""
     slState["currentTags"] := ""
     slState["currentAddedToAnkiAt"] := ""
+    slState["currentAnkiStatus"] := "not_checked"
+    slState["currentAnkiNoteId"] := 0
+    slState["currentAnkiCheckedAt"] := ""
     slState["currentProfile"] := ""
     slState["currentProvider"] := ""
     slState["currentModel"] := ""
@@ -6664,6 +7946,8 @@ StudyLibraryClearDetail(slState, slMessage := "Select an explanation.") {
         slState["editExplanationButton"].Enabled := false
     if slState.Has("copyButton")
         slState["copyButton"].Enabled := false
+    if slState.Has("addAnkiButton")
+        slState["addAnkiButton"].Enabled := false
     slState["sectionDdl"].Delete()
     slState["sectionDdl"].Add(["Full explanation"])
     slState["sectionDdl"].Choose(1)
@@ -6700,6 +7984,8 @@ StudyLibrarySyncVersionNavigation(slState) {
         slState["previousVersion"].Enabled := slIndex > 1
     if slState.Has("nextVersion")
         slState["nextVersion"].Enabled := slIndex >= 1 && slIndex < slCount
+    if slState.Has("newVersionButton")
+        slState["newVersionButton"].Enabled := slCount > 0
     if slState.Has("removeVersionButton") {
         slState["removeVersionButton"].Text := slCount = 1
             ? "Remove explanation..."
@@ -6716,10 +8002,18 @@ StudyLibraryStepVersion(slState, slDirection, *) {
     if (slIndex < 1 || slTargetIndex < 1
         || slTargetIndex > slState["versions"].Length)
         return
+    slSectionKey := "full"
+    if slState.Has("entryIds") {
+        slSectionIndex := slState["sectionDdl"].Value
+        if (slSectionIndex >= 1
+            && slSectionIndex <= slState["sections"].Length)
+            slSectionKey := slState["sections"][slSectionIndex]["key"]
+    }
     StudyLibraryLoadGroup(
         slState,
         slState["currentGroupId"],
-        slState["versions"][slTargetIndex]["version"]
+        slState["versions"][slTargetIndex]["version"],
+        slSectionKey
     )
 }
 
@@ -6846,13 +8140,15 @@ StudyLibraryUpdateMetadataText(slState) {
         . "`r`nTags: "
         . (slState["currentTags"] != "" ? slState["currentTags"] : "—")
         . "    Anki: "
-        . (slState["currentAddedToAnkiAt"] != ""
-            ? "Added " SubStr(slState["currentAddedToAnkiAt"], 1, 10)
-            : "Not added")
+        . StudyAnkiStatusLabel(
+            slState["currentAnkiStatus"], slState["currentAddedToAnkiAt"]
+        )
         . "    Model: " slProvider " / " slModel "    Prompt: " slPrompt
 }
 
-StudyLibraryLoadGroup(slState, slGroupId, slVersion := 0) {
+StudyLibraryLoadGroup(
+    slState, slGroupId, slVersion := 0, slPreferredSectionKey := ""
+) {
     if (slGroupId <= 0)
         return StudyLibraryClearDetail(slState)
     if !StudyLibraryRunBridge(slState, "detail", slGroupId, slVersion)
@@ -6879,11 +8175,19 @@ StudyLibraryLoadGroup(slState, slGroupId, slVersion := 0) {
     slAddedToAnkiAt := slDetail.Length >= 14 ? StudyLibraryHexDecode(slDetail[14]) : ""
     slManuallyEditedAt := slDetail.Length >= 15
         ? StudyLibraryHexDecode(slDetail[15]) : ""
+    slAnkiStatus := slDetail.Length >= 16
+        ? StudyLibraryHexDecode(slDetail[16]) : "not_checked"
+    slAnkiNoteId := slDetail.Length >= 17 ? Integer(slDetail[17]) : 0
+    slAnkiCheckedAt := slDetail.Length >= 18
+        ? StudyLibraryHexDecode(slDetail[18]) : ""
     slState["currentVersion"] := slSelectedVersion
     slState["currentChapter"] := slChapter
     slState["currentSpeaker"] := slSpeaker
     slState["currentTags"] := slTags
     slState["currentAddedToAnkiAt"] := slAddedToAnkiAt
+    slState["currentAnkiStatus"] := slAnkiStatus
+    slState["currentAnkiNoteId"] := slAnkiNoteId
+    slState["currentAnkiCheckedAt"] := slAnkiCheckedAt
     slState["currentProfile"] := slProfile
     slState["currentProvider"] := slProvider
     slState["currentModel"] := slModel
@@ -6972,9 +8276,22 @@ StudyLibraryLoadGroup(slState, slGroupId, slVersion := 0) {
     }
     slState["sectionDdl"].Delete()
     slState["sectionDdl"].Add(slSectionLabels)
-    slState["sectionDdl"].Choose(1)
+    slTargetSectionIndex := 1
+    if (slPreferredSectionKey != "" && slPreferredSectionKey != "full") {
+        for slIndex, slSection in slState["sections"] {
+            if (slSection["key"] = slPreferredSectionKey) {
+                slTargetSectionIndex := slIndex
+                break
+            }
+        }
+    }
+    slState["sectionDdl"].Choose(slTargetSectionIndex)
     slState["sectionDdl"].Enabled := (slSectionLabels.Length > 1)
-    slState["explanation"].Value := slExplanationText
+    ; Paint only the requested section. Previously the loader displayed the
+    ; full explanation first and the Reader restored the section afterward,
+    ; causing a brief but visible flash during entry/version navigation.
+    slState["explanation"].Value :=
+        slState["sections"][slTargetSectionIndex]["content"]
     slState["suspend"] := false
     if slState.Has("sectionNavCallback")
         slState["sectionNavCallback"].Call()
@@ -7016,10 +8333,18 @@ StudyLibraryVersionChanged(slState, *) {
     slIndex := slState["versionDdl"].Value
     if (slIndex < 1 || slIndex > slState["versions"].Length)
         return
+    slSectionKey := "full"
+    if slState.Has("entryIds") {
+        slSectionIndex := slState["sectionDdl"].Value
+        if (slSectionIndex >= 1
+            && slSectionIndex <= slState["sections"].Length)
+            slSectionKey := slState["sections"][slSectionIndex]["key"]
+    }
     StudyLibraryLoadGroup(
         slState,
         slState["currentGroupId"],
-        slState["versions"][slIndex]["version"]
+        slState["versions"][slIndex]["version"],
+        slSectionKey
     )
 }
 
@@ -7126,14 +8451,26 @@ StudyReaderSyncEntryNavigation(srState, *) {
         srIndex := srState["entryIds"].Length
     }
     srCount := srState["entryIds"].Length
-    srState["previousEntry"].Enabled := srHasEntry && srIndex > 1
-    srState["nextEntry"].Enabled := srHasEntry && srIndex > 0 && srIndex < srCount
+    ; Entry browsing wraps at either end, so both controls remain useful as
+    ; long as there is more than one saved explanation.
+    srCanStep := srHasEntry && srIndex > 0 && srCount > 1
+    srState["previousEntry"].Enabled := srCanStep
+    srState["nextEntry"].Enabled := srCanStep
     srState["entryStatus"].Value := srHasEntry && srIndex
         ? srIndex " of " srCount : "No entry"
     srState["suspendAnki"] := true
-    srState["ankiCheck"].Enabled := srHasEntry
+    srFoundInAnki := srHasEntry && srState["currentAnkiStatus"] = "found"
+    srState["ankiCheck"].Enabled := srHasEntry && !srFoundInAnki
     srState["ankiCheck"].Value := srHasEntry
-        && srState["currentAddedToAnkiAt"] != "" ? 1 : 0
+        && (srFoundInAnki || srState["currentAddedToAnkiAt"] != "") ? 1 : 0
+    srState["ankiCheck"].Text := srFoundInAnki
+        ? "Found in Anki (exact match)"
+        : "Added to Anki (manual)  (Alt+A)"
+    if srState.Has("addAnkiButton")
+        ; Vocabulary cards remain available even if the complete explanation
+        ; already has an exact Anki match.
+        srState["addAnkiButton"].Enabled := srHasEntry
+            && !(srState.Has("editing") && srState["editing"])
     srState["suspendAnki"] := false
     if srHasEntry
         try IniWrite(srState["currentGroupId"], iniPath,
@@ -7188,23 +8525,509 @@ StudyReaderStepEntry(srState, srDirection, *) {
     if (srState.Has("editing") && srState["editing"])
         return
     srIndex := StudyReaderEntryIndex(srState)
-    srTargetIndex := srIndex + srDirection
-    if (srIndex <= 0 || srTargetIndex < 1
-        || srTargetIndex > srState["entryIds"].Length)
+    srCount := srState["entryIds"].Length
+    if (srIndex <= 0 || srCount <= 1)
         return
+    srSectionKey := "full"
+    srSectionIndex := srState["sectionDdl"].Value
+    if (srSectionIndex >= 1 && srSectionIndex <= srState["sections"].Length)
+        srSectionKey := srState["sections"][srSectionIndex]["key"]
+    srTargetIndex := srIndex + srDirection
+    if (srTargetIndex < 1)
+        srTargetIndex := srCount
+    else if (srTargetIndex > srCount)
+        srTargetIndex := 1
     StudyReaderRememberEntryView(srState)
     srTargetId := srState["entryIds"][srTargetIndex]
     srTargetVersion := 0
     if srState["entryViewMemory"].Has(srTargetId)
         srTargetVersion := srState["entryViewMemory"][srTargetId]["version"]
-    StudyLibraryLoadGroup(srState, srTargetId, srTargetVersion)
-    StudyReaderRestoreEntryView(srState, srTargetId)
+    ; Supply the section to the loader so the target section is painted
+    ; directly, without briefly showing Full explanation first.
+    StudyLibraryLoadGroup(srState, srTargetId, srTargetVersion, srSectionKey)
+}
+
+StudyReaderCurrentSectionKey(srState) {
+    srSectionKey := "full"
+    srSectionIndex := srState["sectionDdl"].Value
+    if (srSectionIndex >= 1 && srSectionIndex <= srState["sections"].Length)
+        srSectionKey := srState["sections"][srSectionIndex]["key"]
+    return srSectionKey
+}
+
+StudyReaderRefreshMainExplainPromptList() {
+    global ddlEPr
+    if !IsSet(ddlEPr)
+        return
+    srPreviousMainPrompt := Trim(ddlEPr.Text)
+    RefreshExplainPromptProfilesList(srPreviousMainPrompt)
+    ; If an externally deleted prompt was active in the Explanation tab,
+    ; persist the safe fallback selected by the shared refresh routine.
+    if (Trim(ddlEPr.Text) != srPreviousMainPrompt)
+        ExplainPromptChanged()
+}
+
+StudyReaderRefreshNewVersionPromptList(srNewState, srSelect := "") {
+    srPromptList := ListExplainPromptProfiles()
+    srPromptCombo := srNewState["prompt"]
+    srPromptCombo.Delete()
+    if !srPromptList.Length {
+        try srPromptCombo.Text := ""
+        return
+    }
+    srPromptCombo.Add(srPromptList)
+    srPromptIndex := srSelect != ""
+        ? ArrayIndexOf(srPromptList, srSelect) : 0
+    if !srPromptIndex
+        srPromptIndex := 1
+    srPromptCombo.Choose(srPromptIndex)
+}
+
+StudyReaderSaveNewVersionPrompt(
+    srNewState, srEditorGui, srEditor, srPath, srName, *
+) {
+    try {
+        if FileExist(srPath)
+            FileCopy(srPath, srPath ".bak", true)
+        srFile := FileOpen(srPath, "w", "UTF-8")
+        if !srFile
+            throw Error("The prompt file could not be opened for writing.")
+        srFile.Write(srEditor.Value)
+        srFile.Close()
+        StudyReaderRefreshNewVersionPromptList(srNewState, srName)
+        StudyReaderRefreshMainExplainPromptList()
+        Toast("Saved EXPLAIN prompt: " srName)
+    } catch as srPromptError {
+        CPThemedOwnedMessage(
+            srEditorGui.Hwnd,
+            "The explanation prompt could not be saved.`n`n"
+                . srPromptError.Message,
+            "Edit Explanation Prompt", "ok", "error"
+        )
+    }
+}
+
+StudyReaderEditNewVersionPrompt(srNewState, *) {
+    srName := Trim(srNewState["prompt"].Text)
+    if (srName = "")
+        srName := "default"
+    srPath := ExplainProfilePath(srName)
+    srText := ""
+    try srText := FileExist(srPath) ? FileRead(srPath, "UTF-8") : ""
+
+    srEditorGui := Gui(
+        "+Resize +Owner" srNewState["gui"].Hwnd,
+        "Edit Explanation Prompt - " srName
+    )
+    srEditor := srEditorGui.Add(
+        "Edit", "xm ym w680 h420 WantTab WantReturn Wrap", srText
+    )
+    srSave := srEditorGui.Add("Button", "xm y+8 w100", "Save")
+    srClose := srEditorGui.Add("Button", "x+8 yp w100", "Close")
+    srSave.OnEvent(
+        "Click",
+        StudyReaderSaveNewVersionPrompt.Bind(
+            srNewState, srEditorGui, srEditor, srPath, srName
+        )
+    )
+    srClose.OnEvent("Click", (*) => srEditorGui.Destroy())
+    srEditorGui.OnEvent("Size", (gui, mm, w, h) => (
+        srEditor.Move(, , Max(300, w - 40), Max(180, h - 90)),
+        srButtonY := h - 52,
+        srSave.Move(20, srButtonY, 100, 32),
+        srClose.Move(128, srButtonY, 100, 32)
+    ))
+    CPShowTextEditorDialog(
+        srEditorGui, srEditor, srNewState["gui"].Hwnd
+    )
+}
+
+StudyReaderAddNewVersionPrompt(srNewState, *) {
+    srInput := CPThemedInputBox(
+        "Enter a name for the new EXPLANATION prompt:",
+        "New EXPLAIN prompt", "", "", 420, srNewState["gui"].Hwnd
+    )
+    if (srInput.Result = "Cancel")
+        return
+    srName := Trim(srInput.Value)
+    if (srName = "") {
+        CPThemedOwnedMessage(
+            srNewState["gui"].Hwnd, "Please enter a non-empty name.",
+            "New EXPLAIN prompt", "ok", "warning"
+        )
+        return
+    }
+    srName := RegExReplace(srName, '[\\/:*?"<>|]+', "_")
+    if RegExMatch(srName, 'i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$')
+        srName := "_" srName
+    srPath := ExplainProfilePath(srName)
+    if FileExist(srPath) {
+        CPThemedOwnedMessage(
+            srNewState["gui"].Hwnd,
+            "A prompt with that name already exists.",
+            "New EXPLAIN prompt", "ok", "warning"
+        )
+        return
+    }
+    FileAppend(
+        "You are a friendly tutor for learners of Japanese.`r`n`r`n"
+            . "Japanese:`r`n{jp}",
+        srPath, "UTF-8"
+    )
+    StudyReaderRefreshNewVersionPromptList(srNewState, srName)
+    StudyReaderRefreshMainExplainPromptList()
+}
+
+StudyReaderDeleteNewVersionPrompt(srNewState, *) {
+    srName := Trim(srNewState["prompt"].Text)
+    if (srName = "") {
+        CPThemedOwnedMessage(
+            srNewState["gui"].Hwnd, "No EXPLAIN prompt selected.",
+            "Delete EXPLAIN prompt", "ok", "warning"
+        )
+        return
+    }
+    if (CPThemedOwnedMessage(
+        srNewState["gui"].Hwnd,
+        "Delete EXPLAIN prompt '" srName "'?",
+        "Delete EXPLAIN prompt", "yesno", "warning"
+    ) != "Yes")
+        return
+    try FileDelete(ExplainProfilePath(srName))
+    StudyReaderRefreshNewVersionPromptList(srNewState)
+    StudyReaderRefreshMainExplainPromptList()
+}
+
+StudyReaderNewVersionProviderChanged(srNewState, *) {
+    srProvider := StrLower(Trim(srNewState["provider"].Text))
+    srNewState["geminiModel"].Enabled := srProvider = "gemini"
+    srNewState["openAIModel"].Enabled := srProvider = "openai"
+}
+
+StudyReaderCloseNewVersionDialog(srNewState, *) {
+    if srNewState.Has("closed") && srNewState["closed"]
+        return
+    srNewState["closed"] := true
+    try srNewState["readerState"]["newVersionDialog"] := 0
+    try srNewState["gui"].Destroy()
+}
+
+StudyReaderGenerateNewVersion(srNewState, *) {
+    global pythonExe, explainScript, debugMode, CPStudyLibraryState
+    srReaderState := srNewState["readerState"]
+    if (srReaderState["currentGroupId"] <= 0)
+        return
+    srProvider := StrLower(Trim(srNewState["provider"].Text))
+    if (srProvider != "gemini" && srProvider != "openai")
+        return
+    srModel := Trim(
+        srProvider = "gemini"
+            ? srNewState["geminiModel"].Text
+            : srNewState["openAIModel"].Text
+    )
+    srPromptName := Trim(srNewState["prompt"].Text)
+    if (srModel = "" || srPromptName = "") {
+        CPThemedOwnedMessage(
+            srNewState["gui"].Hwnd,
+            "Select a model and an explanation prompt first.",
+            "Generate new explanation version", "ok", "warning"
+        )
+        return
+    }
+    if !CPApiKeyConfigured(srProvider) {
+        srProviderLabel := srProvider = "gemini" ? "Gemini" : "OpenAI"
+        CPThemedOwnedMessage(
+            srNewState["gui"].Hwnd,
+            srProviderLabel " API key missing.`n`nAdd it in the API Keys tab, "
+                . "or set the corresponding Windows environment variable and "
+                . "restart JRPG Translator.",
+            "Generate new explanation version", "ok", "error"
+        )
+        return
+    }
+
+    srPython := ResolvePath(pythonExe)
+    srExplainer := ResolvePath(explainScript)
+    if !(FileExist(srPython) && FileExist(srExplainer)) {
+        CPThemedOwnedMessage(
+            srNewState["gui"].Hwnd,
+            "The configured Python runtime or explainer script could not be found.",
+            "Generate new explanation version", "ok", "error"
+        )
+        return
+    }
+    srSourceText := Trim(srReaderState["source"].Value)
+    srSourceFile := srReaderState["outputDir"] "\\new_version_source.txt"
+    srPathsFile := srReaderState["outputDir"] "\\new_version_media.txt"
+    try FileDelete(srSourceFile)
+    try FileDelete(srPathsFile)
+    srSourceHandle := FileOpen(srSourceFile, "w", "UTF-8-RAW")
+    if !srSourceHandle {
+        CPThemedOwnedMessage(
+            srNewState["gui"].Hwnd,
+            "The archived Japanese source could not be prepared.",
+            "Generate new explanation version", "ok", "error"
+        )
+        return
+    }
+    srSourceHandle.Write(srSourceText)
+    srSourceHandle.Close()
+    srMediaHandle := FileOpen(srPathsFile, "w", "UTF-8-RAW")
+    if srMediaHandle {
+        for srMediaItem in srReaderState["media"] {
+            srMediaPath := srMediaItem["path"]
+            if FileExist(srMediaPath)
+                srMediaHandle.Write(srMediaPath "`n")
+        }
+        srMediaHandle.Close()
+    }
+    srPromptPath := ExplainProfilePath(srPromptName)
+    if !FileExist(srPromptPath) {
+        CPThemedOwnedMessage(
+            srNewState["gui"].Hwnd,
+            "The selected explanation prompt no longer exists.",
+            "Generate new explanation version", "ok", "error"
+        )
+        return
+    }
+
+    SplitPath(srReaderState["database"],, &srStudyDir)
+    srEnvironmentNames := [
+        "EXPLAIN_PROVIDER", "EXPLAIN_MODEL", "GEMINI_EXPLAIN_MODEL",
+        "EXPLAIN_PROMPT_FILE", "EXPLAIN_PROMPT_PROFILE",
+        "EXPLAIN_SOURCE_TEXT_FILE", "EXPLAIN_SOURCE_PATHS_FILE",
+        "EXPLAIN_UPDATE_OVERLAY", "SAVE_EXPLAINS", "SAVE_STUDY_LIBRARY",
+        "STUDY_LIBRARY_SCREENSHOTS", "STUDY_LIBRARY_DIR",
+        "STUDY_LIBRARY_PROFILE", "SETTINGS_DIR", "JRPG_DEBUG",
+        "PYTHONIOENCODING"
+    ]
+    srOldEnvironment := Map()
+    for srEnvironmentName in srEnvironmentNames
+        srOldEnvironment[srEnvironmentName] := EnvGet(srEnvironmentName)
+
+    srOutFile := srReaderState["outputDir"] "\\new_version_out.txt"
+    srErrFile := srReaderState["outputDir"] "\\new_version_err.txt"
+    try FileDelete(srOutFile)
+    try FileDelete(srErrFile)
+    srOldVersionCount := srReaderState["versions"].Length
+    srSectionKey := StudyReaderCurrentSectionKey(srReaderState)
+    srNewState["generateButton"].Enabled := false
+    srNewState["cancelButton"].Enabled := false
+    srNewState["status"].Value := "Generating another explanation..."
+    try DllCall(
+        "user32\\RedrawWindow", "ptr", srNewState["gui"].Hwnd,
+        "ptr", 0, "ptr", 0, "uint", 0x185
+    )
+    Toast("Generating another explanation…")
+    srExitCode := -1
+    try {
+        EnvSet("EXPLAIN_PROVIDER", srProvider)
+        if (srProvider = "gemini") {
+            srGeminiModel := srModel
+            if (SubStr(srGeminiModel, 1, 7) != "models/")
+                srGeminiModel := "models/" srGeminiModel
+            EnvSet("GEMINI_EXPLAIN_MODEL", srGeminiModel)
+            EnvSet("EXPLAIN_MODEL", "")
+        } else {
+            EnvSet("EXPLAIN_MODEL", srModel)
+            EnvSet("GEMINI_EXPLAIN_MODEL", "")
+        }
+        EnvSet("EXPLAIN_PROMPT_FILE", srPromptPath)
+        EnvSet("EXPLAIN_PROMPT_PROFILE", srPromptName)
+        EnvSet("EXPLAIN_SOURCE_TEXT_FILE", srSourceFile)
+        EnvSet("EXPLAIN_SOURCE_PATHS_FILE", srPathsFile)
+        EnvSet("EXPLAIN_UPDATE_OVERLAY", "0")
+        EnvSet("SAVE_EXPLAINS", "0")
+        EnvSet("SAVE_STUDY_LIBRARY", "1")
+        EnvSet("STUDY_LIBRARY_SCREENSHOTS", "1")
+        EnvSet("STUDY_LIBRARY_DIR", srStudyDir)
+        EnvSet("STUDY_LIBRARY_PROFILE", srReaderState["currentProfile"])
+        EnvSet("SETTINGS_DIR", A_ScriptDir "\\Settings")
+        EnvSet("JRPG_DEBUG", debugMode ? "1" : "0")
+        EnvSet("PYTHONIOENCODING", "utf-8")
+        srCommand := Format(
+            'cmd /c chcp 65001>nul & "{1}" "{2}" 1>"{3}" 2>"{4}"',
+            srPython, srExplainer, srOutFile, srErrFile
+        )
+        DbgCP("Study Reader new version -> " srCommand)
+        srExitCode := RunWait(srCommand, , "Hide")
+    } finally {
+        for srEnvironmentName, srEnvironmentValue in srOldEnvironment
+            EnvSet(srEnvironmentName, srEnvironmentValue)
+    }
+    srOutput := FileExist(srOutFile)
+        ? Trim(FileRead(srOutFile, "UTF-8")) : ""
+    srError := FileExist(srErrFile)
+        ? Trim(FileRead(srErrFile, "UTF-8")) : ""
+    if (srExitCode != 0) {
+        srNewState["generateButton"].Enabled := true
+        srNewState["cancelButton"].Enabled := true
+        srNewState["status"].Value := "Generation failed."
+        CPThemedOwnedMessage(
+            srNewState["gui"].Hwnd,
+            "The new version could not be generated.`n`n"
+                . (srError != "" ? srError : srOutput),
+            "Generate new explanation version", "ok", "error", 650
+        )
+        return
+    }
+
+    StudyLibraryLoadGroup(
+        srReaderState, srReaderState["currentGroupId"], 0, srSectionKey
+    )
+    if (srReaderState["versions"].Length <= srOldVersionCount) {
+        srNewState["generateButton"].Enabled := true
+        srNewState["cancelButton"].Enabled := true
+        srNewState["status"].Value := "The Study Library was not updated."
+        CPThemedOwnedMessage(
+            srNewState["gui"].Hwnd,
+            "The model returned successfully, but no new Study Library version "
+                . "was found.`n`n" . (srError != "" ? srError : srOutput),
+            "Generate new explanation version", "ok", "error", 650
+        )
+        return
+    }
+    if (CPStudyLibraryState && CPStudyLibraryState.Has("gui")) {
+        try StudyLibraryRefresh(CPStudyLibraryState)
+        if (CPStudyLibraryState["currentGroupId"]
+            = srReaderState["currentGroupId"])
+            try StudyLibraryLoadGroup(
+                CPStudyLibraryState, srReaderState["currentGroupId"], 0
+            )
+    }
+    StudyReaderCloseNewVersionDialog(srNewState)
+    Toast("New explanation version added")
+}
+
+StudyReaderOpenNewVersionDialog(srState, *) {
+    global model_openai_explain, model_gemini_explain
+    global explainProvider, explainOpenAIModel, explainGeminiModel
+    global explainPromptProfile
+    if ((srState.Has("editing") && srState["editing"])
+        || srState["currentGroupId"] <= 0)
+        return
+    if (srState.Has("newVersionDialog")
+        && IsObject(srState["newVersionDialog"])) {
+        try {
+            WinActivate("ahk_id " srState["newVersionDialog"]["gui"].Hwnd)
+            return
+        }
+    }
+
+    srNewGui := Gui(
+        "+Owner" srState["gui"].Hwnd " +OwnDialogs",
+        "Generate new explanation version"
+    )
+    srNewGui.MarginX := 18, srNewGui.MarginY := 16
+    srNewGui.SetFont("s10", "Segoe UI")
+    srHeading := srNewGui.Add(
+        "Text", "xm ym w680 h28", "Generate new explanation version"
+    )
+    srHeading.SetFont("s12 Bold")
+    srNewGui.Add(
+        "Text", "xm y+4 w680 h42",
+        "Creates another version from the archived Japanese and source "
+            . "screenshots. Existing versions remain unchanged."
+    )
+    srNewGui.Add("Text", "xm y+12 w110", "AI provider:")
+    srProvider := srNewGui.Add(
+        "DropDownList", "x+8 yp-4 w300 0x210", ["Gemini", "OpenAI"]
+    )
+    srInitialProvider := StrLower(Trim(srState["currentProvider"]))
+    if (srInitialProvider != "gemini" && srInitialProvider != "openai")
+        srInitialProvider := StrLower(Trim(explainProvider))
+    if (srInitialProvider != "gemini" && srInitialProvider != "openai")
+        srInitialProvider := "gemini"
+    srProvider.Choose(srInitialProvider = "gemini" ? 1 : 2)
+
+    srNewGui.Add("Text", "xm y+13 w110", "Gemini model:")
+    srGeminiModel := srNewGui.Add(
+        "DropDownList", "x+8 yp-4 w300 0x210", model_gemini_explain
+    )
+    srGeminiDefault := srInitialProvider = "gemini"
+        ? Trim(srState["currentModel"]) : explainGeminiModel
+    if (SubStr(srGeminiDefault, 1, 7) = "models/")
+        srGeminiDefault := SubStr(srGeminiDefault, 8)
+    SetComboToExistingItem(
+        srGeminiModel, model_gemini_explain, srGeminiDefault
+    )
+
+    srNewGui.Add("Text", "xm y+13 w110", "OpenAI model:")
+    srOpenAIModel := srNewGui.Add(
+        "DropDownList", "x+8 yp-4 w300 0x210", model_openai_explain
+    )
+    srOpenAIDefault := srInitialProvider = "openai"
+        ? Trim(srState["currentModel"]) : explainOpenAIModel
+    SetComboToExistingItem(
+        srOpenAIModel, model_openai_explain, srOpenAIDefault
+    )
+
+    srNewGui.Add("Text", "xm y+13 w110", "Prompt:")
+    srPrompt := srNewGui.Add(
+        "DropDownList", "x+8 yp-4 w300 0x210", []
+    )
+    srPromptEdit := srNewGui.Add("Button", "x+8 yp w70", "Edit")
+    srPromptAdd := srNewGui.Add("Button", "x+6 yp w70", "Add")
+    srPromptDelete := srNewGui.Add("Button", "x+6 yp w70", "Delete")
+    srStatus := srNewGui.Add("Text", "xm y+18 w680 h24", "Ready.")
+    srGenerate := srNewGui.Add(
+        "Button", "xm y+10 w190 h34 Default", "Generate new version"
+    )
+    srCancel := srNewGui.Add("Button", "x+10 yp w120 h34", "Cancel")
+
+    srNewState := Map(
+        "gui", srNewGui,
+        "readerState", srState,
+        "provider", srProvider,
+        "geminiModel", srGeminiModel,
+        "openAIModel", srOpenAIModel,
+        "prompt", srPrompt,
+        "status", srStatus,
+        "generateButton", srGenerate,
+        "cancelButton", srCancel,
+        "closed", false
+    )
+    srState["newVersionDialog"] := srNewState
+    srPromptDefault := Trim(srState["currentPrompt"])
+    if (srPromptDefault = "")
+        srPromptDefault := explainPromptProfile
+    StudyReaderRefreshNewVersionPromptList(srNewState, srPromptDefault)
+    StudyReaderNewVersionProviderChanged(srNewState)
+
+    srProvider.OnEvent(
+        "Change", StudyReaderNewVersionProviderChanged.Bind(srNewState)
+    )
+    srPromptEdit.OnEvent(
+        "Click", StudyReaderEditNewVersionPrompt.Bind(srNewState)
+    )
+    srPromptAdd.OnEvent(
+        "Click", StudyReaderAddNewVersionPrompt.Bind(srNewState)
+    )
+    srPromptDelete.OnEvent(
+        "Click", StudyReaderDeleteNewVersionPrompt.Bind(srNewState)
+    )
+    srGenerate.OnEvent(
+        "Click", StudyReaderGenerateNewVersion.Bind(srNewState)
+    )
+    srCancel.OnEvent(
+        "Click", StudyReaderCloseNewVersionDialog.Bind(srNewState)
+    )
+    srNewGui.OnEvent(
+        "Escape", StudyReaderCloseNewVersionDialog.Bind(srNewState)
+    )
+    srNewGui.OnEvent(
+        "Close", StudyReaderCloseNewVersionDialog.Bind(srNewState)
+    )
+    srNewGui.Show("Hide AutoSize")
+    CPApplyOwnedDialogTheme(srNewGui)
+    srNewGui.Show("AutoSize Center")
 }
 
 StudyReaderAnkiChanged(srState, *) {
     global CPStudyLibraryState
     if ((srState.Has("editing") && srState["editing"])
-        || srState["suspendAnki"] || srState["currentGroupId"] <= 0)
+        || srState["suspendAnki"] || srState["currentGroupId"] <= 0
+        || srState["currentAnkiStatus"] = "found")
         return
     srDesired := srState["ankiCheck"].Value ? 1 : 0
     srPrevious := srState["currentAddedToAnkiAt"]
@@ -7238,7 +9061,8 @@ StudyReaderAnkiChanged(srState, *) {
 
 StudyReaderToggleAnki(srState, *) {
     if ((srState.Has("editing") && srState["editing"])
-        || srState["currentGroupId"] <= 0)
+        || srState["currentGroupId"] <= 0
+        || srState["currentAnkiStatus"] = "found")
         return
     srState["ankiCheck"].Value := srState["ankiCheck"].Value ? 0 : 1
     StudyReaderAnkiChanged(srState)
@@ -7248,12 +9072,14 @@ StudyReaderSetEditing(srState, srEditing) {
     srState["editing"] := srEditing
     srState["explanation"].Opt(srEditing ? "-ReadOnly" : "+ReadOnly")
     srState["copyButton"].Visible := !srEditing
+    srState["addAnkiButton"].Visible := !srEditing
     srState["editExplanationButton"].Visible := !srEditing
     srState["saveEditButton"].Visible := srEditing
     srState["cancelEditButton"].Visible := srEditing
     for srControl in [
         srState["previousEntry"], srState["nextEntry"], srState["ankiCheck"],
         srState["previousVersion"], srState["nextVersion"],
+        srState["newVersionButton"],
         srState["fullSectionButton"], srState["previousSection"],
         srState["nextSection"]
     ]
@@ -7269,6 +9095,7 @@ StudyReaderSetEditing(srState, srEditing) {
         StudyReaderSyncEntryNavigation(srState)
         StudyReaderSyncSectionNavigation(srState)
         srState["copyButton"].Enabled := srState["currentGroupId"] > 0
+        srState["addAnkiButton"].Enabled := srState["currentGroupId"] > 0
         srState["editExplanationButton"].Enabled := srState["currentGroupId"] > 0
     }
     try {
@@ -7603,7 +9430,12 @@ StudyReaderResize(srState, srGui, srMinMax, srWidth, srHeight) {
         )
         srToolbarY := srEntryY + 36
         srVersionLabelW := 58, srArrowW := 34, srNavGap := 6
-        srVersionW := Min(300, Max(135, Round(srLeftW * 0.38)))
+        srNewVersionW := 104
+        srVersionW := Min(
+            300,
+            Max(110, srLeftW - srVersionLabelW - srArrowW * 2
+                - srNavGap * 2 - srNewVersionW - 14)
+        )
         srState["versionLabel"].Move(srMargin, srToolbarY + 4, srVersionLabelW, 22)
         srVersionPrevX := srMargin + srVersionLabelW
         srState["previousVersion"].Move(
@@ -7616,6 +9448,10 @@ StudyReaderResize(srState, srGui, srMinMax, srWidth, srHeight) {
         srState["nextVersion"].Move(
             srVersionViewX + srVersionW + srNavGap,
             srToolbarY, srArrowW, 30
+        )
+        srState["newVersionButton"].Move(
+            srVersionViewX + srVersionW + srNavGap + srArrowW + 8,
+            srToolbarY, srNewVersionW, 30
         )
         srSectionNavY := srToolbarY + 36
         srFullButtonW := 128
@@ -7639,11 +9475,15 @@ StudyReaderResize(srState, srGui, srMinMax, srWidth, srHeight) {
         srNextX := srSectionStatusX + srSectionStatusW + srNavGap
         srState["nextSection"].Move(srNextX, srSectionNavY, srArrowW, 30)
         srExplanationLabelY := srSectionNavY + 35
-        srCopyButtonW := 88, srEditButtonW := 88
+        srAddAnkiButtonW := 108, srCopyButtonW := 88, srEditButtonW := 88
         srSaveButtonW := 72, srCancelButtonW := 78
         srEditButtonY := srExplanationLabelY - 3
         srEditButtonX := srMargin + srLeftW - srEditButtonW
         srCopyButtonX := srEditButtonX - 6 - srCopyButtonW
+        srAddAnkiButtonX := srCopyButtonX - 6 - srAddAnkiButtonW
+        srState["addAnkiButton"].Move(
+            srAddAnkiButtonX, srEditButtonY, srAddAnkiButtonW, 27
+        )
         srState["copyButton"].Move(
             srCopyButtonX, srEditButtonY, srCopyButtonW, 27
         )
@@ -7660,7 +9500,7 @@ StudyReaderResize(srState, srGui, srMinMax, srWidth, srHeight) {
         )
         srLabelReserve := srState.Has("editing") && srState["editing"]
             ? srSaveButtonW + srCancelButtonW + 14
-            : srCopyButtonW + srEditButtonW + 14
+            : srAddAnkiButtonW + srCopyButtonW + srEditButtonW + 20
         srState["explanationLabel"].Move(
             srMargin, srExplanationLabelY, Max(60, srLeftW - srLabelReserve), 22
         )
@@ -7864,6 +9704,9 @@ StudyReaderClose(srState, *) {
     try StudyReaderRememberEntryView(srState)
     try StudyReaderUnbindHotkeys(srState)
     try StudyReaderSaveBounds(srState)
+    if (srState.Has("newVersionDialog")
+        && IsObject(srState["newVersionDialog"]))
+        try StudyReaderCloseNewVersionDialog(srState["newVersionDialog"])
     try srState["gui"].Destroy()
     CPStudyReaderState := 0
     StudyStandaloneMaybeExit()
@@ -7918,7 +9761,10 @@ StudyLibraryReaderSnapshot() {
         EnvSet(srName, srValue)
     }
     srSucceeded := false
-    try srSucceeded := StudyLibraryRunBridge(srState, "snapshot")
+    try {
+        if StudyLibraryRunBridge(srState, "ensure")
+            srSucceeded := StudyLibraryRunBridge(srState, "snapshot")
+    }
     finally {
         for srName, srValue in srPreviousEnvironment
             EnvSet(srName, srValue)
@@ -7932,7 +9778,9 @@ StudyLibraryReaderSnapshot() {
         srGroups.Push(Map(
             "id", Integer(srRow[1]),
             "addedToAnkiAt", srRow.Length >= 10
-                ? StudyLibraryHexDecode(srRow[10]) : ""
+                ? StudyLibraryHexDecode(srRow[10]) : "",
+            "ankiStatus", srRow.Length >= 11
+                ? StudyLibraryHexDecode(srRow[11]) : "not_checked"
         ))
     }
     return srGroups
@@ -7962,7 +9810,8 @@ OpenStandaloneStudyReader(*) {
     }
     if !srTargetId {
         for srGroup in srGroups {
-            if (srGroup["addedToAnkiAt"] = "") {
+            if (srGroup["ankiStatus"] != "found"
+                && srGroup["addedToAnkiAt"] = "") {
                 srTargetId := srGroup["id"]
                 break
             }
@@ -8028,6 +9877,9 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
     srNextVersion := srGui.Add(
         "Button", "x338 y81 w34 h30 Disabled", "›"
     )
+    srNewVersionButton := srGui.Add(
+        "Button", "x380 y81 w104 h30 Disabled", "New version..."
+    )
     ; The loader still uses this hidden list as its section index/data model.
     ; The Reader exposes the compact permanent navigation controls below.
     srSectionLabel := srGui.Add("Text", "x0 y0 w1 h1 Hidden", "Section:")
@@ -8050,6 +9902,9 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
     srExplanationLabel.SetFont("Bold")
     srCopyButton := srGui.Add(
         "Button", "x482 y149 w88 h27 Disabled", "Copy..."
+    )
+    srAddAnkiButton := srGui.Add(
+        "Button", "x368 y149 w108 h27 Disabled", "Add to Anki..."
     )
     srEditExplanationButton := srGui.Add(
         "Button", "x576 y149 w88 h27 Disabled", "Edit..."
@@ -8108,6 +9963,7 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
         "versionView", srVersionView,
         "previousVersion", srPreviousVersion,
         "nextVersion", srNextVersion,
+        "newVersionButton", srNewVersionButton,
         "versions", [],
         "sectionLabel", srSectionLabel,
         "sectionDdl", srSectionDdl,
@@ -8118,6 +9974,7 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
         "nextSection", srNextSection,
         "explanationLabel", srExplanationLabel,
         "copyButton", srCopyButton,
+        "addAnkiButton", srAddAnkiButton,
         "copyFeedbackSerial", 0,
         "editExplanationButton", srEditExplanationButton,
         "saveEditButton", srSaveEditButton,
@@ -8146,6 +10003,9 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
         "currentSpeaker", "",
         "currentTags", "",
         "currentAddedToAnkiAt", "",
+        "currentAnkiStatus", "not_checked",
+        "currentAnkiNoteId", 0,
+        "currentAnkiCheckedAt", "",
         "currentProfile", "",
         "currentProvider", "",
         "currentModel", "",
@@ -8156,6 +10016,7 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
         "editSectionIndex", 1,
         "editSectionKey", "full",
         "editOriginalText", "",
+        "newVersionDialog", 0,
         "suspend", false
     )
     srState["imageLayoutCallback"] := StudyLibraryShowImage.Bind(srState)
@@ -8175,6 +10036,9 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
     srNextVersion.OnEvent(
         "Click", StudyLibraryStepVersion.Bind(srState, 1)
     )
+    srNewVersionButton.OnEvent(
+        "Click", StudyReaderOpenNewVersionDialog.Bind(srState)
+    )
     srFullSectionButton.OnEvent(
         "Click", StudyReaderSelectFullSection.Bind(srState)
     )
@@ -8186,6 +10050,9 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
     )
     srCopyButton.OnEvent(
         "Click", StudyReaderShowCopyMenu.Bind(srState)
+    )
+    srAddAnkiButton.OnEvent(
+        "Click", StudyReaderShowAnkiMenu.Bind(srState)
     )
     srEditExplanationButton.OnEvent(
         "Click", StudyReaderShowEditMenu.Bind(srState)
@@ -8807,7 +10674,8 @@ StudyLibraryApplyFilters(
     }
     slAnkiIndex := slAnkiDdl.Value
     slState["ankiMode"] := slAnkiIndex = 2
-        ? "not-added" : (slAnkiIndex = 3 ? "added" : "all")
+        ? "found" : (slAnkiIndex = 3 ? "not-found"
+            : (slAnkiIndex = 4 ? "not-checked" : "all"))
     slState["dateMode"] := slDateMode
     if (slDateMode = "custom") {
         slState["dateFrom"] := slFromStamp
@@ -8852,13 +10720,15 @@ StudyLibraryOpenFilters(slState, *) {
     slTagDdl.Choose(StudyLibraryChoiceIndex(
         slState["tagChoices"], slState["tagMode"], slState["tagFilter"]
     ))
-    slDialog.Add("Text", "xm y+18 w90", "Added to Anki:")
+    slDialog.Add("Text", "xm y+18 w90", "Anki status:")
     slAnkiDdl := slDialog.Add(
-        "DropDownList", "x+10 yp-4 w310 0x210", ["All", "Not added", "Added"]
+        "DropDownList", "x+10 yp-4 w310 0x210",
+        ["All", "Found in Anki", "Not found", "Not checked"]
     )
     slAnkiDdl.Choose(
-        slState["ankiMode"] = "not-added" ? 2
-            : (slState["ankiMode"] = "added" ? 3 : 1)
+        slState["ankiMode"] = "found" ? 2
+            : (slState["ankiMode"] = "not-found" ? 3
+                : (slState["ankiMode"] = "not-checked" ? 4 : 1))
     )
     slDialog.Add("Text", "xm y+18 w90", "Date generated:")
     slDateDdl := slDialog.Add(
@@ -8941,7 +10811,7 @@ StudyLibraryCreateColumns() {
         ["tags", "Tags", 150, false],
         ["source", "Japanese source", 260, true],
         ["versions", "Versions", 72, false],
-        ["anki", "Added to Anki", 105, false]
+        ["anki", "Anki status", 120, false]
     ]
     slWidthUnits := IniRead(
         iniPath, "study_library_view", "columnWidthUnits", ""
@@ -9365,6 +11235,11 @@ StudyLibraryRefresh(slState, *) {
         slTags := slGroupRow.Length >= 9 ? StudyLibraryHexDecode(slGroupRow[9]) : ""
         slAddedToAnkiAt := slGroupRow.Length >= 10
             ? StudyLibraryHexDecode(slGroupRow[10]) : ""
+        slAnkiStatus := slGroupRow.Length >= 11
+            ? StudyLibraryHexDecode(slGroupRow[11]) : "not_checked"
+        slAnkiNoteId := slGroupRow.Length >= 12 ? Integer(slGroupRow[12]) : 0
+        slAnkiCheckedAt := slGroupRow.Length >= 13
+            ? StudyLibraryHexDecode(slGroupRow[13]) : ""
         slEntry := Map(
             "id", slGroupId,
             "profile", slGroupProfile,
@@ -9374,7 +11249,10 @@ StudyLibraryRefresh(slState, *) {
             "chapter", slChapter,
             "speaker", slSpeaker,
             "tags", slTags,
-            "addedToAnkiAt", slAddedToAnkiAt
+            "addedToAnkiAt", slAddedToAnkiAt,
+            "ankiStatus", slAnkiStatus,
+            "ankiNoteId", slAnkiNoteId,
+            "ankiCheckedAt", slAnkiCheckedAt
         )
         slState["groups"].Push(slEntry)
         slState["list"].Add(
@@ -9386,11 +11264,11 @@ StudyLibraryRefresh(slState, *) {
             slTags,
             slPreview,
             slVersionCount,
-            slAddedToAnkiAt != "" ? "Added" : "Not added",
+            StudyAnkiStatusLabel(slAnkiStatus, slAddedToAnkiAt),
             slGroupId
         )
         slTotalVersions += slVersionCount
-        if (slAddedToAnkiAt = "")
+        if (slAnkiStatus != "found" && slAddedToAnkiAt = "")
             slNotAddedCount += 1
         if (slGroupId = slPreviousGroup)
             slSelectedRow := slState["groups"].Length
@@ -9410,7 +11288,7 @@ StudyLibraryRefresh(slState, *) {
         slState["status"].Value := slState["groups"].Length " source"
             . (slState["groups"].Length = 1 ? "" : "s") " • " slTotalVersions
             . " explanation" (slTotalVersions = 1 ? "" : "s") " • "
-            . slNotAddedCount " not added to Anki"
+            . slNotAddedCount " not linked to Anki"
     } else {
         slSearchActive := (Trim(slState["search"].Value) != "")
             || (slState["profileMode"] != "all")
@@ -9511,12 +11389,14 @@ StudyLibraryResize(slState, slGui, slMinMax, slWidth, slHeight) {
     slColumnsX := slMargin + slFilterButtonW + 8
     slEditX := slColumnsX + slColumnsW + 8
     slStudyX := slEditX + 140 + 8
+    slAnkiX := slStudyX + 82 + 8
     slState["filterButton"].Move(
         slMargin, slFilterY, slFilterButtonW, slToolbarH
     )
     slState["columnsButton"].Move(slColumnsX, slFilterY, slColumnsW, slToolbarH)
     slState["editDetailsButton"].Move(slEditX, slFilterY, 140, slToolbarH)
     slState["studyButton"].Move(slStudyX, slFilterY, 82, slToolbarH)
+    slState["ankiButton"].Move(slAnkiX, slFilterY, 82, slToolbarH)
 
     slContentY := slFilterY + slToolbarH + slGap
     slContentBottom := slHeight - slMargin - slStatusH
@@ -9729,6 +11609,7 @@ OpenStudyLibraryWindow(slStandalone := false) {
     slColumnsButton := slGui.Add("Button", "x132 y52 w92 h30", "Columns...")
     slEditDetailsButton := slGui.Add("Button", "x232 y52 w140 h30 Disabled", "Edit details...")
     slStudyButton := slGui.Add("Button", "x380 y52 w82 h30 Disabled", "Study")
+    slAnkiButton := slGui.Add("Button", "x470 y52 w82 h30", "Anki...")
     slListOptions := "x14 y94 w430 h530 Grid Multi"
         . " Background" slInitialColors["surface"]
         . " c" slInitialColors["text"]
@@ -9841,6 +11722,7 @@ OpenStudyLibraryWindow(slStandalone := false) {
         "groups", [],
         "detailTitle", slDetailTitle,
         "studyButton", slStudyButton,
+        "ankiButton", slAnkiButton,
         "editDetailsButton", slEditDetailsButton,
         "versionLabel", slVersionLabel,
         "versionDdl", slVersionDdl,
@@ -9877,6 +11759,9 @@ OpenStudyLibraryWindow(slStandalone := false) {
         "currentSpeaker", "",
         "currentTags", "",
         "currentAddedToAnkiAt", "",
+        "currentAnkiStatus", "not_checked",
+        "currentAnkiNoteId", 0,
+        "currentAnkiCheckedAt", "",
         "suspend", false,
         "closed", false,
         "refreshing", false
@@ -9902,6 +11787,7 @@ OpenStudyLibraryWindow(slStandalone := false) {
     slList.OnEvent("DoubleClick", StudyLibraryOpenReaderFromList.Bind(slState))
     slList.OnEvent("ColClick", StudyLibraryColumnClicked.Bind(slState))
     slStudyButton.OnEvent("Click", StudyLibraryOpenSelectedReader.Bind(slState))
+    slAnkiButton.OnEvent("Click", StudyLibraryOpenAnki.Bind(slState))
     slPreviousVersion.OnEvent(
         "Click", StudyLibraryStepVersion.Bind(slState, -1)
     )
@@ -10458,6 +12344,55 @@ CPControllerTokenDisplay(token) {
     return token
 }
 
+CPJoystickNativeName(controllerId, forget := false) {
+    ; AutoHotkey's legacy `NJoyName` lookup can enter unstable driver code when
+    ; a device disappears between enumeration and the name query.  Because the
+    ; controller timer runs continuously, use the documented WinMM capability
+    ; API instead and cache the result for the lifetime of this connection.
+    static cachedNames := Map()
+    controllerId := Integer(controllerId)
+    if forget {
+        if cachedNames.Has(controllerId)
+            cachedNames.Delete(controllerId)
+        return ""
+    }
+    if cachedNames.Has(controllerId)
+        return cachedNames[controllerId]
+
+    ; JOYCAPSW is 728 bytes: two WORDs, a 32-character product name,
+    ; 19 UINT capability fields, a 32-character registry key, and a
+    ; 260-character OEM driver name.  szPname begins at byte offset 4.
+    caps := Buffer(728, 0)
+    result := 1
+    try result := DllCall("winmm\joyGetDevCapsW"
+        , "uptr", controllerId - 1, "ptr", caps.Ptr, "uint", caps.Size, "uint")
+    if (result = 0)
+        try controllerName := Trim(StrGet(caps.Ptr + 4, 32, "UTF-16"))
+    if !IsSet(controllerName) || controllerName = ""
+        controllerName := "Joystick " controllerId
+    cachedNames[controllerId] := controllerName
+    return controllerName
+}
+
+CPJoystickNativeSnapshot(controllerId) {
+    ; One joyGetPosEx call returns all 32 buttons and the POV hat together.
+    ; This avoids repeatedly crossing AutoHotkey's legacy GetKeyState joystick
+    ; path (previously up to 34 calls per device on every 20 ms timer tick).
+    static JOY_RETURNALL := 0xFF
+    stateBuffer := Buffer(52, 0) ; JOYINFOEX: thirteen DWORD values.
+    NumPut("uint", stateBuffer.Size, stateBuffer, 0)
+    NumPut("uint", JOY_RETURNALL, stateBuffer, 4)
+    result := 1
+    try result := DllCall("winmm\joyGetPosEx"
+        , "uint", Integer(controllerId) - 1, "ptr", stateBuffer.Ptr, "uint")
+    if (result != 0)
+        return false
+    return Map(
+        "buttons", NumGet(stateBuffer, 32, "uint"),
+        "pov", NumGet(stateBuffer, 40, "uint")
+    )
+}
+
 CPControllerReadSnapshot() {
     static xinputButtons := [
         [0x0001, "X:DPAD_UP"], [0x0002, "X:DPAD_DOWN"],
@@ -10496,24 +12431,24 @@ CPControllerReadSnapshot() {
     ; joystick API. Button numbering follows Windows' controller panel.
     Loop 16 {
         controllerId := A_Index
-        controllerName := ""
-        try controllerName := Trim(GetKeyState(controllerId "JoyName"))
-        if (controllerName = "")
+        legacyState := CPJoystickNativeSnapshot(controllerId)
+        if !IsObject(legacyState) {
+            CPJoystickNativeName(controllerId, true)
             continue
+        }
+        controllerName := CPJoystickNativeName(controllerId)
         if !snapshot["connected"] {
             snapshot["connected"] := true
             snapshot["name"] := controllerName
         }
+        pressedButtons := legacyState["buttons"]
         Loop 32 {
             buttonIndex := A_Index
-            pressed := false
-            try pressed := GetKeyState(controllerId "Joy" buttonIndex)
-            if pressed
+            if (pressedButtons & (1 << (buttonIndex - 1)))
                 snapshot["tokens"]["J:Button " buttonIndex] := true
         }
-        pov := -1
-        try pov := GetKeyState(controllerId "JoyPOV")
-        if (pov >= 0) {
+        pov := legacyState["pov"]
+        if (pov < 36000) {
             if (pov >= 31500 || pov <= 4500)
                 snapshot["tokens"]["J:D-pad Up"] := true
             if (pov >= 4500 && pov <= 13500)
@@ -11447,13 +13382,17 @@ CPThemedChoicePopup(ownerHwnd, anchorHwnd, choices) {
     return cpPopupState["result"]
 }
 
-CPThemedInputBox(promptText, dialogTitle, infoText := "", initialValue := "", dialogWidth := 420) {
+CPThemedInputBox(promptText, dialogTitle, infoText := "", initialValue := ""
+    , dialogWidth := 420, ownerHwnd := 0) {
     global ui
     result := {Result: "Cancel", Value: ""}
     closed := false
     contentWidth := Max(280, dialogWidth - 32)
 
-    dlg := Gui("+Owner" ui.Hwnd " +AlwaysOnTop", dialogTitle)
+    inputOwner := ownerHwnd
+    if !(inputOwner && DllCall("user32\IsWindow", "ptr", inputOwner, "int"))
+        inputOwner := ui.Hwnd
+    dlg := Gui("+Owner" inputOwner " +AlwaysOnTop", dialogTitle)
     dlg.MarginX := 16
     dlg.MarginY := 14
     dlg.Add("Text", "xm w" contentWidth, promptText)
@@ -11485,12 +13424,15 @@ CPTextEditorClose(dlg, *) {
     try dlg.Destroy()
 }
 
-CPShowTextEditorDialog(dlg, editorCtrl) {
+CPShowTextEditorDialog(dlg, editorCtrl, ownerHwnd := 0) {
     global ui
     ; Ownership lets the controller-navigation poll recognize this editor as
     ; part of the control-panel workflow. B / Circle is dispatched as Escape,
     ; which uses the same close path as the editor's Close button.
-    try dlg.Opt("+Owner" ui.Hwnd)
+    editorOwner := ownerHwnd
+    if !(editorOwner && DllCall("user32\IsWindow", "ptr", editorOwner, "int"))
+        editorOwner := ui.Hwnd
+    try dlg.Opt("+Owner" editorOwner)
     dlg.OnEvent("Escape", CPTextEditorClose.Bind(dlg))
     dlg.Show()
     CPApplyOwnedDialogTheme(dlg)
@@ -12707,10 +14649,12 @@ CPScanOverlayAdjustControllers() {
 
     Loop 16 {
         controllerId := A_Index
-        controllerName := ""
-        try controllerName := Trim(GetKeyState(controllerId "JoyName"))
-        if (controllerName = "")
+        legacyState := CPJoystickNativeSnapshot(controllerId)
+        if !IsObject(legacyState) {
+            CPJoystickNativeName(controllerId, true)
             continue
+        }
+        controllerName := CPJoystickNativeName(controllerId)
 
         rightAxes := CPControllerRightAxes(controllerName)
         baseline := Map()
@@ -13373,6 +15317,28 @@ GameProfileSave(name, announce := true) {
         IniWriteRetry(
             StudyLibraryConfiguredName(), path, "study_library", "name"
         )
+        ankiMapping := StudyAnkiLoadMapping(name)
+        if (ankiMapping["deck"] != "") {
+            IniWriteRetry(ankiMapping["deck"], path, "anki", "deck")
+            IniWriteRetry(
+                ankiMapping.Has("addDeck") ? ankiMapping["addDeck"] : "",
+                path, "anki", "addDeck"
+            )
+            IniWriteRetry(
+                ankiMapping.Has("vocabularyDeck")
+                    ? ankiMapping["vocabularyDeck"] : "",
+                path, "anki", "vocabularyDeck"
+            )
+            IniWriteRetry(ankiMapping["model"], path, "anki", "model")
+            IniWriteRetry(
+                ankiMapping["japaneseField"], path,
+                "anki", "japaneseField"
+            )
+            IniWriteRetry(
+                ankiMapping["explanationField"], path,
+                "anki", "explanationField"
+            )
+        }
         IniWriteRetry(useTerminologyOverrides ? 1 : 0, path, "terminology", "enabled")
         IniWriteRetry(jpProfile, path, "terminology", "jp2tlProfile")
         IniWriteRetry(tlProfile, path, "terminology", "tl2tlProfile")
@@ -13537,6 +15503,26 @@ GameProfileApply(name, announce := true) {
     )
     if (profileLibrary != profileLibraryMissing)
         StudyLibraryApplyProfileSelection(profileLibrary, &warnings)
+
+    profileAnkiDeck := Trim(IniRead(path, "anki", "deck", ""))
+    if (profileAnkiDeck != "") {
+        profileAnkiMapping := Map(
+            "profile", name,
+            "deck", profileAnkiDeck,
+            "addDeck", Trim(IniRead(path, "anki", "addDeck", "")),
+            "vocabularyDeck", Trim(
+                IniRead(path, "anki", "vocabularyDeck", "")
+            ),
+            "model", Trim(IniRead(path, "anki", "model", "Basic")),
+            "japaneseField", Trim(
+                IniRead(path, "anki", "japaneseField", "Front")
+            ),
+            "explanationField", Trim(
+                IniRead(path, "anki", "explanationField", "Back")
+            )
+        )
+        StudyAnkiSaveMapping(profileAnkiMapping, false)
+    }
 
     capMode := StrLower(Trim(IniRead(path, "screenshot", "captureMode", capMode)))
     if (capMode != "window")
@@ -13785,7 +15771,17 @@ DeleteSelectedGameProfile(*) {
 ; =========================
 ; GUI
 ; =========================
-ui := Gui("+Resize +MinSize" CP_VIEWPORT_MIN_W "x" CP_VIEWPORT_MIN_H " +0x300000", "JRPG Translator")
+cpUiCreateOptions := "+Resize +MinSize" CP_VIEWPORT_MIN_W "x" CP_VIEWPORT_MIN_H
+    . " +0x300000 +ToolWindow +E0x08000000" ; WS_EX_NOACTIVATE
+; Every launch begins with non-activating tool-window styles. Even AutoHotkey's
+; hidden measurement Show can otherwise leak a short ordinary white frame to
+; DWM. Normal launches restore the application-window styles immediately before
+; their intentional final reveal; background/Study launches stay hidden.
+ui := Gui(cpUiCreateOptions, "JRPG Translator")
+; Cloak immediately—before even AutoHotkey's first hidden measurement Show.
+; Keeping this same window out of composition throughout initialization avoids
+; a second warm-up presentation and lets the final reveal be genuinely singular.
+CPSetWindowCloaked(ui.Hwnd, true)
 CPRegisterThemeMessages()
 CPRegisterCanvasMessages()
 
@@ -15041,11 +17037,14 @@ Repaint()
 UpdateStatus(true)
 SetTimer(_UpdateStatus, 1000)
 
-; During background initialization, keep the temporary native window out of the
-; taskbar and prevent Windows from activating it while controls are measured.
-if (CP_BACKGROUND_START)
-    ui.Opt("+ToolWindow +E0x08000000") ; WS_EX_NOACTIVATE
+; Background windows already received ToolWindow/WS_EX_NOACTIVATE when the GUI
+; was created, before any native child controls or hidden measurement frames.
 
+; A dedicated Study process never exposes the control panel. Do not call Show,
+; perform frame measurements, lay it out, theme it, or force a paint even with
+; the Hide option: those native passes can still be briefly presented by DWM on
+; some systems before the standalone Library/Reader window is ready.
+if !CP_STUDY_ONLY_PROCESS {
 ; Create the native window once, hidden, so client/outer frame measurements are
 ; available before restored bounds are fitted to the current monitor work area.
 ui.Show("Hide")
@@ -15102,6 +17101,7 @@ DllCall("RedrawWindow"
 CPCreateComboArrowOverlays()
 CPApplyControlPanelTheme()
 CPApplyControlPanelOpacity(false)
+}
 
 Rebind_LaunchExplainerRequest()
 Rebind_ExplainLastTranslation()
@@ -15144,7 +17144,12 @@ if (CP_STUDY_START_MODE = ""
 ; intentional hotkey/double-launch reveal.
 if (CP_BACKGROUND_START) {
     ui.Hide()
-    ui.Opt("-ToolWindow -E0x08000000")
+    ; A normal LaunchBox background process may later reveal its control panel,
+    ; so restore the ordinary styles after initialization. A dedicated Study
+    ; process never exposes that panel and keeps the non-activating tool style
+    ; for its full lifetime.
+    if !CP_STUDY_ONLY_PROCESS
+        ui.Opt("-ToolWindow -E0x08000000")
     DbgCP("Background start complete: control panel remains hidden.")
 }
 
@@ -15169,9 +17174,11 @@ SetGuiAndTrayIcon(ui, A_ScriptDir "\icon.ico")
 ; A normal launch becomes visible only after layout, theme, opacity, custom
 ; controls, and the title-bar icon are ready. Paint the completed frame once.
 if !CP_BACKGROUND_START {
-    ui.Show()
-    try DllCall("user32\RedrawWindow", "ptr", ui.Hwnd, "ptr", 0, "ptr", 0
-        , "uint", 0x0001 | 0x0004 | 0x0080 | 0x0100) ; INVALIDATE|ERASE|ALLCHILDREN|UPDATENOW
+    ; Remove the temporary startup-only styles while the prepared frame is still
+    ; hidden/cloaked, so the taskbar and ordinary activation behavior are normal.
+    CPSetWindowCloaked(ui.Hwnd, true)
+    ui.Opt("-ToolWindow -E0x08000000")
+    CPShowControlPanelReady(true)
 }
 
 ; A normal first launch presents the compact setup guide. Background launches

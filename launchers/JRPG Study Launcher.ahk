@@ -1,7 +1,7 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Off
 #NoTrayIcon
-;@Ahk2Exe-SetVersion 0.9.4.0
+;@Ahk2Exe-SetVersion 0.9.5.0
 ;@Ahk2Exe-SetName JRPG Translator Study Launcher
 ;@Ahk2Exe-SetDescription Opens the JRPG Translator Study Library or Reader
 ;@Ahk2Exe-SetCopyright Copyright (c) 2025 retrogamer0815

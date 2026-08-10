@@ -1,6 +1,8 @@
-google-genai==1.69.0
+google-genai==2.17.0
+cffi==2.1.1
 numpy==1.26.4
-openai==2.1.0
-python-dotenv==1.1.1
-SoundCard==0.4.5
+openai==2.53.0
+Pillow==12.3.0
+python-dotenv==1.2.2
+SoundCard==0.4.6
 websockets==16.0

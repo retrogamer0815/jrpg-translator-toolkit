@@ -13,6 +13,8 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.Win32;
 
+// Companion source snapshot: JRPG Translator v0.9.5 testing.
+
 namespace JrpgTranslator.LaunchBox
 {
     public sealed class GameSetupWindow : Window

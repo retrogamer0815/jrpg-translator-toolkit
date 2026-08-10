@@ -3,6 +3,8 @@
 This preview plugin integrates JRPG Translator and JoyToKey with LaunchBox and
 Big Box on a per-game basis.
 
+Companion source snapshot: JRPG Translator v0.9.5 testing.
+
 Current behavior:
 
 - Adds `JRPG Translator Setup...` to a game's LaunchBox context menu and Big Box details menu.

@@ -10,6 +10,8 @@ Settings/overlay_*.ini
 Settings/Screenshots/
 Settings/Explanations/
 Settings/Study Library/
+Settings/Study Libraries/
+Settings/Study Libraries Archive/
 Settings/profiles/
 Settings/profiles_explainer/
 Settings/prompts/*
@@ -30,6 +32,8 @@ debug.log
 Back/
 __pycache__/
 *.py[cod]
+python/
+python_back/
 
 # Captures and local test media
 *_cap.png

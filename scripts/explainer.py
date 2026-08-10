@@ -72,9 +72,10 @@ def read_text(path: str) -> str:
         return ""
 
 
-def read_last_source_paths() -> List[str]:
+def read_source_paths(path_list_file: str = "") -> List[str]:
     paths = []
-    for line in read_text(LAST_SRC).splitlines():
+    source_list = path_list_file.strip() or LAST_SRC
+    for line in read_text(source_list).splitlines():
         path = line.strip()
         if path and os.path.isfile(path):
             paths.append(path)
@@ -735,8 +736,10 @@ if EXPLAIN_PROMPT_FILE and os.path.isfile(EXPLAIN_PROMPT_FILE):
     except Exception:
         pass
 
-jp = read_text(LAST_JP).strip()
-source_paths = read_last_source_paths()
+source_text_file = os.environ.get("EXPLAIN_SOURCE_TEXT_FILE", "").strip()
+source_paths_file = os.environ.get("EXPLAIN_SOURCE_PATHS_FILE", "").strip()
+jp = read_text(source_text_file or LAST_JP).strip()
+source_paths = read_source_paths(source_paths_file)
 if not jp and not source_paths:
     print("(No Japanese transcript or cached source screenshots found)", file=sys.stderr)
     sys.exit(2)
@@ -908,14 +911,15 @@ try:
 
 except Exception as e:
     error_text = str(e)
-    if "Missing OPENAI_API_KEY" in error_text:
+    update_overlay = env_flag("EXPLAIN_UPDATE_OVERLAY", True)
+    if update_overlay and "Missing OPENAI_API_KEY" in error_text:
         atomic_write_text(
             EXPLAINER_TXT,
             "OpenAI API key missing.\n\n"
             "Add it in the API Keys tab, or set OPENAI_API_KEY in Windows "
             "Environment Variables and restart JRPG Translator.",
         )
-    elif "Missing GEMINI_API_KEY/GOOGLE_API_KEY" in error_text:
+    elif update_overlay and "Missing GEMINI_API_KEY/GOOGLE_API_KEY" in error_text:
         atomic_write_text(
             EXPLAINER_TXT,
             "Gemini API key missing.\n\n"
@@ -931,9 +935,14 @@ if not text:
 if TL2TL_GLOSSARY:
     text = apply_target_glossary(text, TL2TL_GLOSSARY, protected_text=jp)
 
-# Always update the live explainer.txt (overlay reads this)
-atomic_write_text(EXPLAINER_TXT, text)
-print(f"Wrote explanation to: {EXPLAINER_TXT}")
+# Normal gameplay requests update the live overlay. Study Reader regeneration
+# can opt out so reviewing an archived line does not replace the player's
+# current in-game explanation or last-source context.
+if env_flag("EXPLAIN_UPDATE_OVERLAY", True):
+    atomic_write_text(EXPLAINER_TXT, text)
+    print(f"Wrote explanation to: {EXPLAINER_TXT}")
+else:
+    print("Generated Study Library explanation without updating the live overlay")
 
 # Optional legacy plain-text archive. Keep this independent from the Study Library
 # so either output can be enabled without making the other one a dependency.
