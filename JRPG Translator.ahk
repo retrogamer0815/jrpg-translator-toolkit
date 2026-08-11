@@ -79,6 +79,7 @@ global CPControllerColorDialogState := Map("active", false)
 global CPWelcomeDialog := 0
 global CPStudyLibraryState := 0
 global CPStudyReaderState := 0
+global CPStudyCandidateState := 0
 
 CloseControlPanelMutex(*) {
     global __CP_MUTEX
@@ -1760,6 +1761,8 @@ CPApplyThemeToControl(cpThemeHwnd, darkMode := -1) {
         }
     } else if (cpThemeClass = "msctls_trackbar32" || cpThemeClass = "msctls_updown32"
         || cpThemeClass = "SysTabControl32") {
+        if (cpThemeClass = "SysTabControl32")
+            try cpThemeCtrl.SetFont("c" cpThemeColors["text"])
         if darkMode {
             try DllCall("uxtheme\SetWindowTheme", "ptr", cpThemeHwnd, "wstr", "DarkMode_Explorer", "ptr", 0)
         } else {
@@ -5742,7 +5745,7 @@ StudyLibraryRefreshLibrarySelector(slState, slSelect := "") {
 }
 
 StudyLibrarySwitchTo(slState, slName, slAnnounce := true) {
-    global CPStudyReaderState
+    global CPStudyReaderState, CPStudyCandidateState
     if !StudyLibraryStateAlive(slState)
         return false
     if !StudyLibraryActivateName(slName) {
@@ -5753,6 +5756,8 @@ StudyLibrarySwitchTo(slState, slName, slAnnounce := true) {
     slDirectory := StudyLibraryConfiguredDirectory()
     if IsObject(CPStudyReaderState)
         StudyReaderClose(CPStudyReaderState)
+    if IsObject(CPStudyCandidateState)
+        StudyCandidatesClose(CPStudyCandidateState)
     slState["libraryName"] := slName
     slState["database"] := slDirectory "\study_library.db"
     slState["storage"] := 0
@@ -6411,6 +6416,20 @@ StudyLibraryHexDecode(slHex) {
         NumPut("UChar", slByte, slBuffer, A_Index - 1)
     }
     return StrGet(slBuffer, slByteCount, "UTF-8")
+}
+
+StudyLibraryHexEncode(slText) {
+    if (slText = "")
+        return ""
+    slByteCount := StrPut(slText, "UTF-8") - 1
+    if (slByteCount <= 0)
+        return ""
+    slBuffer := Buffer(slByteCount + 1, 0)
+    StrPut(slText, slBuffer, "UTF-8")
+    slHex := ""
+    Loop slByteCount
+        slHex .= Format("{:02x}", NumGet(slBuffer, A_Index - 1, "UChar"))
+    return slHex
 }
 
 StudyLibraryReadRows(slPath) {
@@ -7660,6 +7679,1225 @@ StudyReaderOpenReviewedAnkiDialog(
     saGui.Show("AutoSize Center")
     CPApplyOwnedDialogTheme(saGui)
     saFrontEdit.Focus()
+}
+
+StudyCandidatesRecommendationDefaults() {
+    return Map(
+        "learnerLevel", "intermediate",
+        "selectionStyle", "balanced",
+        "focusVocabulary", true,
+        "focusGrammar", true,
+        "focusNaturalPhrasing", true,
+        "focusReading", true,
+        "additionalCriteria", ""
+    )
+}
+
+StudyCandidatesRecommendationLoadSettings() {
+    global iniPath
+    scDefaults := StudyCandidatesRecommendationDefaults()
+    scSettings := Map()
+    scLevel := StrLower(Trim(IniRead(
+        iniPath, "ankiRecommendations", "learnerLevel",
+        scDefaults["learnerLevel"]
+    )))
+    if !(scLevel = "beginner" || scLevel = "intermediate"
+        || scLevel = "advanced")
+        scLevel := scDefaults["learnerLevel"]
+    scStyle := StrLower(Trim(IniRead(
+        iniPath, "ankiRecommendations", "selectionStyle",
+        scDefaults["selectionStyle"]
+    )))
+    if !(scStyle = "selective" || scStyle = "balanced"
+        || scStyle = "generous")
+        scStyle := scDefaults["selectionStyle"]
+    scAdditionalHex := Trim(IniRead(
+        iniPath, "ankiRecommendations", "additionalCriteriaHex", ""
+    ))
+    scAdditional := ""
+    try scAdditional := StudyLibraryHexDecode(scAdditionalHex)
+    scSettings["learnerLevel"] := scLevel
+    scSettings["selectionStyle"] := scStyle
+    for scKey in [
+        "focusVocabulary", "focusGrammar",
+        "focusNaturalPhrasing", "focusReading"
+    ]
+        scSettings[scKey] := Trim(IniRead(
+            iniPath, "ankiRecommendations", scKey,
+            scDefaults[scKey] ? "1" : "0"
+        )) != "0"
+    scSettings["additionalCriteria"] := SubStr(scAdditional, 1, 1000)
+    return scSettings
+}
+
+StudyCandidatesRecommendationSaveSettings(scSettings) {
+    global iniPath
+    IniWrite(
+        scSettings["learnerLevel"], iniPath,
+        "ankiRecommendations", "learnerLevel"
+    )
+    IniWrite(
+        scSettings["selectionStyle"], iniPath,
+        "ankiRecommendations", "selectionStyle"
+    )
+    for scKey in [
+        "focusVocabulary", "focusGrammar",
+        "focusNaturalPhrasing", "focusReading"
+    ]
+        IniWrite(
+            scSettings[scKey] ? 1 : 0, iniPath,
+            "ankiRecommendations", scKey
+        )
+    IniWrite(
+        StudyLibraryHexEncode(SubStr(
+            scSettings["additionalCriteria"], 1, 1000
+        )),
+        iniPath, "ankiRecommendations", "additionalCriteriaHex"
+    )
+}
+
+StudyCandidatesRecommendationFocusCsv(scSettings) {
+    scFocus := ""
+    for scPair in [
+        ["focusVocabulary", "vocabulary"],
+        ["focusGrammar", "grammar"],
+        ["focusNaturalPhrasing", "natural_phrasing"],
+        ["focusReading", "reading"]
+    ] {
+        if !scSettings[scPair[1]]
+            continue
+        scFocus .= (scFocus = "" ? "" : ",") scPair[2]
+    }
+    return scFocus != ""
+        ? scFocus : "vocabulary,grammar,natural_phrasing,reading"
+}
+
+StudyCandidatesRecommendationCounts(scState, scIncludeAssessed := false) {
+    scSentenceKeys := Map(), scVocabularyKeys := Map()
+    for scCandidate in scState["allSentences"] {
+        if (scIncludeAssessed || scCandidate["recommendation"] < 0)
+            scSentenceKeys[scCandidate["recommendationKey"]] := true
+    }
+    for scCandidate in scState["allVocabulary"] {
+        if (scIncludeAssessed || scCandidate["recommendation"] < 0)
+            scVocabularyKeys[scCandidate["recommendationKey"]] := true
+    }
+    return Map(
+        "sentences", scSentenceKeys.Count,
+        "vocabulary", scVocabularyKeys.Count,
+        "total", scSentenceKeys.Count + scVocabularyKeys.Count
+    )
+}
+
+StudyCandidatesRecommendationLevelIndex(scLevel) {
+    return scLevel = "beginner" ? 1 : (scLevel = "advanced" ? 3 : 2)
+}
+
+StudyCandidatesRecommendationStyleIndex(scStyle) {
+    return scStyle = "selective" ? 1 : (scStyle = "generous" ? 3 : 2)
+}
+
+StudyCandidatesRecommendationSyncBasicSettings(scDialogState) {
+    scDialogState["settings"]["learnerLevel"] := [
+        "beginner", "intermediate", "advanced"
+    ][scDialogState["levelDdl"].Value]
+    scDialogState["settings"]["selectionStyle"] := [
+        "selective", "balanced", "generous"
+    ][scDialogState["styleDdl"].Value]
+}
+
+StudyCandidatesRecommendationDialogClose(scDialogState, scDialog, scResult, *) {
+    if scDialogState["closed"]
+        return
+    ; Learner level and selection style describe which cached assessment set the
+    ; review table should show. Preserve those choices even when the user closes
+    ; this dialog without starting an API request.
+    StudyCandidatesRecommendationSyncBasicSettings(scDialogState)
+    StudyCandidatesRecommendationSaveSettings(
+        scDialogState["settings"]
+    )
+    scDialogState["result"] := scResult
+    scDialogState["closed"] := true
+    try scDialog.Destroy()
+}
+
+StudyCandidatesRecommendationAdvancedDraft(scAdvanced) {
+    return Map(
+        "learnerLevel", scAdvanced["settings"]["learnerLevel"],
+        "selectionStyle", scAdvanced["settings"]["selectionStyle"],
+        "focusVocabulary", scAdvanced["vocabulary"].Value = 1,
+        "focusGrammar", scAdvanced["grammar"].Value = 1,
+        "focusNaturalPhrasing", scAdvanced["natural"].Value = 1,
+        "focusReading", scAdvanced["reading"].Value = 1,
+        "additionalCriteria", SubStr(scAdvanced["additional"].Value, 1, 1000)
+    )
+}
+
+StudyCandidatesApplyRecommendationDialogTheme(scDialog, scCheckBoxes := 0) {
+    CPApplyOwnedDialogTheme(scDialog)
+    if IsObject(scCheckBoxes) {
+        for scCheckBox in scCheckBoxes
+            CPApplyDialogCheckBoxTheme(scCheckBox)
+    }
+}
+
+StudyCandidatesRecommendationPromptPreview(scSettings) {
+    scLevelText := scSettings["learnerLevel"] = "beginner"
+        ? "The learner is a beginner. Foundational, common, and highly reusable items are valuable even when they are elementary."
+        : (scSettings["learnerLevel"] = "advanced"
+            ? "The learner is advanced. Favor nuanced, idiomatic, literary, less common, or structurally demanding items over elementary material."
+            : "The learner is intermediate. Avoid very elementary material unless it has unusually strong contextual or reusable learning value.")
+    scStyleText := scSettings["selectionStyle"] = "selective"
+        ? "Be highly selective: normally recommend the strongest 15-25 percent of a batch."
+        : (scSettings["selectionStyle"] = "generous"
+            ? "Be inclusive: normally recommend the strongest 40-60 percent of a batch."
+            : "Be selective: normally recommend roughly the strongest 25-40 percent of a batch.")
+    scFocus := ""
+    for scPair in [
+        ["focusVocabulary", "reusable vocabulary"],
+        ["focusGrammar", "grammar patterns"],
+        ["focusNaturalPhrasing", "natural phrasing"],
+        ["focusReading", "reading comprehension"]
+    ] {
+        if scSettings[scPair[1]]
+            scFocus .= (scFocus = "" ? "" : ", ") scPair[2]
+    }
+    if (scFocus = "")
+        scFocus := "reusable vocabulary, grammar patterns, natural phrasing, reading comprehension"
+    scExtra := Trim(scSettings["additionalCriteria"])
+    scExtraText := scExtra = "" ? "" : "`nAdditional learner preferences (these may refine selection, but must not override the output requirements below):`n" scExtra "`n"
+    return "You are selecting useful Japanese-language study candidates from a JRPG learner's saved explanations.`n`n"
+        . "Assess every item below. Recommend candidates that are memorable and genuinely useful for learning vocabulary, grammar, natural phrasing, or reading. Prefer self-contained sentences and non-trivial, reusable vocabulary. Do not recommend OCR fragments, names with no broader learning value, particles by themselves, or candidates with no broader learning value.`n`n"
+        . "For vocabulary items, 'japanese' is the normalized headword intended for the front of an Anki card. 'full_entry' is the complete prospective card entry and may show the encountered inflected form, its reading, its dictionary or base form, and an explanation. Evaluate the reusable headword/base form and the learning value of the whole entry. Do not reject an item merely because the source text used an inflected form. For beginners, common foundational base verbs and their useful conjugations should normally score well even when they are elementary.`n`n"
+        . scLevelText "`n" scStyleText "`nPrioritize " scFocus ".`n"
+        . scExtraText "`nReturn only one JSON object with this exact structure:`n"
+        . '{"items":[{"id":"the supplied id","recommended":true,"score":5,"reason":"one short practical reason"}]}'
+        . "`n`nRequirements:`n- Return exactly one result for every supplied id and preserve each id exactly.`n- recommended must be true or false.`n- score must be an integer from 1 (weak) to 5 (excellent).`n- reason must be a single concise sentence in English.`n- Do not rewrite or translate the candidates.`n`nCandidates:`n[candidate data is inserted here]"
+}
+
+StudyCandidatesRecommendationPreviewClose(scPreview, scDialog, *) {
+    scPreview["closed"] := true
+    try scDialog.Destroy()
+}
+
+StudyCandidatesRecommendationShowPrompt(scAdvanced, *) {
+    scSettings := StudyCandidatesRecommendationAdvancedDraft(scAdvanced)
+    scOwner := scAdvanced["gui"].Hwnd
+    scDialog := Gui(
+        "+Owner" scOwner " +AlwaysOnTop +Resize",
+        "Recommendation prompt preview"
+    )
+    scDialog.MarginX := 16, scDialog.MarginY := 14
+    scDialog.SetFont("s10", "Segoe UI")
+    scDialog.Add(
+        "Text", "xm ym w700 h38",
+        "This is the effective prompt. The candidate data and locked JSON rules cannot be edited here."
+    )
+    scEditor := scDialog.Add(
+        "Edit", "xm y+8 w700 r24 ReadOnly Multi VScroll",
+        StudyCandidatesRecommendationPromptPreview(scSettings)
+    )
+    scClose := scDialog.Add("Button", "xm y+12 w110 Default", "Close")
+    scPreview := Map("closed", false)
+    scClose.OnEvent(
+        "Click", StudyCandidatesRecommendationPreviewClose.Bind(
+            scPreview, scDialog
+        )
+    )
+    scDialog.OnEvent(
+        "Escape", StudyCandidatesRecommendationPreviewClose.Bind(
+            scPreview, scDialog
+        )
+    )
+    scDialog.OnEvent(
+        "Close", StudyCandidatesRecommendationPreviewClose.Bind(
+            scPreview, scDialog
+        )
+    )
+    scDialog.Show("Hide AutoSize")
+    StudyCandidatesApplyRecommendationDialogTheme(scDialog)
+    try DllCall("user32\EnableWindow", "ptr", scOwner, "int", 0)
+    try {
+        scDialog.Show("Center")
+        ; Native button faces and Edit scrollbars finish initialization only
+        ; after the owned window becomes visible.
+        StudyCandidatesApplyRecommendationDialogTheme(scDialog)
+        scClose.Focus()
+        while !scPreview["closed"]
+            Sleep(25)
+    } finally {
+        try scDialog.Destroy()
+        try DllCall("user32\EnableWindow", "ptr", scOwner, "int", 1)
+        try WinActivate("ahk_id " scOwner)
+    }
+}
+
+StudyCandidatesRecommendationAdvancedRestore(scAdvanced, *) {
+    scDefaults := StudyCandidatesRecommendationDefaults()
+    scAdvanced["settings"]["learnerLevel"] := scDefaults["learnerLevel"]
+    scAdvanced["settings"]["selectionStyle"] := scDefaults["selectionStyle"]
+    scAdvanced["vocabulary"].Value := 1
+    scAdvanced["grammar"].Value := 1
+    scAdvanced["natural"].Value := 1
+    scAdvanced["reading"].Value := 1
+    scAdvanced["additional"].Value := ""
+}
+
+StudyCandidatesRecommendationAdvancedClose(scAdvanced, scApply, *) {
+    if scAdvanced["closed"]
+        return
+    if scApply {
+        scDraft := StudyCandidatesRecommendationAdvancedDraft(scAdvanced)
+        if !(scDraft["focusVocabulary"] || scDraft["focusGrammar"]
+            || scDraft["focusNaturalPhrasing"] || scDraft["focusReading"]) {
+            CPThemedOwnedMessage(
+                scAdvanced["gui"].Hwnd,
+                "Select at least one study focus.",
+                "Recommendation preferences", "ok", "warning", 430
+            )
+            return
+        }
+        for scKey, scValue in scDraft
+            scAdvanced["settings"][scKey] := scValue
+    }
+    scAdvanced["applied"] := scApply
+    scAdvanced["closed"] := true
+    try scAdvanced["gui"].Destroy()
+}
+
+StudyCandidatesRecommendationCustomize(scDialogState, *) {
+    ; Customize and its prompt preview must use the selections currently
+    ; visible in the confirmation dialog, even before they are saved.
+    StudyCandidatesRecommendationSyncBasicSettings(scDialogState)
+    scSettings := scDialogState["settings"]
+    scOwner := scDialogState["gui"].Hwnd
+    scDialog := Gui(
+        "+Owner" scOwner " +AlwaysOnTop",
+        "Recommendation preferences"
+    )
+    scDialog.MarginX := 18, scDialog.MarginY := 16
+    scDialog.SetFont("s10", "Segoe UI")
+    scDialog.Add("Text", "xm ym w560", "Study focus").SetFont("s11 Bold")
+    scVocabulary := scDialog.Add(
+        "CheckBox", "xm y+10 w260",
+        "Reusable vocabulary"
+    )
+    scGrammar := scDialog.Add(
+        "CheckBox", "x+12 yp w260",
+        "Grammar patterns"
+    )
+    scNatural := scDialog.Add(
+        "CheckBox", "xm y+8 w260",
+        "Natural phrasing"
+    )
+    scReading := scDialog.Add(
+        "CheckBox", "x+12 yp w260",
+        "Reading comprehension"
+    )
+    scVocabulary.Value := scSettings["focusVocabulary"] ? 1 : 0
+    scGrammar.Value := scSettings["focusGrammar"] ? 1 : 0
+    scNatural.Value := scSettings["focusNaturalPhrasing"] ? 1 : 0
+    scReading.Value := scSettings["focusReading"] ? 1 : 0
+    scDialog.Add(
+        "Text", "xm y+16 w560",
+        "Additional selection guidance (optional)"
+    ).SetFont("s10 Bold")
+    scAdditional := scDialog.Add(
+        "Edit", "xm y+7 w560 r4 Multi VScroll Limit1000",
+        scSettings["additionalCriteria"]
+    )
+    scHint := scDialog.Add(
+        "Text", "xm y+6 w560 h36 cGray",
+        "Use this for preferences such as avoiding proper names or favoring dialogue. The output format remains protected."
+    )
+    CPRegisterMutedControl(scHint)
+    scView := scDialog.Add("Button", "xm y+14 w150", "View full prompt...")
+    scRestore := scDialog.Add("Button", "x+10 yp w130", "Restore defaults")
+    scOK := scDialog.Add("Button", "x+26 yp w100 Default", "OK")
+    scCancel := scDialog.Add("Button", "x+10 yp w100", "Cancel")
+    scAdvanced := Map(
+        "gui", scDialog,
+        "settings", scSettings,
+        "vocabulary", scVocabulary,
+        "grammar", scGrammar,
+        "natural", scNatural,
+        "reading", scReading,
+        "additional", scAdditional,
+        "closed", false,
+        "applied", false
+    )
+    scView.OnEvent(
+        "Click", StudyCandidatesRecommendationShowPrompt.Bind(scAdvanced)
+    )
+    scRestore.OnEvent(
+        "Click", StudyCandidatesRecommendationAdvancedRestore.Bind(scAdvanced)
+    )
+    scOK.OnEvent(
+        "Click", StudyCandidatesRecommendationAdvancedClose.Bind(
+            scAdvanced, true
+        )
+    )
+    scCancel.OnEvent(
+        "Click", StudyCandidatesRecommendationAdvancedClose.Bind(
+            scAdvanced, false
+        )
+    )
+    scDialog.OnEvent(
+        "Escape", StudyCandidatesRecommendationAdvancedClose.Bind(
+            scAdvanced, false
+        )
+    )
+    scDialog.OnEvent(
+        "Close", StudyCandidatesRecommendationAdvancedClose.Bind(
+            scAdvanced, false
+        )
+    )
+    scDialog.Show("Hide AutoSize")
+    scRecommendationChecks := [
+        scVocabulary, scGrammar, scNatural, scReading
+    ]
+    StudyCandidatesApplyRecommendationDialogTheme(
+        scDialog, scRecommendationChecks
+    )
+    try DllCall("user32\EnableWindow", "ptr", scOwner, "int", 0)
+    try {
+        scDialog.Show("Center")
+        StudyCandidatesApplyRecommendationDialogTheme(
+            scDialog, scRecommendationChecks
+        )
+        scVocabulary.Focus()
+        while !scAdvanced["closed"]
+            Sleep(25)
+    } finally {
+        try scDialog.Destroy()
+        try DllCall("user32\EnableWindow", "ptr", scOwner, "int", 1)
+        try WinActivate("ahk_id " scOwner)
+    }
+    if scAdvanced["applied"] {
+        scDialogState["levelDdl"].Choose(
+            StudyCandidatesRecommendationLevelIndex(
+                scSettings["learnerLevel"]
+            )
+        )
+        scDialogState["styleDdl"].Choose(
+            StudyCandidatesRecommendationStyleIndex(
+                scSettings["selectionStyle"]
+            )
+        )
+    }
+}
+
+StudyCandidatesRecommendationConfirm(
+    scState, scProviderLabel, scModel, scCounts, scRegenerate := false
+) {
+    global controlDarkMode
+    scOwner := scState["gui"].Hwnd
+    scSettings := StudyCandidatesRecommendationLoadSettings()
+    scDialog := Gui(
+        "+Owner" scOwner " +AlwaysOnTop",
+        "Generate recommendations"
+    )
+    scDialog.MarginX := 18, scDialog.MarginY := 16
+    scColors := CPPalette(controlDarkMode)
+    scDialog.BackColor := scColors["window"]
+    scDialog.SetFont("s10 c" scColors["text"], "Segoe UI")
+    scDialog.Add(
+        "Text", "xm ym w620 c" scColors["text"],
+        (scRegenerate ? "Regenerate" : "Generate cached")
+            . " AI recommendations for " scCounts["total"]
+            . " candidate" (scCounts["total"] = 1 ? "" : "s") "?"
+    ).SetFont("s11 Bold c" scColors["text"])
+    scBreakdown := scCounts["sentences"] " sentence"
+        . (scCounts["sentences"] = 1 ? "" : "s") " and "
+        . scCounts["vocabulary"] " vocabulary candidate"
+        . (scCounts["vocabulary"] = 1 ? "" : "s")
+    scDialog.Add(
+        "Text", "xm y+7 w620 c" scColors["text"], scBreakdown
+    )
+    scInfo := scDialog.Add(
+        "Text", "xm y+12 w620 h42 cGray",
+        "Provider: " scProviderLabel "`nModel: " scModel
+    )
+    CPRegisterMutedControl(scInfo)
+    scDialog.Add("Text", "xm y+12 w120", "Learner level:")
+    scLevelDdl := scDialog.Add(
+        "DropDownList", "x+10 yp-3 w190 0x210 Choose"
+            . StudyCandidatesRecommendationLevelIndex(
+                scSettings["learnerLevel"]
+            ),
+        ["Beginner", "Intermediate", "Advanced"]
+    )
+    scDialog.Add("Text", "x+24 yp+3 w110", "Selection style:")
+    scStyleDdl := scDialog.Add(
+        "DropDownList", "x+10 yp-3 w150 0x210 Choose"
+            . StudyCandidatesRecommendationStyleIndex(
+                scSettings["selectionStyle"]
+            ),
+        ["Selective", "Balanced", "Generous"]
+    )
+    scHintText := scRegenerate
+        ? "The existing ratings for these candidates will be replaced using the selected settings. Existing Anki matches and globally ignored vocabulary stay excluded."
+        : "Only candidates that have never been assessed are sent. Existing Anki matches and globally ignored vocabulary stay excluded. Results are cached, so refreshing or reopening this window uses no API calls."
+    scHint := scDialog.Add(
+        "Text", "xm y+14 w620 h58 cGray", scHintText
+    )
+    CPRegisterMutedControl(scHint)
+    scCustomize := scDialog.Add("Button", "xm y+14 w130", "Customize...")
+    scGenerate := scDialog.Add("Button", "x+166 yp w110 Default", "Generate")
+    scCancel := scDialog.Add("Button", "x+10 yp w100", "Close")
+    scDialogState := Map(
+        "gui", scDialog,
+        "settings", scSettings,
+        "levelDdl", scLevelDdl,
+        "styleDdl", scStyleDdl,
+        "closed", false,
+        "result", false
+    )
+    scCustomize.OnEvent(
+        "Click", StudyCandidatesRecommendationCustomize.Bind(scDialogState)
+    )
+    scGenerate.OnEvent(
+        "Click", StudyCandidatesRecommendationDialogClose.Bind(
+            scDialogState, scDialog, true
+        )
+    )
+    scCancel.OnEvent(
+        "Click", StudyCandidatesRecommendationDialogClose.Bind(
+            scDialogState, scDialog, false
+        )
+    )
+    scDialog.OnEvent(
+        "Escape", StudyCandidatesRecommendationDialogClose.Bind(
+            scDialogState, scDialog, false
+        )
+    )
+    scDialog.OnEvent(
+        "Close", StudyCandidatesRecommendationDialogClose.Bind(
+            scDialogState, scDialog, false
+        )
+    )
+    scDialog.Show("Hide AutoSize")
+    StudyCandidatesApplyRecommendationDialogTheme(scDialog)
+    try DllCall("user32\EnableWindow", "ptr", scOwner, "int", 0)
+    try {
+        scDialog.Show("Center")
+        ; Reapply after first show so Windows paints the final dark button
+        ; faces, owner-drawn combo arrows and drop-down list scrollbars.
+        StudyCandidatesApplyRecommendationDialogTheme(scDialog)
+        scGenerate.Focus()
+        while !scDialogState["closed"]
+            Sleep(25)
+    } finally {
+        try scDialog.Destroy()
+        try DllCall("user32\EnableWindow", "ptr", scOwner, "int", 1)
+        try WinActivate("ahk_id " scOwner)
+    }
+    return scDialogState["result"] ? scSettings : 0
+}
+
+StudyCandidatesRunBridge(scState, scAction, scFront := "") {
+    global pythonExe, explainProvider, explainOpenAIModel, explainGeminiModel
+    scPython := ResolvePath(pythonExe)
+    scBridge := A_ScriptDir "\scripts\anki_candidates.py"
+    if !(FileExist(scPython) && FileExist(scBridge)) {
+        CPThemedOwnedMessage(
+            scState["gui"].Hwnd,
+            "Review for Anki needs valid Python and candidate bridge paths.`n`n"
+                . "Python:`n" scPython "`n`nBridge:`n" scBridge,
+            "Review for Anki", "ok", "warning"
+        )
+        return false
+    }
+    scCommand := Format(
+        '"{1}" "{2}" {3} --db "{4}" --output-dir "{5}" '
+            . '--anki-config "{6}" --preferences-db "{7}"',
+        scPython, scBridge, scAction, scState["database"],
+        scState["outputDir"], A_ScriptDir "\Settings\anki.ini",
+        A_ScriptDir "\Settings\anki_candidate_preferences.db"
+    )
+    if (scAction = "snapshot" || scAction = "generate-recommendations") {
+        scProvider := CPSyncExplanationSelectionFromControls()
+        scModel := scProvider = "gemini"
+            ? explainGeminiModel : explainOpenAIModel
+        scSettings := scState.Has("recommendationSettings")
+            ? scState["recommendationSettings"]
+            : StudyCandidatesRecommendationLoadSettings()
+        if (scAction = "snapshot")
+            scCommand .= " --scope " scState["scope"]
+        scCommand .= ' --provider "' scProvider '" --model "' scModel '"'
+            . ' --learner-level "' scSettings["learnerLevel"] '"'
+            . ' --selection-style "' scSettings["selectionStyle"] '"'
+            . ' --focus-areas "'
+            . StudyCandidatesRecommendationFocusCsv(scSettings) '"'
+            . ' --additional-criteria-hex "'
+            . StudyLibraryHexEncode(scSettings["additionalCriteria"]) '"'
+        if (scAction = "generate-recommendations"
+            && scState.Has("forceRecommendations")
+            && scState["forceRecommendations"])
+            scCommand .= " --force"
+    }
+    else if (scAction = "finish-review")
+        scCommand .= ' --reviewed-through "' scState["snapshotThrough"] '"'
+    else if (scAction = "hide-vocabulary" || scAction = "restore-vocabulary")
+        scCommand .= ' --front-hex "' StudyLibraryHexEncode(scFront) '"'
+    try scExitCode := RunWait(scCommand, A_ScriptDir, "Hide")
+    catch as scError {
+        CPThemedOwnedMessage(
+            scState["gui"].Hwnd,
+            "The Anki candidate list could not be updated.`n`n" scError.Message,
+            "Review for Anki", "ok", "warning"
+        )
+        return false
+    }
+    if (scExitCode != 0) {
+        scDetails := ""
+        if (scAction = "generate-recommendations") {
+            scErrorPath := scState["outputDir"] "\candidate_recommendation_error.txt"
+            try scDetails := Trim(FileRead(scErrorPath, "UTF-8"))
+        }
+        CPThemedOwnedMessage(
+            scState["gui"].Hwnd,
+            "The Anki candidate list could not be updated (bridge exit "
+                . scExitCode ")." (scDetails != "" ? "`n`n" scDetails : ""),
+            "Review for Anki", "ok", "warning"
+        )
+        return false
+    }
+    return true
+}
+
+StudyCandidatesSelected(scState) {
+    scVocabulary := scState["tabs"].Value = 2
+    scList := scVocabulary ? scState["vocabularyList"] : scState["sentenceList"]
+    scRows := scVocabulary ? scState["vocabulary"] : scState["sentences"]
+    scRow := scList.GetNext(0, "F")
+    if !scRow
+        scRow := scList.GetNext()
+    if (scRow < 1 || scRow > scRows.Length)
+        return 0
+    return scRows[scRow]
+}
+
+StudyCandidatesUpdateActions(scState, *) {
+    if !(scState.Has("gui") && scState["gui"] && scState["gui"].Hwnd)
+        return
+    scSelected := StudyCandidatesSelected(scState)
+    scEnabled := IsObject(scSelected)
+    scHidden := scState["scope"] = "hidden"
+    scVocabulary := scState["tabs"].Value = 2
+    scState["openButton"].Enabled := scEnabled && !scHidden
+    scState["addButton"].Enabled := scEnabled && !scHidden
+    scState["finishButton"].Enabled := scState["scope"] = "new"
+        && scState["snapshotThrough"] != ""
+    scState["triageButton"].Text := scHidden
+        ? "Restore vocabulary" : "Ignore vocabulary..."
+    scState["triageButton"].Enabled := scEnabled && scVocabulary
+    scHasCandidates := scState["allSentences"].Length
+        + scState["allVocabulary"].Length > 0
+    scState["recommendButton"].Enabled := !scHidden && scHasCandidates
+    scState["recommendButton"].Text := scHasCandidates
+        && scState["unassessedCount"] < 1
+        ? "Regenerate recommendations..."
+        : "Generate recommendations..."
+    scStatusText := scState.Has("baseStatus") ? scState["baseStatus"] : ""
+    scAiStatusText := scState.Has("noticeStatus")
+        ? scState["noticeStatus"] : ""
+    if scEnabled && scSelected.Has("recommendation")
+        && scSelected["recommendation"] >= 0 {
+        scAiText := scSelected["recommendation"] = 1
+            ? "Recommended" : "Not recommended"
+        if (scSelected["score"] > 0)
+            scAiText .= " (" scSelected["score"] "/5)"
+        if (scSelected["reason"] != "")
+            scAiText .= " — " scSelected["reason"]
+        scAiStatusText := "AI: " scAiText
+    } else if scEnabled
+        scAiStatusText := "AI: Not yet assessed."
+    scState["status"].Value := scStatusText
+    scState["aiStatus"].Value := scAiStatusText
+}
+
+StudyCandidatesAiResult(scCandidate) {
+    scRecommendation := scCandidate["recommendation"]
+    if (scRecommendation < 0)
+        return "Unassessed"
+    scScore := scCandidate["score"] > 0
+        ? " " scCandidate["score"] "/5" : ""
+    return scRecommendation = 1 ? "★" scScore : "No ·" scScore
+}
+
+StudyCandidatesFilteredRows(scRows, scAiFilter) {
+    scFiltered := []
+    for scCandidate in scRows {
+        scRecommendation := scCandidate["recommendation"]
+        if (scAiFilter = 2 && scRecommendation != 1)
+            continue
+        if (scAiFilter = 3 && scRecommendation != 0)
+            continue
+        if (scAiFilter = 4 && scRecommendation >= 0)
+            continue
+        scFiltered.Push(scCandidate)
+    }
+    ; Within the assessed-only views, show the strongest candidates first while
+    ; retaining the original date order among entries with an equal score.
+    if (scAiFilter != 2 && scAiFilter != 3)
+        return scFiltered
+    scSorted := []
+    Loop 5 {
+        scWantedScore := 6 - A_Index
+        for scCandidate in scFiltered
+            if (scCandidate["score"] = scWantedScore)
+                scSorted.Push(scCandidate)
+    }
+    for scCandidate in scFiltered
+        if (scCandidate["score"] < 1 || scCandidate["score"] > 5)
+            scSorted.Push(scCandidate)
+    return scSorted
+}
+
+StudyCandidatesApplyAiFilter(scState) {
+    if !(scState.Has("gui") && scState["gui"] && scState["gui"].Hwnd)
+        return
+    scState["sentences"] := StudyCandidatesFilteredRows(
+        scState["allSentences"], scState["aiFilter"]
+    )
+    scState["vocabulary"] := StudyCandidatesFilteredRows(
+        scState["allVocabulary"], scState["aiFilter"]
+    )
+    scState["sentenceList"].Delete()
+    scState["vocabularyList"].Delete()
+    for scCandidate in scState["sentences"]
+        scState["sentenceList"].Add(
+            "", StudyCandidatesAiResult(scCandidate), scCandidate["date"],
+            scCandidate["profile"], scCandidate["source"],
+            scCandidate["versions"]
+        )
+    for scCandidate in scState["vocabulary"]
+        scState["vocabularyList"].Add(
+            "", StudyCandidatesAiResult(scCandidate), scCandidate["display"],
+            scCandidate["meaning"], scCandidate["occurrences"],
+            scCandidate["profile"], scCandidate["date"]
+        )
+
+    scScopeText := scState["scope"] = "new"
+        ? "New since last review"
+        : (scState["scope"] = "hidden" ? "Ignored vocabulary" : "All backlog")
+    scAiText := scState["aiFilter"] = 2
+        ? "Recommended" : (scState["aiFilter"] = 3
+            ? "Not recommended" : (scState["aiFilter"] = 4
+                ? "Not yet assessed" : ""))
+    if (scAiText != "")
+        scScopeText .= " / " scAiText
+    scState["baseStatus"] := scScopeText ": "
+        . scState["sentences"].Length " sentence"
+        . (scState["sentences"].Length = 1 ? "" : "s") ", "
+        . scState["vocabulary"].Length " vocabulary candidate"
+        . (scState["vocabulary"].Length = 1 ? "" : "s") ".  "
+        . scState["ankiMessage"]
+    if (scState["scope"] != "hidden")
+        scState["baseStatus"] .= "  " scState["unassessedCount"]
+            . " not yet assessed by AI."
+
+    if scState["sentences"].Length
+        scState["sentenceList"].Modify(1, "Select Vis")
+    if scState["vocabulary"].Length
+        scState["vocabularyList"].Modify(1, "Select Vis")
+    scActiveList := scState["tabs"].Value = 2
+        ? scState["vocabularyList"] : scState["sentenceList"]
+    scActiveRows := scState["tabs"].Value = 2
+        ? scState["vocabulary"] : scState["sentences"]
+    if scActiveRows.Length {
+        scActiveList.Modify(1, "Focus Vis")
+        scActiveList.Focus()
+    }
+    StudyCandidatesUpdateActions(scState)
+}
+
+StudyCandidatesReadSnapshot(scState) {
+    scState["allSentences"] := []
+    scState["allVocabulary"] := []
+
+    for scRow in StudyLibraryReadRows(
+        scState["outputDir"] "\candidate_sentences.tsv"
+    ) {
+        if (scRow.Length < 9)
+            continue
+        scCandidate := Map(
+            "groupId", Integer(scRow[1]),
+            "profile", StudyLibraryHexDecode(scRow[2]),
+            "date", StudyLibraryHexDecode(scRow[3]),
+            "source", StudyLibraryHexDecode(scRow[4]),
+            "versions", Integer(scRow[5]),
+            "recommendationKey", scRow[6],
+            "recommendation", Integer(scRow[7]),
+            "score", Integer(scRow[8]),
+            "reason", StudyLibraryHexDecode(scRow[9])
+        )
+        scState["allSentences"].Push(scCandidate)
+    }
+    for scRow in StudyLibraryReadRows(
+        scState["outputDir"] "\candidate_vocabulary.tsv"
+    ) {
+        if (scRow.Length < 12)
+            continue
+        scCandidate := Map(
+            "groupId", Integer(scRow[1]),
+            "profile", StudyLibraryHexDecode(scRow[2]),
+            "date", StudyLibraryHexDecode(scRow[3]),
+            "display", StudyLibraryHexDecode(scRow[4]),
+            "front", StudyLibraryHexDecode(scRow[5]),
+            "back", StudyLibraryHexDecode(scRow[6]),
+            "meaning", StudyLibraryHexDecode(scRow[7]),
+            "occurrences", Integer(scRow[8]),
+            "recommendationKey", scRow[9],
+            "recommendation", Integer(scRow[10]),
+            "score", Integer(scRow[11]),
+            "reason", StudyLibraryHexDecode(scRow[12])
+        )
+        scState["allVocabulary"].Push(scCandidate)
+    }
+    scStatusRows := StudyLibraryReadRows(
+        scState["outputDir"] "\candidate_status.tsv"
+    )
+    if scStatusRows.Length && scStatusRows[1].Length >= 6 {
+        scRow := scStatusRows[1]
+        scState["snapshotThrough"] := StudyLibraryHexDecode(scRow[1])
+        scState["reviewedThrough"] := StudyLibraryHexDecode(scRow[2])
+        scState["ankiCode"] := StudyLibraryHexDecode(scRow[3])
+        scState["ankiMessage"] := StudyLibraryHexDecode(scRow[4])
+    }
+    scState["unassessedCount"] := 0
+    for scCandidate in scState["allSentences"]
+        if (scCandidate["recommendation"] < 0)
+            scState["unassessedCount"] += 1
+    for scCandidate in scState["allVocabulary"]
+        if (scCandidate["recommendation"] < 0)
+            scState["unassessedCount"] += 1
+    scState["noticeStatus"] := ""
+    if scState.Has("recommendationMessage")
+        && scState["recommendationMessage"] != "" {
+        scState["noticeStatus"] := scState["recommendationMessage"]
+        scState["recommendationMessage"] := ""
+    }
+    StudyCandidatesApplyAiFilter(scState)
+}
+
+StudyCandidatesRefresh(scState, *) {
+    if !(scState.Has("gui") && scState["gui"] && scState["gui"].Hwnd)
+        return
+    scScopeValue := scState["scopeDdl"].Value
+    scState["scope"] := scScopeValue = 3
+        ? "hidden" : (scScopeValue = 2 ? "all" : "new")
+    if (scState["scope"] = "hidden" && scState["tabs"].Value != 2)
+        scState["tabs"].Choose(2)
+    scState["status"].Value := "Building local candidate lists..."
+    scState["refreshButton"].Enabled := false
+    try {
+        if StudyCandidatesRunBridge(scState, "snapshot")
+            StudyCandidatesReadSnapshot(scState)
+    } finally {
+        if (scState.Has("gui") && scState["gui"] && scState["gui"].Hwnd)
+            scState["refreshButton"].Enabled := true
+    }
+}
+
+StudyCandidatesScopeChanged(scState, *) {
+    StudyCandidatesRefresh(scState)
+}
+
+StudyCandidatesAiFilterChanged(scState, *) {
+    scState["aiFilter"] := scState["aiFilterDdl"].Value
+    StudyCandidatesApplyAiFilter(scState)
+}
+
+StudyCandidatesTabChanged(scState, *) {
+    StudyCandidatesUpdateActions(scState)
+    scList := scState["tabs"].Value = 2
+        ? scState["vocabularyList"] : scState["sentenceList"]
+    try scList.Focus()
+}
+
+StudyCandidatesGenerateRecommendations(scState, *) {
+    global explainProvider, explainOpenAIModel, explainGeminiModel
+    scCandidateCount := scState["allSentences"].Length
+        + scState["allVocabulary"].Length
+    if (scState["scope"] = "hidden" || scCandidateCount < 1)
+        return
+    scProvider := CPSyncExplanationSelectionFromControls()
+    scModel := scProvider = "gemini"
+        ? explainGeminiModel : explainOpenAIModel
+    if !CPApiKeyConfigured(scProvider) {
+        CPThemedOwnedMessage(
+            scState["gui"].Hwnd,
+            CPMissingApiKeyText(scProvider),
+            "Generate recommendations", "ok", "warning", 620
+        )
+        return
+    }
+    scProviderLabel := scProvider = "gemini" ? "Gemini" : "OpenAI"
+    scRegenerate := scState["unassessedCount"] < 1
+    scCounts := StudyCandidatesRecommendationCounts(scState, scRegenerate)
+    if (scCounts["total"] < 1)
+        return
+    scRecommendationSettings := StudyCandidatesRecommendationConfirm(
+        scState, scProviderLabel, scModel, scCounts, scRegenerate
+    )
+    if !IsObject(scRecommendationSettings) {
+        ; Closing the generation dialog still commits its learner preferences.
+        ; Rebuild the local snapshot so the tables immediately show the cache
+        ; belonging to that selection (or Unassessed if none exists yet).
+        scState["recommendationSettings"] :=
+            StudyCandidatesRecommendationLoadSettings()
+        if StudyCandidatesRunBridge(scState, "snapshot")
+            StudyCandidatesReadSnapshot(scState)
+        return
+    }
+    scState["recommendationSettings"] := scRecommendationSettings
+    scState["forceRecommendations"] := scRegenerate
+
+    ; A changed learner level, model or recommendation preference represents a
+    ; different assessment profile. Rebuild the snapshot so cached ratings from
+    ; another profile are neither reused nor skipped by generation.
+    if !StudyCandidatesRunBridge(scState, "snapshot") {
+        scState["forceRecommendations"] := false
+        return
+    }
+    StudyCandidatesReadSnapshot(scState)
+    scCounts := StudyCandidatesRecommendationCounts(scState)
+    if (scCounts["total"] < 1 && !scRegenerate) {
+        scState["forceRecommendations"] := false
+        return
+    }
+
+    scState["baseStatus"] := "Generating recommendations with "
+        . scProviderLabel " / " scModel "..."
+    scState["status"].Value := scState["baseStatus"]
+    scState["refreshButton"].Enabled := false
+    scState["recommendButton"].Enabled := false
+    try DllCall("user32\UpdateWindow", "ptr", scState["gui"].Hwnd)
+    try {
+        if StudyCandidatesRunBridge(scState, "generate-recommendations") {
+            scRows := StudyLibraryReadRows(
+                scState["outputDir"] "\candidate_recommendation_status.tsv"
+            )
+            if scRows.Length && scRows[1].Length >= 7
+                scState["recommendationMessage"] := StudyLibraryHexDecode(
+                    scRows[1][7]
+                )
+            StudyCandidatesRefresh(scState)
+        }
+    } finally {
+        scState["forceRecommendations"] := false
+        if (scState.Has("gui") && scState["gui"] && scState["gui"].Hwnd) {
+            scState["refreshButton"].Enabled := true
+            StudyCandidatesUpdateActions(scState)
+        }
+    }
+}
+
+StudyCandidatesReaderSequence(scState) {
+    scRows := scState["tabs"].Value = 2
+        ? scState["vocabulary"] : scState["sentences"]
+    scSequence := []
+    scSeen := Map()
+    for scCandidate in scRows {
+        scId := scCandidate["groupId"]
+        if scSeen.Has(scId)
+            continue
+        scSeen[scId] := true
+        scSequence.Push(Map(
+            "id", scId,
+            "addedToAnkiAt", "",
+            "ankiStatus", "not_checked"
+        ))
+    }
+    return scSequence
+}
+
+StudyCandidatesOpenSelected(scState, *) {
+    if (scState["scope"] = "hidden")
+        return
+    scCandidate := StudyCandidatesSelected(scState)
+    if !IsObject(scCandidate)
+        return
+    OpenStudyReader(
+        scCandidate["groupId"], 0, StudyCandidatesReaderSequence(scState)
+    )
+}
+
+StudyCandidatesAddSelected(scState, *) {
+    global CPStudyReaderState
+    if (scState["scope"] = "hidden")
+        return
+    scCandidate := StudyCandidatesSelected(scState)
+    if !IsObject(scCandidate)
+        return
+    OpenStudyReader(
+        scCandidate["groupId"], 0, StudyCandidatesReaderSequence(scState)
+    )
+    if !(CPStudyReaderState && CPStudyReaderState.Has("gui"))
+        return
+    if (scState["tabs"].Value = 2) {
+        StudyReaderOpenReviewedAnkiDialog(
+            CPStudyReaderState, "vocabulary",
+            scCandidate["front"], scCandidate["back"]
+        )
+    } else
+        StudyReaderOpenAnkiAddDialog(CPStudyReaderState)
+}
+
+StudyCandidatesFinishReview(scState, *) {
+    if (scState["scope"] != "new" || scState["snapshotThrough"] = "")
+        return
+    scMessage := "Mark everything included in this candidate snapshot as reviewed?`n`n"
+        . "This does not add, edit, hide, or delete anything. Explanations generated "
+        . "after this snapshot will remain under New since last review."
+    if (CPThemedOwnedMessage(
+        scState["gui"].Hwnd, scMessage, "Finish candidate review",
+        "yesno", "info", 580
+    ) != "Yes")
+        return
+    if StudyCandidatesRunBridge(scState, "finish-review")
+        StudyCandidatesRefresh(scState)
+}
+
+StudyCandidatesTriageSelected(scState, *) {
+    if (scState["tabs"].Value != 2)
+        return
+    scCandidate := StudyCandidatesSelected(scState)
+    if !IsObject(scCandidate)
+        return
+    scHidden := scState["scope"] = "hidden"
+    if scHidden {
+        scMessage := "Restore “" scCandidate["front"] "” to vocabulary candidate "
+            . "lists in every Study Library?"
+        scTitle := "Restore vocabulary candidate"
+        scAction := "restore-vocabulary"
+    } else {
+        scMessage := "Ignore “" scCandidate["front"] "” in future vocabulary "
+            . "candidate lists across every Study Library?`n`n"
+            . "The explanation and screenshots stay unchanged. You can restore "
+            . "the term later from Show: Ignored vocabulary."
+        scTitle := "Ignore vocabulary candidate"
+        scAction := "hide-vocabulary"
+    }
+    if (CPThemedOwnedMessage(
+        scState["gui"].Hwnd, scMessage, scTitle, "yesno", "info", 580
+    ) != "Yes")
+        return
+    if StudyCandidatesRunBridge(scState, scAction, scCandidate["front"])
+        StudyCandidatesRefresh(scState)
+}
+
+StudyCandidatesResize(scState, scGui, scMinMax, scWidth, scHeight) {
+    if (scMinMax = -1 || scWidth < 680 || scHeight < 420)
+        return
+    scMargin := 14, scGap := 10
+    scScopeLabelW := 46, scScopeW := 190, scRefreshW := 72
+    scRecommendW := 218, scAiLabelW := 24, scAiFilterW := 160
+    scState["scopeLabel"].Move(scMargin, scMargin + 5, scScopeLabelW, 22)
+    scState["scopeDdl"].Move(
+        scMargin + scScopeLabelW, scMargin, scScopeW, 30
+    )
+    scState["refreshButton"].Move(
+        scMargin + scScopeLabelW + scScopeW + scGap,
+        scMargin, scRefreshW, 30
+    )
+    scState["recommendButton"].Move(
+        scMargin + scScopeLabelW + scScopeW + scGap + scRefreshW + scGap,
+        scMargin, scRecommendW, 30
+    )
+    scAiX := scMargin + scScopeLabelW + scScopeW + scGap + scRefreshW
+        + scGap + scRecommendW + scGap
+    scState["aiFilterLabel"].Move(scAiX, scMargin + 5, scAiLabelW, 22)
+    scState["aiFilterDdl"].Move(
+        scAiX + scAiLabelW, scMargin, scAiFilterW, 30
+    )
+    scTabY := 54
+    scBottomH := 120
+    scTabH := Max(232, scHeight - scTabY - scBottomH - scMargin)
+    scTabW := Max(640, scWidth - scMargin * 2)
+    scState["tabs"].Move(scMargin, scTabY, scTabW, scTabH)
+    scListX := scMargin + 8, scListY := scTabY + 31
+    scListW := Max(620, scTabW - 16), scListH := Max(192, scTabH - 39)
+    scState["sentenceList"].Move(scListX, scListY, scListW, scListH)
+    scState["vocabularyList"].Move(scListX, scListY, scListW, scListH)
+    scActionY := scTabY + scTabH + 8
+    scState["openButton"].Move(scMargin, scActionY, 120, 30)
+    scState["addButton"].Move(scMargin + 130, scActionY, 125, 30)
+    scState["finishButton"].Move(scMargin + 265, scActionY, 112, 30)
+    scState["triageButton"].Move(scMargin + 387, scActionY, 140, 30)
+    scState["closeButton"].Move(scMargin + 537, scActionY, 82, 30)
+    scState["status"].Move(
+        scMargin, scActionY + 37, Max(620, scWidth - scMargin * 2), 22
+    )
+    scState["aiStatus"].Move(
+        scMargin, scActionY + 59, Max(620, scWidth - scMargin * 2), 50
+    )
+}
+
+StudyCandidatesClose(scState, *) {
+    global CPStudyCandidateState
+    if !IsObject(scState)
+        return
+    try CPListViewSaveColumnOrder(
+        scState["sentenceList"], "study_candidate_view",
+        "sentenceColumnOrder", 5
+    )
+    try CPListViewSaveColumnOrder(
+        scState["vocabularyList"], "study_candidate_view",
+        "vocabularyColumnOrder", 6
+    )
+    try scState["gui"].Destroy()
+    CPStudyCandidateState := 0
+}
+
+StudyLibraryOpenCandidates(slState, *) {
+    global CPStudyCandidateState, controlDarkMode
+    if (CPStudyCandidateState && CPStudyCandidateState.Has("gui")) {
+        try {
+            CPStudyCandidateState["gui"].Show()
+            WinActivate("ahk_id " CPStudyCandidateState["gui"].Hwnd)
+            StudyCandidatesRefresh(CPStudyCandidateState)
+            return
+        }
+    }
+    scOutputDir := A_Temp "\JRPG_Anki_Candidates_"
+        . DllCall("kernel32\GetCurrentProcessId", "uint")
+    DirCreate(scOutputDir)
+    scGui := Gui(
+        "+Owner" slState["gui"].Hwnd " +OwnDialogs +Resize +MinSize680x420",
+        "Study Library - Review for Anki"
+    )
+    scGui.MarginX := 14, scGui.MarginY := 14
+    scGui.SetFont("s10", "Segoe UI")
+    scColors := CPPalette(controlDarkMode)
+    scGui.BackColor := scColors["window"]
+    CPApplyOwnedDialogTheme(scGui)
+    scScopeLabel := scGui.Add("Text", "x14 y19 w46", "Show:")
+    scScopeDdl := scGui.Add(
+        "DropDownList", "x60 y14 w190 0x210",
+        ["New since last review", "All backlog", "Ignored vocabulary"]
+    )
+    scScopeDdl.Choose(1)
+    scRefresh := scGui.Add("Button", "x260 y14 w72 h30", "Refresh")
+    scRecommend := scGui.Add(
+        "Button", "x342 y14 w218 h30 Disabled", "Generate recommendations..."
+    )
+    scAiFilterLabel := scGui.Add("Text", "x570 y19 w24", "AI:")
+    scAiFilterDdl := scGui.Add(
+        "DropDownList", "x594 y14 w160 0x210",
+        ["All statuses", "Recommended only", "Not recommended", "Not yet assessed"]
+    )
+    scAiFilterDdl.Choose(1)
+    scTabs := scGui.Add("Tab3", "x14 y54 w812 h438", ["Sentences", "Vocabulary"])
+    scTabs.SetFont("c" scColors["text"])
+    scTabs.UseTab("Sentences")
+    scSentenceList := scGui.Add(
+        "ListView", "x22 y85 w796 h399 Grid Background"
+            . scColors["surface"] " c" scColors["text"],
+        ["AI result", "Date generated", "Profile", "Japanese source", "Versions"]
+    )
+    SendMessage(0x1036, 0x10000, 0x10000, scSentenceList.Hwnd)
+    scSentenceList.ModifyCol(1, 88), scSentenceList.ModifyCol(2, 125)
+    scSentenceList.ModifyCol(3, 125), scSentenceList.ModifyCol(4, 380)
+    scSentenceList.ModifyCol(5, 70)
+    scTabs.UseTab("Vocabulary")
+    scVocabularyList := scGui.Add(
+        "ListView", "x22 y85 w796 h399 Grid Background"
+            . scColors["surface"] " c" scColors["text"],
+        ["AI result", "Vocabulary", "Meaning / context", "Occurrences", "Profile", "Latest"]
+    )
+    SendMessage(0x1036, 0x10000, 0x10000, scVocabularyList.Hwnd)
+    scVocabularyList.ModifyCol(1, 88), scVocabularyList.ModifyCol(2, 190)
+    scVocabularyList.ModifyCol(3, 260), scVocabularyList.ModifyCol(4, 82)
+    scVocabularyList.ModifyCol(5, 115), scVocabularyList.ModifyCol(6, 125)
+    CPListViewRestoreColumnOrder(
+        scSentenceList, "study_candidate_view", "sentenceColumnOrder", 5
+    )
+    CPListViewRestoreColumnOrder(
+        scVocabularyList, "study_candidate_view", "vocabularyColumnOrder", 6
+    )
+    scTabs.UseTab()
+    scOpen := scGui.Add("Button", "x14 y500 w120 h30 Disabled", "Open in Reader")
+    scAdd := scGui.Add("Button", "x144 y500 w125 h30 Disabled", "Add to Anki...")
+    scFinish := scGui.Add("Button", "x279 y500 w112 h30 Disabled", "Finish review")
+    scTriage := scGui.Add(
+        "Button", "x401 y500 w140 h30 Disabled", "Ignore vocabulary..."
+    )
+    scClose := scGui.Add("Button", "x551 y500 w82 h30", "Close")
+    scStatus := scGui.Add(
+        "Text", "x14 y537 w812 h24 cGray", "Building local candidate lists..."
+    )
+    CPRegisterMutedControl(scStatus)
+    scAiStatus := scGui.Add("Text", "x14 y559 w812 h50 cGray", "")
+    CPRegisterMutedControl(scAiStatus)
+    scState := Map(
+        "gui", scGui,
+        "libraryState", slState,
+        "database", slState["database"],
+        "outputDir", scOutputDir,
+        "scopeLabel", scScopeLabel,
+        "scopeDdl", scScopeDdl,
+        "refreshButton", scRefresh,
+        "recommendButton", scRecommend,
+        "aiFilterLabel", scAiFilterLabel,
+        "aiFilterDdl", scAiFilterDdl,
+        "tabs", scTabs,
+        "sentenceList", scSentenceList,
+        "vocabularyList", scVocabularyList,
+        "openButton", scOpen,
+        "addButton", scAdd,
+        "finishButton", scFinish,
+        "triageButton", scTriage,
+        "closeButton", scClose,
+        "status", scStatus,
+        "aiStatus", scAiStatus,
+        "scope", "new",
+        "aiFilter", 1,
+        "snapshotThrough", "",
+        "reviewedThrough", "",
+        "ankiCode", "",
+        "ankiMessage", "",
+        "baseStatus", "",
+        "noticeStatus", "",
+        "recommendationMessage", "",
+        "unassessedCount", 0,
+        "sentences", [],
+        "vocabulary", [],
+        "allSentences", [],
+        "allVocabulary", []
+    )
+    CPStudyCandidateState := scState
+    scScopeDdl.OnEvent("Change", StudyCandidatesScopeChanged.Bind(scState))
+    scAiFilterDdl.OnEvent(
+        "Change", StudyCandidatesAiFilterChanged.Bind(scState)
+    )
+    scRefresh.OnEvent("Click", StudyCandidatesRefresh.Bind(scState))
+    scRecommend.OnEvent(
+        "Click", StudyCandidatesGenerateRecommendations.Bind(scState)
+    )
+    scTabs.OnEvent("Change", StudyCandidatesTabChanged.Bind(scState))
+    scSentenceList.OnEvent("ItemSelect", StudyCandidatesUpdateActions.Bind(scState))
+    scVocabularyList.OnEvent("ItemSelect", StudyCandidatesUpdateActions.Bind(scState))
+    scSentenceList.OnEvent("DoubleClick", StudyCandidatesOpenSelected.Bind(scState))
+    scVocabularyList.OnEvent("DoubleClick", StudyCandidatesOpenSelected.Bind(scState))
+    scOpen.OnEvent("Click", StudyCandidatesOpenSelected.Bind(scState))
+    scAdd.OnEvent("Click", StudyCandidatesAddSelected.Bind(scState))
+    scFinish.OnEvent("Click", StudyCandidatesFinishReview.Bind(scState))
+    scTriage.OnEvent("Click", StudyCandidatesTriageSelected.Bind(scState))
+    scClose.OnEvent("Click", StudyCandidatesClose.Bind(scState))
+    scGui.OnEvent("Escape", StudyCandidatesClose.Bind(scState))
+    scGui.OnEvent("Close", StudyCandidatesClose.Bind(scState))
+    scGui.OnEvent("Size", StudyCandidatesResize.Bind(scState))
+    scGui.Show("Hide w840 h575")
+    CPApplyOwnedDialogTheme(scGui)
+    StudyCandidatesRefresh(scState)
+    scGui.Show("Center")
+    ; Several Windows 10/11 native controls finalize their non-client pieces
+    ; (button faces, combo arrow and scrollbars) only after becoming visible.
+    ; A final immediate pass makes those pieces dark without changing layout.
+    CPApplyOwnedDialogTheme(scGui)
 }
 
 StudyLibraryFormatBytes(slBytes) {
@@ -10797,6 +12035,110 @@ StudyLibraryClearFiltersAndClose(slState, slDialog, *) {
     StudyLibraryClearFilters(slState)
 }
 
+CPListViewReadColumnOrder(cpList, cpColumnCount) {
+    cpOrder := []
+    if !(cpList && cpList.Hwnd && cpColumnCount > 0)
+        return cpOrder
+    cpOrderBuffer := Buffer(cpColumnCount * 4, 0)
+    try cpSucceeded := DllCall(
+        "user32\SendMessageW", "ptr", cpList.Hwnd,
+        "uint", 0x103B, ; LVM_GETCOLUMNORDERARRAY
+        "uptr", cpColumnCount, "ptr", cpOrderBuffer.Ptr, "ptr"
+    )
+    catch
+        return cpOrder
+    if !cpSucceeded
+        return cpOrder
+    Loop cpColumnCount
+        cpOrder.Push(
+            NumGet(cpOrderBuffer, (A_Index - 1) * 4, "Int") + 1
+        )
+    return cpOrder
+}
+
+CPListViewNormalizeColumnOrder(cpOrder, cpColumnCount, cpFixedLast := 0) {
+    cpNormalized := []
+    cpSeen := Map()
+    if IsObject(cpOrder) {
+        for cpColumn in cpOrder {
+            try cpColumn := Integer(cpColumn)
+            catch
+                continue
+            if (cpColumn < 1 || cpColumn > cpColumnCount
+                || cpColumn = cpFixedLast || cpSeen.Has(cpColumn))
+                continue
+            cpNormalized.Push(cpColumn)
+            cpSeen[cpColumn] := true
+        }
+    }
+    Loop cpColumnCount {
+        cpColumn := A_Index
+        if (cpColumn = cpFixedLast || cpSeen.Has(cpColumn))
+            continue
+        cpNormalized.Push(cpColumn)
+        cpSeen[cpColumn] := true
+    }
+    if (cpFixedLast >= 1 && cpFixedLast <= cpColumnCount)
+        cpNormalized.Push(cpFixedLast)
+    return cpNormalized
+}
+
+CPListViewParseColumnOrder(cpRaw, cpColumnCount, cpFixedLast := 0) {
+    cpParsed := []
+    Loop Parse String(cpRaw), "," {
+        try cpParsed.Push(Integer(Trim(A_LoopField)))
+    }
+    return CPListViewNormalizeColumnOrder(
+        cpParsed, cpColumnCount, cpFixedLast
+    )
+}
+
+CPListViewSetColumnOrder(cpList, cpOrder) {
+    if !(cpList && cpList.Hwnd && IsObject(cpOrder) && cpOrder.Length)
+        return false
+    cpOrderBuffer := Buffer(cpOrder.Length * 4, 0)
+    for cpIndex, cpColumn in cpOrder
+        NumPut("Int", cpColumn - 1, cpOrderBuffer, (cpIndex - 1) * 4)
+    try return !!DllCall(
+        "user32\SendMessageW", "ptr", cpList.Hwnd,
+        "uint", 0x103A, ; LVM_SETCOLUMNORDERARRAY
+        "uptr", cpOrder.Length, "ptr", cpOrderBuffer.Ptr, "ptr"
+    )
+    catch
+        return false
+}
+
+CPListViewRestoreColumnOrder(
+    cpList, cpSection, cpKey, cpColumnCount, cpFixedLast := 0
+) {
+    global iniPath
+    cpRaw := IniRead(iniPath, cpSection, cpKey, "")
+    cpOrder := CPListViewParseColumnOrder(
+        cpRaw, cpColumnCount, cpFixedLast
+    )
+    return CPListViewSetColumnOrder(cpList, cpOrder)
+}
+
+CPListViewSaveColumnOrder(
+    cpList, cpSection, cpKey, cpColumnCount, cpFixedLast := 0
+) {
+    global iniPath
+    cpOrder := CPListViewReadColumnOrder(cpList, cpColumnCount)
+    if !cpOrder.Length
+        return false
+    cpOrder := CPListViewNormalizeColumnOrder(
+        cpOrder, cpColumnCount, cpFixedLast
+    )
+    cpSerialized := ""
+    for cpColumn in cpOrder {
+        if (cpColumn = cpFixedLast)
+            continue
+        cpSerialized .= (cpSerialized = "" ? "" : ",") cpColumn
+    }
+    IniWrite(cpSerialized, iniPath, cpSection, cpKey)
+    return true
+}
+
 StudyLibraryCreateColumns() {
     global iniPath
     slVisibleRaw := "," StrLower(IniRead(
@@ -11388,13 +12730,15 @@ StudyLibraryResize(slState, slGui, slMinMax, slWidth, slHeight) {
     slFilterButtonW := 110, slColumnsW := 92
     slColumnsX := slMargin + slFilterButtonW + 8
     slEditX := slColumnsX + slColumnsW + 8
-    slStudyX := slEditX + 140 + 8
+    slReviewX := slEditX + 140 + 8
+    slStudyX := slReviewX + 132 + 8
     slAnkiX := slStudyX + 82 + 8
     slState["filterButton"].Move(
         slMargin, slFilterY, slFilterButtonW, slToolbarH
     )
     slState["columnsButton"].Move(slColumnsX, slFilterY, slColumnsW, slToolbarH)
     slState["editDetailsButton"].Move(slEditX, slFilterY, 140, slToolbarH)
+    slState["reviewButton"].Move(slReviewX, slFilterY, 132, slToolbarH)
     slState["studyButton"].Move(slStudyX, slFilterY, 82, slToolbarH)
     slState["ankiButton"].Move(slAnkiX, slFilterY, 82, slToolbarH)
 
@@ -11520,7 +12864,7 @@ StudyLibrarySaveBounds(slState) {
 }
 
 StudyLibraryClose(slState, *) {
-    global CPStudyLibraryState
+    global CPStudyLibraryState, CPStudyCandidateState
     if !IsObject(slState)
         return
     slState["closed"] := true
@@ -11528,8 +12872,14 @@ StudyLibraryClose(slState, *) {
     try SetTimer(slState["redrawCallback"], 0)
     try SetTimer(slState["listRedrawCallback"], 0)
     try StudyLibraryCaptureColumnWidths(slState, true)
+    try CPListViewSaveColumnOrder(
+        slState["list"], "study_library_view", "columnOrder",
+        slState["columns"].Length + 1, slState["columns"].Length + 1
+    )
     try StudyLibrarySaveBounds(slState)
     try OnMessage(0x004E, slState["headerNotifyCallback"], 0)
+    if IsObject(CPStudyCandidateState)
+        try StudyCandidatesClose(CPStudyCandidateState)
     try slState["gui"].Destroy()
     CPStudyLibraryState := 0
     StudyStandaloneMaybeExit()
@@ -11608,8 +12958,11 @@ OpenStudyLibraryWindow(slStandalone := false) {
     slFilterButton := slGui.Add("Button", "x14 y52 w110 h30", "Filters...")
     slColumnsButton := slGui.Add("Button", "x132 y52 w92 h30", "Columns...")
     slEditDetailsButton := slGui.Add("Button", "x232 y52 w140 h30 Disabled", "Edit details...")
-    slStudyButton := slGui.Add("Button", "x380 y52 w82 h30 Disabled", "Study")
-    slAnkiButton := slGui.Add("Button", "x470 y52 w82 h30", "Anki...")
+    slReviewButton := slGui.Add(
+        "Button", "x380 y52 w132 h30", "Review for Anki..."
+    )
+    slStudyButton := slGui.Add("Button", "x520 y52 w82 h30 Disabled", "Study")
+    slAnkiButton := slGui.Add("Button", "x610 y52 w82 h30", "Anki...")
     slListOptions := "x14 y94 w430 h530 Grid Multi"
         . " Background" slInitialColors["surface"]
         . " c" slInitialColors["text"]
@@ -11721,6 +13074,7 @@ OpenStudyLibraryWindow(slStandalone := false) {
         "standaloneWindow", slStandalone,
         "groups", [],
         "detailTitle", slDetailTitle,
+        "reviewButton", slReviewButton,
         "studyButton", slStudyButton,
         "ankiButton", slAnkiButton,
         "editDetailsButton", slEditDetailsButton,
@@ -11786,6 +13140,7 @@ OpenStudyLibraryWindow(slStandalone := false) {
     slList.OnEvent("ItemSelect", StudyLibraryUpdateSelectionActions.Bind(slState))
     slList.OnEvent("DoubleClick", StudyLibraryOpenReaderFromList.Bind(slState))
     slList.OnEvent("ColClick", StudyLibraryColumnClicked.Bind(slState))
+    slReviewButton.OnEvent("Click", StudyLibraryOpenCandidates.Bind(slState))
     slStudyButton.OnEvent("Click", StudyLibraryOpenSelectedReader.Bind(slState))
     slAnkiButton.OnEvent("Click", StudyLibraryOpenAnki.Bind(slState))
     slPreviousVersion.OnEvent(
@@ -11830,6 +13185,10 @@ OpenStudyLibraryWindow(slStandalone := false) {
     CPApplyOwnedDialogTheme(slGui)
     StudyLibraryRefreshLibrarySelector(slState, slActiveLibrary)
     StudyLibraryApplyColumns(slState)
+    CPListViewRestoreColumnOrder(
+        slList, "study_library_view", "columnOrder",
+        slColumns.Length + 1, slColumns.Length + 1
+    )
     slGui.GetClientPos(,, &slClientW, &slClientH)
     StudyLibraryResize(slState, slGui, 0, slClientW, slClientH)
     StudyLibraryRunBridge(slState, "ensure")
@@ -13073,10 +14432,24 @@ CPApplyOwnedDialogTheme(dlg) {
     CPApplyWindowScrollbarTheme(dlg.Hwnd, controlDarkMode)
     if !CPThemeBrushWindow
         CPRefreshThemeBrushes()
+
+    ; Dialogs are often built and themed while still hidden so their first
+    ; visible frame is complete. Enumerate their child controls explicitly;
+    ; otherwise native tabs, buttons and tables can retain the light theme.
+    cpDialogControls := []
+    cpDialogOldDetectHidden := A_DetectHiddenWindows
+    try {
+        DetectHiddenWindows true
+        cpDialogControls := WinGetControlsHwnd("ahk_id " dlg.Hwnd)
+    } finally {
+        DetectHiddenWindows cpDialogOldDetectHidden
+    }
     try {
         cpDialogTitle := WinGetTitle("ahk_id " dlg.Hwnd)
         cpDialogIsStudy := InStr(cpDialogTitle, "Study") > 0
-        for controlHwnd in WinGetControlsHwnd("ahk_id " dlg.Hwnd) {
+            || InStr(cpDialogTitle, "Recommendation") > 0
+            || cpDialogTitle = "Generate recommendations"
+        for controlHwnd in cpDialogControls {
             if cpDialogIsStudy {
                 cpDialogControlClass := WinGetClass("ahk_id " controlHwnd)
                 if (cpDialogControlClass = "ComboBox") {
@@ -13093,8 +14466,10 @@ CPApplyOwnedDialogTheme(dlg) {
 }
 
 CPApplyOpenStudyWindowThemes() {
-    global CPStudyLibraryState, CPStudyReaderState
-    for cpStudyState in [CPStudyLibraryState, CPStudyReaderState] {
+    global CPStudyLibraryState, CPStudyReaderState, CPStudyCandidateState
+    for cpStudyState in [
+        CPStudyLibraryState, CPStudyReaderState, CPStudyCandidateState
+    ] {
         if !(IsObject(cpStudyState) && cpStudyState.Has("gui"))
             continue
         try {
@@ -13507,6 +14882,20 @@ CPApplyDialogRadioTheme(radioCtrl) {
         try DllCall("uxtheme\SetWindowTheme", "ptr", radioCtrl.Hwnd, "wstr", "", "wstr", "")
     }
     try DllCall("user32\InvalidateRect", "ptr", radioCtrl.Hwnd, "ptr", 0, "int", 1)
+}
+
+CPApplyDialogCheckBoxTheme(checkCtrl) {
+    global controlDarkMode
+    colors := CPPalette(controlDarkMode)
+    try checkCtrl.SetFont("c" colors["text"])
+    if controlDarkMode {
+        ; Unthemed checkbox text honors WM_CTLCOLORBTN. The Explorer checkbox
+        ; theme otherwise keeps a black caption on these owned dark dialogs.
+        try DllCall("uxtheme\SetWindowTheme", "ptr", checkCtrl.Hwnd, "wstr", "", "wstr", "")
+    } else {
+        try DllCall("uxtheme\SetWindowTheme", "ptr", checkCtrl.Hwnd, "ptr", 0, "ptr", 0)
+    }
+    try DllCall("user32\InvalidateRect", "ptr", checkCtrl.Hwnd, "ptr", 0, "int", 1)
 }
 
 AddModelSourceDialog(provider, purpose) {

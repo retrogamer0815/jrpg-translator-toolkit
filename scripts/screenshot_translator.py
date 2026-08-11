@@ -416,40 +416,60 @@ def _mark_guessed_pronouns(text: str) -> str:
     return pattern.sub(repl, text)
 
 
+def _mark_speaker_name_lines(block: str) -> str:
+    """Mark every standalone speaker header that introduces dialogue.
+
+    Speaker headers can occur more than once when several text boxes are sent
+    together.  Requiring a following non-empty line keeps a lone bracketed
+    quotation at the end of a block from being styled as a name.
+    """
+    lines = block.splitlines()
+    first_nonempty = next(
+        (index for index, line in enumerate(lines) if line.strip()),
+        None,
+    )
+    for idx, line in enumerate(lines):
+        match = NAME_LINE_RE.match(line.strip())
+        if not match:
+            continue
+        # Additional speakers start a new paragraph.  This avoids styling most
+        # standalone quotations inside dialogue as speaker names.
+        if idx != first_nonempty and idx > 0 and lines[idx - 1].strip():
+            continue
+        inner = match.group(1).strip()
+        if (
+            not inner
+            or len(inner) > 80
+            or SPEAKER_HEADER_PUNCTUATION_RE.search(inner)
+        ):
+            continue
+        next_nonempty = next(
+            (
+                following.strip()
+                for following in lines[idx + 1:]
+                if following.strip()
+            ),
+            "",
+        )
+        if not next_nonempty or NAME_LINE_RE.match(next_nonempty):
+            continue
+        left = line[:len(line) - len(line.lstrip())]
+        lines[idx] = f"{left}⟦name⟧{inner}⟦/name⟧"
+    return "\n".join(lines)
+
+
 def _mark_translation_name_line(en_block: str) -> str:
     import os
     if (os.getenv("SHOT_COLOR_SPEAKER", "1") != "1"):
         return en_block
-    lines = en_block.splitlines()
-    idx = next((i for i, ln in enumerate(lines) if ln.strip() != ""), None)
-    if idx is None:
-        return en_block
-    first = lines[idx].strip()
-    match = NAME_LINE_RE.match(first)
-    if match:
-        inner = match.group(1).strip()
-        left = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
-        lines[idx] = f"{left}⟦name⟧{inner}⟦/name⟧"
-        return "\n".join(lines)
-    return en_block
+    return _mark_speaker_name_lines(en_block)
 
 
 def _mark_transcript_name_line(jp_block: str) -> str:
     import os
     if (os.getenv("SHOT_COLOR_SPEAKER", "1") != "1"):
         return jp_block
-    lines = jp_block.splitlines()
-    idx = next((i for i, ln in enumerate(lines) if ln.strip() != ""), None)
-    if idx is None:
-        return jp_block
-    first = lines[idx].strip()
-    match = NAME_LINE_RE.match(first)
-    if match:
-        inner = match.group(1).strip()
-        left = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
-        lines[idx] = f"{left}⟦name⟧{inner}⟦/name⟧"
-        return "\n".join(lines)
-    return jp_block
+    return _mark_speaker_name_lines(jp_block)
 
 
 # ==============================================================================
@@ -698,6 +718,7 @@ CLOSE_CLASS = "[" + re.escape(CLOSE_BRACKETS) + "]"
 NAME_LINE_RE = re.compile(rf"^\s*{OPEN_CLASS}\s*(.+?)\s*{CLOSE_CLASS}\s*$")
 INLINE_HEADER_RE = re.compile(rf"^\s*{OPEN_CLASS}\s*(.+?)\s*{CLOSE_CLASS}\s*[:：]?\s*(.+)$")
 READING_ANNOTATION_RE = re.compile(r"(?<=[\u3400-\u9fff々〆ヶ])\([ぁ-ゖー]+\)")
+SPEAKER_HEADER_PUNCTUATION_RE = re.compile(r"[。.!！、,，；;：:…｡､]")
 
 
 def strip_generated_kanji_readings(text: str) -> str:

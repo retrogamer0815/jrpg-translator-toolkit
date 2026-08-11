@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 from study_library_sections import (
     SECTION_SCHEMA,
     ensure_section_schema,
+    extract_strict_speaker_header,
     replace_explanation_sections,
 )
 
@@ -330,6 +331,7 @@ def archive_study_library_entry(
             "SELECT id FROM explanation_groups WHERE game_profile = ? AND source_hash = ?",
             (game_profile, source_hash),
         ).fetchone()
+        created_group = not bool(row)
         if row:
             group_id = int(row[0])
             connection.execute(
@@ -352,6 +354,19 @@ def archive_study_library_entry(
                 ),
             )
             group_id = int(cursor.lastrowid)
+
+        # Populate Speaker only when this source group is first created. Later
+        # versions must never overwrite a value that was edited or deliberately
+        # cleared by the user in the Study Library.
+        if created_group:
+            detected_speaker = extract_strict_speaker_header(jp)
+            if detected_speaker:
+                connection.execute(
+                    "INSERT INTO explanation_group_details("
+                    "group_id, speaker, updated_at"
+                    ") VALUES(?, ?, ?)",
+                    (group_id, detected_speaker, created_at),
+                )
 
         version = int(
             connection.execute(

@@ -18,6 +18,38 @@ class ExplanationSection:
     content: str
 
 
+_SPEAKER_HEADER_RE = re.compile(r"^\s*「([^「」\r\n]{1,80})」\s*$")
+_SPEAKER_SENTENCE_PUNCTUATION_RE = re.compile(r"[。.!！、,，；;：:…｡､]")
+
+
+def extract_strict_speaker_header(source_text: str) -> str:
+    """Return a speaker only from a strict standalone opening header.
+
+    A valid source begins with ``「speaker」`` on its own line and contains
+    dialogue on a later non-empty line. Mixed scripts and symbols are allowed,
+    including ``?``/``？`` for unknown speakers. Sentence-like punctuation is
+    rejected to avoid treating quoted dialogue as a speaker name.
+    """
+    lines = str(source_text or "").splitlines()
+    first_index = next((index for index, line in enumerate(lines) if line.strip()), -1)
+    if first_index < 0:
+        return ""
+
+    match = _SPEAKER_HEADER_RE.fullmatch(lines[first_index])
+    if not match:
+        return ""
+
+    # A properly formatted header identifies following dialogue; a lone quoted
+    # line is not enough evidence that its contents are a speaker label.
+    if not any(line.strip() for line in lines[first_index + 1 :]):
+        return ""
+
+    speaker = match.group(1).strip()
+    if not speaker or _SPEAKER_SENTENCE_PUNCTUATION_RE.search(speaker):
+        return ""
+    return speaker
+
+
 # These are the headings requested by the bundled explanation prompts. Aliases
 # from the compact fallback prompt are included as well. Matching a controlled
 # list is intentional: a speaker name such as "Estelle:" inside a literal gloss

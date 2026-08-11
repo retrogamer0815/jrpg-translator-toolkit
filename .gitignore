@@ -5,6 +5,8 @@ Settings/*.json
 
 # Runtime and user state
 Settings/control.ini
+Settings/anki.ini
+Settings/anki_candidate_preferences.db
 Settings/screenshot_cleanup_pending.txt
 Settings/overlay_*.ini
 Settings/Screenshots/
