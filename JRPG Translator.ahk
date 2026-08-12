@@ -80,6 +80,10 @@ global CPWelcomeDialog := 0
 global CPStudyLibraryState := 0
 global CPStudyReaderState := 0
 global CPStudyCandidateState := 0
+global CPStudyCandidateOpening := false
+global CPStudyBridgeRoot := A_Temp "\JRPG_Translator_Study_Bridge"
+global CPStudyBridgeWorkspaces := Map()
+global CPStudyBridgeSerial := 0
 
 CloseControlPanelMutex(*) {
     global __CP_MUTEX
@@ -104,6 +108,53 @@ ShowWindowNoActivate(hwnd) {
 }
 
 OnExit(CloseControlPanelMutex)
+OnExit(StudyBridgeCleanupAll)
+
+StudyBridgeCreateWorkspace(sbKind := "operation") {
+    global CPStudyBridgeRoot, CPStudyBridgeWorkspaces, CPStudyBridgeSerial
+    sbKind := RegExReplace(Trim(sbKind), "[^A-Za-z0-9_-]+", "_")
+    if (sbKind = "")
+        sbKind := "operation"
+    DirCreate(CPStudyBridgeRoot)
+    sbPid := DllCall("kernel32\GetCurrentProcessId", "uint")
+    loop {
+        CPStudyBridgeSerial += 1
+        sbPath := CPStudyBridgeRoot "\" sbKind "_" sbPid "_"
+            . A_TickCount "_" CPStudyBridgeSerial
+        if !DirExist(sbPath) && !FileExist(sbPath)
+            break
+    }
+    DirCreate(sbPath)
+    CPStudyBridgeWorkspaces[StrLower(sbPath)] := sbPath
+    return sbPath
+}
+
+StudyBridgeCleanupWorkspace(sbPath, *) {
+    global CPStudyBridgeWorkspaces
+    sbPath := Trim(sbPath)
+    sbKey := StrLower(sbPath)
+    ; Only paths created and registered by StudyBridgeCreateWorkspace can ever
+    ; be removed here.  A bridge state therefore cannot accidentally turn a
+    ; database, screenshot, or user-configured directory into a cleanup target.
+    if (sbPath = "" || !CPStudyBridgeWorkspaces.Has(sbKey))
+        return false
+    CPStudyBridgeWorkspaces.Delete(sbKey)
+    try DirDelete(sbPath, true)
+    return !DirExist(sbPath)
+}
+
+StudyBridgeCleanupAll(*) {
+    global CPStudyBridgeRoot, CPStudyBridgeWorkspaces
+    if !IsSet(CPStudyBridgeWorkspaces) || !IsObject(CPStudyBridgeWorkspaces)
+        return
+    sbPaths := []
+    for sbKey, sbPath in CPStudyBridgeWorkspaces
+        sbPaths.Push(sbPath)
+    for sbPath in sbPaths
+        StudyBridgeCleanupWorkspace(sbPath)
+    ; Leave no empty application-owned container after an orderly shutdown.
+    try DirDelete(CPStudyBridgeRoot)
+}
 
 SendControlPanelCopyData(hwnd, payload) {
     if !hwnd
@@ -1234,7 +1285,12 @@ CPPrepareStudyCombo(cpComboHwnd) {
     ; its items, focus behavior, keyboard navigation and controller wiring.
     try cpComboCtrl.Opt("+0x10") ; CBS_OWNERDRAWFIXED
     if !CPStudyComboSubclassCallback
-        CPStudyComboSubclassCallback := CallbackCreate(CPStudyComboWindowProc, "Fast", 4)
+        ; This callback performs GUI/map lookups and custom GDI painting.  A
+        ; Fast callback reuses whichever AutoHotkey thread Windows interrupts,
+        ; which is unsafe when a native control sends messages while another
+        ; GUI event or timer is active.  Give it an ordinary callback thread so
+        ; a delayed paint cannot corrupt the interpreter after a long idle.
+        CPStudyComboSubclassCallback := CallbackCreate(CPStudyComboWindowProc, "", 4)
     cpComboOriginalProc := DllCall(
         "user32\SetWindowLongPtr", "ptr", cpComboHwnd, "int", -4,
         "ptr", CPStudyComboSubclassCallback, "ptr"
@@ -1256,7 +1312,7 @@ CPPrepareStudyListView(cpListHwnd, cpHeaderHwnd) {
     if !cpListHwnd || CPStudyThemedListHwnds.Has(cpListHwnd)
         return
     if !CPStudyListSubclassCallback
-        CPStudyListSubclassCallback := CallbackCreate(CPStudyListWindowProc, "Fast", 4)
+        CPStudyListSubclassCallback := CallbackCreate(CPStudyListWindowProc, "", 4)
     cpListOriginalProc := DllCall(
         "user32\SetWindowLongPtr", "ptr", cpListHwnd, "int", -4,
         "ptr", CPStudyListSubclassCallback, "ptr"
@@ -1271,14 +1327,19 @@ CPStudyListWindowProc(cpListHwnd, cpListMsg, cpListWParam, cpListLParam) {
         cpListDrawType := NumGet(cpListLParam, 0, "uint")
         cpListDrawHwndOffset := A_PtrSize = 8 ? 24 : 20
         cpListDrawHwnd := NumGet(cpListLParam, cpListDrawHwndOffset, "ptr")
-        if (cpListDrawType = 100 && CPStudyThemedHeaderHwnds.Has(cpListDrawHwnd)) {
+        if (cpListDrawType = 100
+            && IsSet(CPStudyThemedHeaderHwnds)
+            && IsObject(CPStudyThemedHeaderHwnds)
+            && CPStudyThemedHeaderHwnds.Has(cpListDrawHwnd)) {
             try {
                 if CPThemeDrawHeaderItem(cpListLParam)
                     return 1
             }
         }
     }
-    cpListOriginalProc := CPStudyThemedListHwnds.Has(cpListHwnd)
+    cpListMapReady := IsSet(CPStudyThemedListHwnds)
+        && IsObject(CPStudyThemedListHwnds)
+    cpListOriginalProc := cpListMapReady && CPStudyThemedListHwnds.Has(cpListHwnd)
         ? CPStudyThemedListHwnds[cpListHwnd] : 0
     cpListResult := cpListOriginalProc
         ? DllCall("user32\CallWindowProcW", "ptr", cpListOriginalProc,
@@ -1286,14 +1347,20 @@ CPStudyListWindowProc(cpListHwnd, cpListMsg, cpListWParam, cpListLParam) {
             "ptr", cpListLParam, "ptr")
         : DllCall("user32\DefWindowProcW", "ptr", cpListHwnd,
             "uint", cpListMsg, "uptr", cpListWParam, "ptr", cpListLParam, "ptr")
-    if (cpListMsg = 0x0082 && CPStudyThemedListHwnds.Has(cpListHwnd))
+    if (cpListMsg = 0x0082 && cpListMapReady
+        && CPStudyThemedListHwnds.Has(cpListHwnd))
         CPStudyThemedListHwnds.Delete(cpListHwnd)
     return cpListResult
 }
 
 CPStudyComboWindowProc(cpComboHwnd, cpComboMsg, cpComboWParam, cpComboLParam) {
     global CPStudyThemedComboHwnds
-    cpComboOriginalProc := CPStudyThemedComboHwnds.Has(cpComboHwnd)
+    ; Native controls can finish WM_NCDESTROY after AutoHotkey has started
+    ; releasing globals during ExitApp.  Treat a missing map as an already
+    ; completed teardown instead of raising a last-moment script error.
+    cpComboMapReady := IsSet(CPStudyThemedComboHwnds)
+        && IsObject(CPStudyThemedComboHwnds)
+    cpComboOriginalProc := cpComboMapReady && CPStudyThemedComboHwnds.Has(cpComboHwnd)
         ? CPStudyThemedComboHwnds[cpComboHwnd] : 0
     cpComboResult := cpComboOriginalProc
         ? DllCall("user32\CallWindowProcW", "ptr", cpComboOriginalProc,
@@ -1314,7 +1381,8 @@ CPStudyComboWindowProc(cpComboHwnd, cpComboMsg, cpComboWParam, cpComboLParam) {
                 CPThemePaintStudyComboArrow(cpComboHwnd, cpComboWParam)
         }
     }
-    if (cpComboMsg = 0x0082 && CPStudyThemedComboHwnds.Has(cpComboHwnd))
+    if (cpComboMsg = 0x0082 && cpComboMapReady
+        && CPStudyThemedComboHwnds.Has(cpComboHwnd))
         CPStudyThemedComboHwnds.Delete(cpComboHwnd)
     return cpComboResult
 }
@@ -1382,7 +1450,10 @@ CPStudyTransparentWindowProc(cpOverlayHwnd, cpOverlayMsg, cpOverlayWParam, cpOve
         CPThemePaintStudyHeaderOverlay(cpOverlayHwnd, cpOverlayWParam)
         return 0
     }
-    cpOverlayOriginalProc := (CPStudyTransparentHwnds.Has(cpOverlayHwnd)
+    cpOverlayMapReady := IsSet(CPStudyTransparentHwnds)
+        && IsObject(CPStudyTransparentHwnds)
+    cpOverlayOriginalProc := (cpOverlayMapReady
+        && CPStudyTransparentHwnds.Has(cpOverlayHwnd)
         && IsObject(CPStudyTransparentHwnds[cpOverlayHwnd]))
         ? CPStudyTransparentHwnds[cpOverlayHwnd]["proc"] : 0
     cpOverlayResult := cpOverlayOriginalProc
@@ -1392,14 +1463,16 @@ CPStudyTransparentWindowProc(cpOverlayHwnd, cpOverlayMsg, cpOverlayWParam, cpOve
         : DllCall("user32\DefWindowProcW", "ptr", cpOverlayHwnd,
             "uint", cpOverlayMsg, "uptr", cpOverlayWParam,
             "ptr", cpOverlayLParam, "ptr")
-    if (cpOverlayMsg = 0x0082 && CPStudyTransparentHwnds.Has(cpOverlayHwnd))
+    if (cpOverlayMsg = 0x0082 && cpOverlayMapReady
+        && CPStudyTransparentHwnds.Has(cpOverlayHwnd))
         CPStudyTransparentHwnds.Delete(cpOverlayHwnd)
     return cpOverlayResult
 }
 
 CPThemePaintStudyHeaderOverlay(cpOverlayHwnd, cpOverlayDc) {
     global CPStudyTransparentHwnds, controlDarkMode
-    if !CPStudyTransparentHwnds.Has(cpOverlayHwnd)
+    if !IsSet(CPStudyTransparentHwnds) || !IsObject(CPStudyTransparentHwnds)
+        || !CPStudyTransparentHwnds.Has(cpOverlayHwnd)
         return
     cpOverlayData := CPStudyTransparentHwnds[cpOverlayHwnd]
     cpOverlayColors := CPPalette(controlDarkMode)
@@ -1448,7 +1521,7 @@ CPPrepareTransparentStudyOverlay(cpOverlayHwnd) {
     if !cpOverlayHwnd || CPStudyTransparentHwnds.Has(cpOverlayHwnd)
         return
     if !CPStudyTransparentCallback
-        CPStudyTransparentCallback := CallbackCreate(CPStudyTransparentWindowProc, "Fast", 4)
+        CPStudyTransparentCallback := CallbackCreate(CPStudyTransparentWindowProc, "", 4)
     cpOverlayOriginalProc := DllCall(
         "user32\SetWindowLongPtr", "ptr", cpOverlayHwnd, "int", -4,
         "ptr", CPStudyTransparentCallback, "ptr"
@@ -1461,9 +1534,10 @@ CPPrepareTransparentStudyOverlay(cpOverlayHwnd) {
 
 CPEnsureStudyVisualOverlays(cpStudyGui) {
     global CPStudyVisualOverlays
-    if !(IsObject(cpStudyGui) && cpStudyGui.Hwnd)
+    cpStudyRoot := 0
+    try cpStudyRoot := IsObject(cpStudyGui) ? cpStudyGui.Hwnd : 0
+    if !cpStudyRoot || !DllCall("user32\IsWindow", "ptr", cpStudyRoot, "int")
         return
-    cpStudyRoot := cpStudyGui.Hwnd
     if !CPStudyVisualOverlays.Has(cpStudyRoot) {
         cpStudyEntry := Map("gui", cpStudyGui, "arrows", [], "headers", [])
         for cpStudyControlHwnd in WinGetControlsHwnd("ahk_id " cpStudyRoot) {
@@ -1518,6 +1592,8 @@ CPEnsureStudyVisualOverlays(cpStudyGui) {
 }
 
 CPStudyHeaderText(cpHeaderHwnd, cpHeaderIndex) {
+    if !cpHeaderHwnd || !DllCall("user32\IsWindow", "ptr", cpHeaderHwnd, "int")
+        return ""
     cpStudyTextBuffer := Buffer(1024, 0)
     cpStudyHeaderItem := Buffer(A_PtrSize = 8 ? 72 : 48, 0)
     NumPut("uint", 0x0002, cpStudyHeaderItem, 0)
@@ -1526,6 +1602,14 @@ CPStudyHeaderText(cpHeaderHwnd, cpHeaderIndex) {
     if SendMessage(0x120B, cpHeaderIndex, cpStudyHeaderItem.Ptr, cpHeaderHwnd)
         return StrGet(cpStudyTextBuffer, "UTF-16")
     return ""
+}
+
+CPStudyLiveControlHwnd(cpStudyControl) {
+    cpStudyHwnd := 0
+    try cpStudyHwnd := IsObject(cpStudyControl) ? cpStudyControl.Hwnd : 0
+    return (cpStudyHwnd
+        && DllCall("user32\IsWindow", "ptr", cpStudyHwnd, "int"))
+        ? cpStudyHwnd : 0
 }
 
 CPUpdateStudyVisualOverlays(cpStudyRoot) {
@@ -1539,28 +1623,38 @@ CPUpdateStudyVisualOverlays(cpStudyRoot) {
     for cpStudyArrowEntry in cpStudyEntry["arrows"] {
         cpStudyCombo := cpStudyArrowEntry["combo"]
         cpStudyArrow := cpStudyArrowEntry["arrow"]
-        cpStudyShow := DllCall("user32\IsWindowVisible", "ptr", cpStudyCombo.Hwnd, "int")
+        cpStudyComboHwnd := CPStudyLiveControlHwnd(cpStudyCombo)
+        cpStudyArrowHwnd := CPStudyLiveControlHwnd(cpStudyArrow)
+        if !cpStudyComboHwnd || !cpStudyArrowHwnd
+            continue
+        cpStudyShow := DllCall("user32\IsWindowVisible", "ptr", cpStudyComboHwnd, "int")
         if !cpStudyShow {
             if (cpStudyArrowEntry["last"] != "hidden") {
-                cpStudyArrow.Visible := false
+                try cpStudyArrow.Visible := false
                 cpStudyArrowEntry["last"] := "hidden"
             }
             continue
         }
-        cpStudyCombo.GetPos(&cpStudyX, &cpStudyY, &cpStudyW, &cpStudyH)
+        try cpStudyCombo.GetPos(&cpStudyX, &cpStudyY, &cpStudyW, &cpStudyH)
+        catch
+            continue
         cpStudyArrowW := Min(28, Max(20, Floor(cpStudyH * 0.85)))
-        cpStudyEnabled := DllCall("user32\IsWindowEnabled", "ptr", cpStudyCombo.Hwnd, "int")
+        cpStudyEnabled := DllCall("user32\IsWindowEnabled", "ptr", cpStudyComboHwnd, "int")
         cpStudyArrowColor := cpStudyEnabled
             ? cpStudyColors["text"] : cpStudyColors["muted"]
         cpStudyArrowState := (cpStudyX "|" cpStudyY "|" cpStudyW "|" cpStudyH
             "|" cpStudyArrowColor "|" cpStudyColors["surfaceAlt"])
         if (cpStudyArrowEntry["last"] != cpStudyArrowState) {
-            cpStudyArrow.Move(cpStudyX + cpStudyW - cpStudyArrowW,
-                cpStudyY + 1, cpStudyArrowW - 1, Max(1, cpStudyH - 2))
-            cpStudyArrow.Opt("+Background" cpStudyColors["surfaceAlt"])
-            cpStudyArrow.SetFont("s9 c" cpStudyArrowColor)
-            cpStudyArrow.Visible := true
-            try DllCall("user32\SetWindowPos", "ptr", cpStudyArrow.Hwnd, "ptr", 0,
+            try {
+                cpStudyArrow.Move(cpStudyX + cpStudyW - cpStudyArrowW,
+                    cpStudyY + 1, cpStudyArrowW - 1, Max(1, cpStudyH - 2))
+                cpStudyArrow.Opt("+Background" cpStudyColors["surfaceAlt"])
+                cpStudyArrow.SetFont("s9 c" cpStudyArrowColor)
+                cpStudyArrow.Visible := true
+            } catch {
+                continue
+            }
+            try DllCall("user32\SetWindowPos", "ptr", cpStudyArrowHwnd, "ptr", 0,
                 "int", 0, "int", 0, "int", 0, "int", 0,
                 "uint", SWP_KEEP_GEOMETRY)
             cpStudyArrowEntry["last"] := cpStudyArrowState
@@ -1569,11 +1663,18 @@ CPUpdateStudyVisualOverlays(cpStudyRoot) {
 
     for cpStudyHeaderEntry in cpStudyEntry["headers"] {
         cpStudyHeader := cpStudyHeaderEntry["headerHwnd"]
-        if !cpStudyHeader || !DllCall("user32\IsWindowVisible", "ptr", cpStudyHeader, "int") {
+        cpStudyHeaderLive := (cpStudyHeader
+            && DllCall("user32\IsWindow", "ptr", cpStudyHeader, "int"))
+        if !cpStudyHeaderLive
+            continue
+        if !DllCall("user32\IsWindowVisible", "ptr", cpStudyHeader, "int") {
             for cpStudyLabelEntry in cpStudyHeaderEntry["labels"] {
+                cpStudyLabelHwnd := cpStudyLabelEntry["hwnd"]
+                if !cpStudyLabelHwnd || !DllCall("user32\IsWindow", "ptr", cpStudyLabelHwnd, "int")
+                    continue
                 if (cpStudyLabelEntry["last"] != "hidden") {
                     try DllCall("user32\ShowWindow", "ptr",
-                        cpStudyLabelEntry["hwnd"], "int", 0)
+                        cpStudyLabelHwnd, "int", 0)
                     cpStudyLabelEntry["last"] := "hidden"
                 }
             }
@@ -1584,6 +1685,8 @@ CPUpdateStudyVisualOverlays(cpStudyRoot) {
         cpStudyHeaderH := NumGet(cpStudyHeaderRect, 12, "int")
         for cpStudyIndex, cpStudyLabelEntry in cpStudyHeaderEntry["labels"] {
             cpStudyLabelHwnd := cpStudyLabelEntry["hwnd"]
+            if !cpStudyLabelHwnd || !DllCall("user32\IsWindow", "ptr", cpStudyLabelHwnd, "int")
+                continue
             cpStudyItemRect := Buffer(16, 0)
             if !SendMessage(0x1207, cpStudyIndex - 1,
                 cpStudyItemRect.Ptr, cpStudyHeader) {
@@ -1627,8 +1730,11 @@ CPUpdateAllStudyVisualOverlays(*) {
     for cpStudyRoot, cpStudyEntry in CPStudyVisualOverlays {
         if !DllCall("user32\IsWindow", "ptr", cpStudyRoot, "int")
             cpStudyDeadRoots.Push(cpStudyRoot)
-        else
-            CPUpdateStudyVisualOverlays(cpStudyRoot)
+        else {
+            try CPUpdateStudyVisualOverlays(cpStudyRoot)
+            catch as cpStudyOverlayError
+                DbgCP("Study visual overlay update failed: " cpStudyOverlayError.Message)
+        }
     }
     for cpStudyRoot in cpStudyDeadRoots
         CPStudyVisualOverlays.Delete(cpStudyRoot)
@@ -1638,7 +1744,9 @@ CPUpdateAllStudyVisualOverlays(*) {
 
 CPStudyHeaderWindowProc(cpHeaderHwnd, cpHeaderMsg, cpHeaderWParam, cpHeaderLParam) {
     global CPStudyThemedHeaderHwnds
-    cpHeaderOriginalProc := CPStudyThemedHeaderHwnds.Has(cpHeaderHwnd)
+    cpHeaderMapReady := IsSet(CPStudyThemedHeaderHwnds)
+        && IsObject(CPStudyThemedHeaderHwnds)
+    cpHeaderOriginalProc := cpHeaderMapReady && CPStudyThemedHeaderHwnds.Has(cpHeaderHwnd)
         ? CPStudyThemedHeaderHwnds[cpHeaderHwnd] : 0
     cpHeaderResult := cpHeaderOriginalProc
         ? DllCall("user32\CallWindowProcW", "ptr", cpHeaderOriginalProc,
@@ -1659,7 +1767,8 @@ CPStudyHeaderWindowProc(cpHeaderHwnd, cpHeaderMsg, cpHeaderWParam, cpHeaderLPara
                 CPThemePaintAllHeaders(cpHeaderHwnd, cpHeaderWParam)
         }
     }
-    if (cpHeaderMsg = 0x0082 && CPStudyThemedHeaderHwnds.Has(cpHeaderHwnd))
+    if (cpHeaderMsg = 0x0082 && cpHeaderMapReady
+        && CPStudyThemedHeaderHwnds.Has(cpHeaderHwnd))
         CPStudyThemedHeaderHwnds.Delete(cpHeaderHwnd)
     return cpHeaderResult
 }
@@ -1848,38 +1957,27 @@ CPThemeCtlColor(wParam, lParam, msg, parentHwnd) {
 }
 
 CPThemedWindowDestroyed(wParam, lParam, msg, hwnd) {
-    global CPThemedDialogHwnds, CPStudyThemedComboHwnds, CPStudyThemedHeaderHwnds
-        , CPStudyThemedListHwnds
-        , CPStudyVisualOverlays, CPStudyTransparentHwnds, CPThemedPopupButtons
+    global CPThemedDialogHwnds, CPStudyThemedHeaderHwnds
+        , CPStudyVisualOverlays, CPThemedPopupButtons
     try {
         if IsSet(CPThemedDialogHwnds) && IsObject(CPThemedDialogHwnds)
             && CPThemedDialogHwnds.Has(hwnd)
             CPThemedDialogHwnds.Delete(hwnd)
     }
-    try {
-        if IsSet(CPStudyThemedComboHwnds) && IsObject(CPStudyThemedComboHwnds)
-            && CPStudyThemedComboHwnds.Has(hwnd)
-            CPStudyThemedComboHwnds.Delete(hwnd)
-    }
+    ; Do not clear the ComboBox/ListView/overlay subclass maps here.  Their
+    ; window procedures still need the saved original WNDPROC while processing
+    ; WM_NCDESTROY and remove their own entry only after CallWindowProc returns.
+    ; Clearing it from this general OnMessage hook can make a subclass fall
+    ; through to DefWindowProc mid-destruction, corrupting native control state.
     try {
         if IsSet(CPStudyThemedHeaderHwnds) && IsObject(CPStudyThemedHeaderHwnds)
             && CPStudyThemedHeaderHwnds.Has(hwnd)
             CPStudyThemedHeaderHwnds.Delete(hwnd)
     }
     try {
-        if IsSet(CPStudyThemedListHwnds) && IsObject(CPStudyThemedListHwnds)
-            && CPStudyThemedListHwnds.Has(hwnd)
-            CPStudyThemedListHwnds.Delete(hwnd)
-    }
-    try {
         if IsSet(CPStudyVisualOverlays) && IsObject(CPStudyVisualOverlays)
             && CPStudyVisualOverlays.Has(hwnd)
             CPStudyVisualOverlays.Delete(hwnd)
-    }
-    try {
-        if IsSet(CPStudyTransparentHwnds) && IsObject(CPStudyTransparentHwnds)
-            && CPStudyTransparentHwnds.Has(hwnd)
-            CPStudyTransparentHwnds.Delete(hwnd)
     }
     try {
         if IsSet(CPThemedPopupButtons) && IsObject(CPThemedPopupButtons)
@@ -2243,7 +2341,52 @@ CPUnregisterThemeMessages(*) {
     CPThemeMessagesRegistered := false
 }
 
+CPUnsubclassStudyControls() {
+    global CPStudyThemedComboHwnds, CPStudyThemedListHwnds
+        , CPStudyThemedHeaderHwnds, CPStudyTransparentHwnds
+        , CPStudyVisualOverlays
+
+    ; Remove our native WNDPROC hooks while the tracking maps and saved original
+    ; procedures still exist. Otherwise Windows may deliver a final destruction
+    ; message after AutoHotkey has begun releasing globals during ExitApp.
+    SetTimer(CPUpdateAllStudyVisualOverlays, 0)
+    if IsSet(CPStudyThemedComboHwnds) && IsObject(CPStudyThemedComboHwnds) {
+        for cpComboHwnd, cpComboOriginalProc in CPStudyThemedComboHwnds {
+            if cpComboHwnd && cpComboOriginalProc
+                && DllCall("user32\IsWindow", "ptr", cpComboHwnd, "int")
+                try DllCall("user32\SetWindowLongPtr", "ptr", cpComboHwnd,
+                    "int", -4, "ptr", cpComboOriginalProc, "ptr")
+        }
+        CPStudyThemedComboHwnds.Clear()
+    }
+    if IsSet(CPStudyThemedListHwnds) && IsObject(CPStudyThemedListHwnds) {
+        for cpListHwnd, cpListOriginalProc in CPStudyThemedListHwnds {
+            if cpListHwnd && cpListOriginalProc
+                && DllCall("user32\IsWindow", "ptr", cpListHwnd, "int")
+                try DllCall("user32\SetWindowLongPtr", "ptr", cpListHwnd,
+                    "int", -4, "ptr", cpListOriginalProc, "ptr")
+        }
+        CPStudyThemedListHwnds.Clear()
+    }
+    if IsSet(CPStudyTransparentHwnds) && IsObject(CPStudyTransparentHwnds) {
+        for cpOverlayHwnd, cpOverlayData in CPStudyTransparentHwnds {
+            cpOverlayOriginalProc := IsObject(cpOverlayData) && cpOverlayData.Has("proc")
+                ? cpOverlayData["proc"] : 0
+            if cpOverlayHwnd && cpOverlayOriginalProc
+                && DllCall("user32\IsWindow", "ptr", cpOverlayHwnd, "int")
+                try DllCall("user32\SetWindowLongPtr", "ptr", cpOverlayHwnd,
+                    "int", -4, "ptr", cpOverlayOriginalProc, "ptr")
+        }
+        CPStudyTransparentHwnds.Clear()
+    }
+    if IsSet(CPStudyThemedHeaderHwnds) && IsObject(CPStudyThemedHeaderHwnds)
+        CPStudyThemedHeaderHwnds.Clear()
+    if IsSet(CPStudyVisualOverlays) && IsObject(CPStudyVisualOverlays)
+        CPStudyVisualOverlays.Clear()
+}
+
 CPShutdownThemeMessages(*) {
+    CPUnsubclassStudyControls()
     CPUnregisterThemeMessages()
     CPDestroyThemeBrushes()
 }
@@ -3116,9 +3259,9 @@ CPFocusableHwnds() {
     __CP_NAV_ITEMS := []
     if !(IsSet(ui) && ui && ui.Hwnd)
         return __CP_NAV_ITEMS
-    cb := CallbackCreate(CPEnumFocusableProc, "F")
+    cb := CallbackCreate(CPEnumFocusableProc)
     try DllCall("user32\EnumChildWindows", "ptr", ui.Hwnd, "ptr", cb, "ptr", 0)
-    CallbackFree(cb)
+    finally CallbackFree(cb)
     return __CP_NAV_ITEMS
 }
 
@@ -7459,7 +7602,11 @@ StudyReaderOpenReviewedAnkiDialog(
     if (!saIsVocabulary && srState["currentAnkiStatus"] = "found") {
         CPThemedOwnedMessage(
             srState["gui"].Hwnd,
-            "An exact normalized Japanese match is already linked in Anki.",
+            "An exact normalized Japanese match is currently marked as "
+                . "present in Anki.`n`n"
+                . "If you deleted an older card in Anki, return to the Study "
+                . "Library, choose Anki..., and select Refresh Anki status "
+                . "before trying again.",
             "Already in Anki", "ok", "info"
         )
         return
@@ -7872,7 +8019,7 @@ StudyCandidatesRecommendationPromptPreview(scSettings) {
         . scLevelText "`n" scStyleText "`nPrioritize " scFocus ".`n"
         . scExtraText "`nReturn only one JSON object with this exact structure:`n"
         . '{"items":[{"id":"the supplied id","recommended":true,"score":5,"reason":"one short practical reason"}]}'
-        . "`n`nRequirements:`n- Return exactly one result for every supplied id and preserve each id exactly.`n- recommended must be true or false.`n- score must be an integer from 1 (weak) to 5 (excellent).`n- reason must be a single concise sentence in English.`n- Do not rewrite or translate the candidates.`n`nCandidates:`n[candidate data is inserted here]"
+        . "`n`nRequirements:`n- Return exactly one result for every supplied id and preserve each id exactly.`n- recommended must be true or false.`n- score must be an integer from 1 (weak) to 5 (excellent).`n- reason must be a single concise sentence in the language specified by each candidate's reason_language field. If requested, infer it from explanation_context. Mixed-language batches are allowed, so determine the language separately for every candidate.`n- Do not rewrite or translate the candidates.`n`nCandidates:`n[candidate data, reason_language, and a short language-context excerpt are inserted here]"
 }
 
 StudyCandidatesRecommendationPreviewClose(scPreview, scDialog, *) {
@@ -8240,14 +8387,23 @@ StudyCandidatesRunBridge(scState, scAction, scFront := "") {
         scCommand .= ' --reviewed-through "' scState["snapshotThrough"] '"'
     else if (scAction = "hide-vocabulary" || scAction = "restore-vocabulary")
         scCommand .= ' --front-hex "' StudyLibraryHexEncode(scFront) '"'
-    try scExitCode := RunWait(scCommand, A_ScriptDir, "Hide")
-    catch as scError {
-        CPThemedOwnedMessage(
-            scState["gui"].Hwnd,
-            "The Anki candidate list could not be updated.`n`n" scError.Message,
-            "Review for Anki", "ok", "warning"
-        )
+    if !StudyCandidatesBeginWork(scState)
         return false
+    try {
+        try scExitCode := RunWait(scCommand, A_ScriptDir, "Hide")
+        catch as scError {
+            if (!scState.Has("closeRequested") || !scState["closeRequested"])
+                && StudyCandidatesGuiAlive(scState) {
+                CPThemedOwnedMessage(
+                    scState["gui"].Hwnd,
+                    "The Anki candidate list could not be updated.`n`n" scError.Message,
+                    "Review for Anki", "ok", "warning"
+                )
+            }
+            return false
+        }
+    } finally {
+        StudyCandidatesEndWork(scState)
     }
     if (scExitCode != 0) {
         scDetails := ""
@@ -8255,15 +8411,47 @@ StudyCandidatesRunBridge(scState, scAction, scFront := "") {
             scErrorPath := scState["outputDir"] "\candidate_recommendation_error.txt"
             try scDetails := Trim(FileRead(scErrorPath, "UTF-8"))
         }
-        CPThemedOwnedMessage(
-            scState["gui"].Hwnd,
-            "The Anki candidate list could not be updated (bridge exit "
-                . scExitCode ")." (scDetails != "" ? "`n`n" scDetails : ""),
-            "Review for Anki", "ok", "warning"
-        )
+        if (!scState.Has("closeRequested") || !scState["closeRequested"])
+            && StudyCandidatesGuiAlive(scState) {
+            CPThemedOwnedMessage(
+                scState["gui"].Hwnd,
+                "The Anki candidate list could not be updated (bridge exit "
+                    . scExitCode ")." (scDetails != "" ? "`n`n" scDetails : ""),
+                "Review for Anki", "ok", "warning"
+            )
+        }
         return false
     }
     return true
+}
+
+StudyCandidatesGuiAlive(scState) {
+    if !IsObject(scState) || !scState.Has("gui") || !scState["gui"]
+        return false
+    try return DllCall(
+        "user32\IsWindow", "ptr", scState["gui"].Hwnd, "int"
+    ) != 0
+    catch
+        return false
+}
+
+StudyCandidatesBeginWork(scState) {
+    if !StudyCandidatesGuiAlive(scState)
+        || (scState.Has("closeRequested") && scState["closeRequested"])
+        return false
+    scState["busyCount"] := (scState.Has("busyCount")
+        ? scState["busyCount"] : 0) + 1
+    return true
+}
+
+StudyCandidatesEndWork(scState) {
+    if !IsObject(scState)
+        return
+    scState["busyCount"] := Max(0, (scState.Has("busyCount")
+        ? scState["busyCount"] : 1) - 1)
+    if (scState["busyCount"] = 0 && scState.Has("closeRequested")
+        && scState["closeRequested"])
+        SetTimer(StudyCandidatesFinalizeClose.Bind(scState), -1)
 }
 
 StudyCandidatesSelected(scState) {
@@ -8279,7 +8467,7 @@ StudyCandidatesSelected(scState) {
 }
 
 StudyCandidatesUpdateActions(scState, *) {
-    if !(scState.Has("gui") && scState["gui"] && scState["gui"].Hwnd)
+    if !StudyCandidatesGuiAlive(scState)
         return
     scSelected := StudyCandidatesSelected(scState)
     scEnabled := IsObject(scSelected)
@@ -8356,7 +8544,7 @@ StudyCandidatesFilteredRows(scRows, scAiFilter) {
 }
 
 StudyCandidatesApplyAiFilter(scState) {
-    if !(scState.Has("gui") && scState["gui"] && scState["gui"].Hwnd)
+    if !StudyCandidatesGuiAlive(scState)
         return
     scState["sentences"] := StudyCandidatesFilteredRows(
         scState["allSentences"], scState["aiFilter"]
@@ -8414,6 +8602,9 @@ StudyCandidatesApplyAiFilter(scState) {
 }
 
 StudyCandidatesReadSnapshot(scState) {
+    if !StudyCandidatesGuiAlive(scState)
+        || (scState.Has("closeRequested") && scState["closeRequested"])
+        return false
     scState["allSentences"] := []
     scState["allVocabulary"] := []
 
@@ -8480,23 +8671,27 @@ StudyCandidatesReadSnapshot(scState) {
         scState["recommendationMessage"] := ""
     }
     StudyCandidatesApplyAiFilter(scState)
+    return true
 }
 
 StudyCandidatesRefresh(scState, *) {
-    if !(scState.Has("gui") && scState["gui"] && scState["gui"].Hwnd)
+    if !StudyCandidatesGuiAlive(scState)
+        || (scState.Has("closeRequested") && scState["closeRequested"])
+        || (scState.Has("busyCount") && scState["busyCount"] > 0)
         return
-    scScopeValue := scState["scopeDdl"].Value
-    scState["scope"] := scScopeValue = 3
-        ? "hidden" : (scScopeValue = 2 ? "all" : "new")
-    if (scState["scope"] = "hidden" && scState["tabs"].Value != 2)
-        scState["tabs"].Choose(2)
-    scState["status"].Value := "Building local candidate lists..."
-    scState["refreshButton"].Enabled := false
     try {
+        scScopeValue := scState["scopeDdl"].Value
+        scState["scope"] := scScopeValue = 3
+            ? "hidden" : (scScopeValue = 2 ? "all" : "new")
+        if (scState["scope"] = "hidden" && scState["tabs"].Value != 2)
+            scState["tabs"].Choose(2)
+        scState["status"].Value := "Building local candidate lists..."
+        scState["refreshButton"].Enabled := false
         if StudyCandidatesRunBridge(scState, "snapshot")
+            && !scState["closeRequested"]
             StudyCandidatesReadSnapshot(scState)
     } finally {
-        if (scState.Has("gui") && scState["gui"] && scState["gui"].Hwnd)
+        if StudyCandidatesGuiAlive(scState) && !scState["closeRequested"]
             scState["refreshButton"].Enabled := true
     }
 }
@@ -8519,6 +8714,10 @@ StudyCandidatesTabChanged(scState, *) {
 
 StudyCandidatesGenerateRecommendations(scState, *) {
     global explainProvider, explainOpenAIModel, explainGeminiModel
+    if !StudyCandidatesGuiAlive(scState)
+        || (scState.Has("closeRequested") && scState["closeRequested"])
+        || (scState.Has("busyCount") && scState["busyCount"] > 0)
+        return
     scCandidateCount := scState["allSentences"].Length
         + scState["allVocabulary"].Length
     if (scState["scope"] = "hidden" || scCandidateCount < 1)
@@ -8549,6 +8748,7 @@ StudyCandidatesGenerateRecommendations(scState, *) {
         scState["recommendationSettings"] :=
             StudyCandidatesRecommendationLoadSettings()
         if StudyCandidatesRunBridge(scState, "snapshot")
+            && !scState["closeRequested"]
             StudyCandidatesReadSnapshot(scState)
         return
     }
@@ -8559,6 +8759,10 @@ StudyCandidatesGenerateRecommendations(scState, *) {
     ; different assessment profile. Rebuild the snapshot so cached ratings from
     ; another profile are neither reused nor skipped by generation.
     if !StudyCandidatesRunBridge(scState, "snapshot") {
+        scState["forceRecommendations"] := false
+        return
+    }
+    if scState["closeRequested"] {
         scState["forceRecommendations"] := false
         return
     }
@@ -8577,6 +8781,8 @@ StudyCandidatesGenerateRecommendations(scState, *) {
     try DllCall("user32\UpdateWindow", "ptr", scState["gui"].Hwnd)
     try {
         if StudyCandidatesRunBridge(scState, "generate-recommendations") {
+            if scState["closeRequested"]
+                return
             scRows := StudyLibraryReadRows(
                 scState["outputDir"] "\candidate_recommendation_status.tsv"
             )
@@ -8588,7 +8794,7 @@ StudyCandidatesGenerateRecommendations(scState, *) {
         }
     } finally {
         scState["forceRecommendations"] := false
-        if (scState.Has("gui") && scState["gui"] && scState["gui"].Hwnd) {
+        if StudyCandidatesGuiAlive(scState) && !scState["closeRequested"] {
             scState["refreshButton"].Enabled := true
             StudyCandidatesUpdateActions(scState)
         }
@@ -8647,6 +8853,10 @@ StudyCandidatesAddSelected(scState, *) {
 }
 
 StudyCandidatesFinishReview(scState, *) {
+    if !StudyCandidatesGuiAlive(scState)
+        || (scState.Has("closeRequested") && scState["closeRequested"])
+        || (scState.Has("busyCount") && scState["busyCount"] > 0)
+        return
     if (scState["scope"] != "new" || scState["snapshotThrough"] = "")
         return
     scMessage := "Mark everything included in this candidate snapshot as reviewed?`n`n"
@@ -8662,6 +8872,10 @@ StudyCandidatesFinishReview(scState, *) {
 }
 
 StudyCandidatesTriageSelected(scState, *) {
+    if !StudyCandidatesGuiAlive(scState)
+        || (scState.Has("closeRequested") && scState["closeRequested"])
+        || (scState.Has("busyCount") && scState["busyCount"] > 0)
+        return
     if (scState["tabs"].Value != 2)
         return
     scCandidate := StudyCandidatesSelected(scState)
@@ -8687,6 +8901,95 @@ StudyCandidatesTriageSelected(scState, *) {
         return
     if StudyCandidatesRunBridge(scState, scAction, scCandidate["front"])
         StudyCandidatesRefresh(scState)
+}
+
+StudyCandidatesContextMenu(
+    scState, scGui, scControl, scRow, scIsRightClick, scX, scY
+) {
+    ; Gui.ContextMenu also fires for the keyboard context-menu key. Restrict
+    ; this handler to the two candidate tables, but support both invocation
+    ; methods so keyboard users receive the same commands as mouse users.
+    try scControlHwnd := scControl.Hwnd
+    catch
+        return
+    scSentenceHwnd := scState["sentenceList"].Hwnd
+    scVocabularyHwnd := scState["vocabularyList"].Hwnd
+    if (scControlHwnd != scSentenceHwnd
+        && scControlHwnd != scVocabularyHwnd)
+        return
+
+    scVocabulary := scControlHwnd = scVocabularyHwnd
+    scExpectedTab := scVocabulary ? 2 : 1
+    if (scState["tabs"].Value != scExpectedTab)
+        scState["tabs"].Choose(scExpectedTab)
+
+    if (scRow > 0) {
+        ; These ListViews are single-selection tables. Select the row under the
+        ; pointer before building the menu, as Explorer and spreadsheet tools do.
+        scControl.Modify(0, "-Select")
+        scControl.Modify(scRow, "Select Focus Vis")
+        StudyCandidatesUpdateActions(scState)
+    }
+
+    scCandidate := StudyCandidatesSelected(scState)
+    scHasSelection := IsObject(scCandidate)
+    scHidden := scState["scope"] = "hidden"
+    scMenuItems := []
+    scHasRowCommands := false
+
+    if (scHasSelection && !scHidden) {
+        scMenuItems.Push(Map(
+            "label", "Open in Reader",
+            "action", StudyCandidatesOpenSelected.Bind(scState)
+        ))
+        scMenuItems.Push(Map(
+            "label", "Add to Anki...",
+            "action", StudyCandidatesAddSelected.Bind(scState)
+        ))
+        scHasRowCommands := true
+    }
+    if (scHasSelection && scVocabulary) {
+        if scHasRowCommands
+            scMenuItems.Push(Map("separator", true))
+        scTriageLabel := scHidden
+            ? "Restore vocabulary" : "Ignore vocabulary..."
+        scMenuItems.Push(Map(
+            "label", scTriageLabel,
+            "action", StudyCandidatesTriageSelected.Bind(scState)
+        ))
+        scHasRowCommands := true
+    }
+    if (scState["scope"] = "new" && scState["snapshotThrough"] != "") {
+        if scHasRowCommands
+            scMenuItems.Push(Map("separator", true))
+        scMenuItems.Push(Map(
+            "label", "Finish review",
+            "action", StudyCandidatesFinishReview.Bind(scState)
+        ))
+        scHasRowCommands := true
+    }
+    if (scState["recommendButton"].Enabled) {
+        if scHasRowCommands
+            scMenuItems.Push(Map("separator", true))
+        scMenuItems.Push(Map(
+            "label", scState["recommendButton"].Text,
+            "action", StudyCandidatesGenerateRecommendations.Bind(scState)
+        ))
+        scHasRowCommands := true
+    }
+    if scHasRowCommands
+        scMenuItems.Push(Map("separator", true))
+    scMenuItems.Push(Map(
+        "label", "Refresh",
+        "action", StudyCandidatesRefresh.Bind(scState),
+        "enabled", !(scState.Has("busyCount") && scState["busyCount"] > 0)
+    ))
+    scChoice := CPThemedContextPopup(
+        scGui.Hwnd, scX, scY, scMenuItems
+    )
+    if (scChoice >= 1 && scChoice <= scMenuItems.Length
+        && scMenuItems[scChoice].Has("action"))
+        scMenuItems[scChoice]["action"].Call()
 }
 
 StudyCandidatesResize(scState, scGui, scMinMax, scWidth, scHeight) {
@@ -8736,10 +9039,13 @@ StudyCandidatesResize(scState, scGui, scMinMax, scWidth, scHeight) {
     )
 }
 
-StudyCandidatesClose(scState, *) {
+StudyCandidatesFinalizeClose(scState, *) {
     global CPStudyCandidateState
     if !IsObject(scState)
         return
+    if scState.Has("closeFinalized") && scState["closeFinalized"]
+        return
+    scState["closeFinalized"] := true
     try CPListViewSaveColumnOrder(
         scState["sentenceList"], "study_candidate_view",
         "sentenceColumnOrder", 5
@@ -8749,22 +9055,75 @@ StudyCandidatesClose(scState, *) {
         "vocabularyColumnOrder", 6
     )
     try scState["gui"].Destroy()
-    CPStudyCandidateState := 0
+    if scState.Has("outputDir")
+        try StudyBridgeCleanupWorkspace(scState["outputDir"])
+    if IsObject(CPStudyCandidateState)
+        && ObjPtr(CPStudyCandidateState) = ObjPtr(scState)
+        CPStudyCandidateState := 0
+}
+
+StudyCandidatesClose(scState, *) {
+    global CPStudyCandidateState
+    if !IsObject(scState)
+        return
+    if scState.Has("closeRequested") && scState["closeRequested"]
+        return
+    scState["closeRequested"] := true
+    ; Remove this closing instance from the public slot immediately, allowing a
+    ; newly selected Study Library to open its own candidate window while the
+    ; old bridge invocation winds down in the background.
+    if IsObject(CPStudyCandidateState)
+        && ObjPtr(CPStudyCandidateState) = ObjPtr(scState)
+        CPStudyCandidateState := 0
+    ; RunWait yields to GUI events, so Close can arrive while the Python bridge
+    ; is active. Hide immediately but keep the native controls alive until the
+    ; interrupted refresh thread returns and can finish without touching a
+    ; destroyed HWND.
+    if scState.Has("busyCount") && scState["busyCount"] > 0 {
+        try scState["gui"].Hide()
+        return
+    }
+    StudyCandidatesFinalizeClose(scState)
+}
+
+StudyCandidatesInitialRefresh(scState, *) {
+    ; Run the Python/Anki snapshot only after the button event which created the
+    ; native window has returned.  This prevents Windows owner-draw callbacks
+    ; from being nested inside a half-finished GUI construction thread.
+    if !StudyCandidatesGuiAlive(scState)
+        || (scState.Has("closeRequested") && scState["closeRequested"])
+        return
+    StudyCandidatesRefresh(scState)
+    if StudyCandidatesGuiAlive(scState)
+        && !(scState.Has("closeRequested") && scState["closeRequested"])
+        CPApplyOwnedDialogTheme(scState["gui"])
 }
 
 StudyLibraryOpenCandidates(slState, *) {
-    global CPStudyCandidateState, controlDarkMode
-    if (CPStudyCandidateState && CPStudyCandidateState.Has("gui")) {
+    global CPStudyCandidateState, CPStudyCandidateOpening, controlDarkMode
+    if CPStudyCandidateOpening
+        return
+    if IsObject(CPStudyCandidateState) {
+        if !StudyCandidatesGuiAlive(CPStudyCandidateState)
+            || (CPStudyCandidateState.Has("closeRequested")
+                && CPStudyCandidateState["closeRequested"]) {
+            ; A destroyed native HWND must never be reused merely because its
+            ; old AHK state object is still reachable.
+            CPStudyCandidateState := 0
+        }
+    }
+    if IsObject(CPStudyCandidateState) && CPStudyCandidateState.Has("gui") {
         try {
             CPStudyCandidateState["gui"].Show()
             WinActivate("ahk_id " CPStudyCandidateState["gui"].Hwnd)
             StudyCandidatesRefresh(CPStudyCandidateState)
             return
         }
+        CPStudyCandidateState := 0
     }
-    scOutputDir := A_Temp "\JRPG_Anki_Candidates_"
-        . DllCall("kernel32\GetCurrentProcessId", "uint")
-    DirCreate(scOutputDir)
+    CPStudyCandidateOpening := true
+    try {
+    scOutputDir := StudyBridgeCreateWorkspace("anki_candidates")
     scGui := Gui(
         "+Owner" slState["gui"].Hwnd " +OwnDialogs +Resize +MinSize680x420",
         "Study Library - Review for Anki"
@@ -8862,6 +9221,9 @@ StudyLibraryOpenCandidates(slState, *) {
         "baseStatus", "",
         "noticeStatus", "",
         "recommendationMessage", "",
+        "busyCount", 0,
+        "closeRequested", false,
+        "closeFinalized", false,
         "unassessedCount", 0,
         "sentences", [],
         "vocabulary", [],
@@ -8890,14 +9252,20 @@ StudyLibraryOpenCandidates(slState, *) {
     scGui.OnEvent("Escape", StudyCandidatesClose.Bind(scState))
     scGui.OnEvent("Close", StudyCandidatesClose.Bind(scState))
     scGui.OnEvent("Size", StudyCandidatesResize.Bind(scState))
+    scGui.OnEvent("ContextMenu", StudyCandidatesContextMenu.Bind(scState))
     scGui.Show("Hide w840 h575")
     CPApplyOwnedDialogTheme(scGui)
-    StudyCandidatesRefresh(scState)
     scGui.Show("Center")
     ; Several Windows 10/11 native controls finalize their non-client pieces
     ; (button faces, combo arrow and scrollbars) only after becoming visible.
     ; A final immediate pass makes those pieces dark without changing layout.
     CPApplyOwnedDialogTheme(scGui)
+    ; Defer the synchronous bridge snapshot until this creation callback has
+    ; unwound.  The visible status text provides immediate feedback meanwhile.
+    SetTimer(StudyCandidatesInitialRefresh.Bind(scState), -1)
+    } finally {
+        CPStudyCandidateOpening := false
+    }
 }
 
 StudyLibraryFormatBytes(slBytes) {
@@ -10904,16 +11272,32 @@ StudyWindowSizeMoveMessage(wParam, lParam, msg, hwnd) {
             continue
         if (msg = 0x0231) { ; WM_ENTERSIZEMOVE
             studyState["interactiveResize"] := true
+            ; Windows enters the same modal loop for a title-bar move and a
+            ; border resize. Remember the client dimensions so a plain move
+            ; does not trigger the expensive final layout/redraw on exit.
+            studyStartW := 0, studyStartH := 0
+            try studyState["gui"].GetClientPos(
+                , , &studyStartW, &studyStartH
+            )
+            studyState["sizeMoveStartWidth"] := studyStartW
+            studyState["sizeMoveStartHeight"] := studyStartH
             studyState["imageLayoutLastTick"] := 0
             try SetTimer(studyState["imageLayoutCallback"], 0)
             studyState["imageLayoutQueued"] := false
             try SetTimer(studyState["redrawCallback"], 0)
         } else if (msg = 0x0232) { ; WM_EXITSIZEMOVE
             studyState["interactiveResize"] := false
+            studyFinalW := 0, studyFinalH := 0
+            try studyState["gui"].GetClientPos(, , &studyFinalW, &studyFinalH)
+            studySizeChanged := !studyState.Has("sizeMoveStartWidth")
+                || !studyState.Has("sizeMoveStartHeight")
+                || studyFinalW != studyState["sizeMoveStartWidth"]
+                || studyFinalH != studyState["sizeMoveStartHeight"]
+            if !studySizeChanged
+                break
             ; The Size callback deliberately left all child controls untouched
             ; during the drag. Lay them out once at the final client size now.
             try {
-                studyState["gui"].GetClientPos(, , &studyFinalW, &studyFinalH)
                 studyState["sizeCallback"].Call(
                     studyState["gui"], 0, studyFinalW, studyFinalH
                 )
@@ -10971,9 +11355,7 @@ StudyLibraryOpenReaderFromList(slState, slList, slRow, *) {
 
 StudyLibraryReaderSnapshot() {
     global studyLibraryDir
-    srOutputDir := A_Temp "\JRPG_Study_Reader_Startup_"
-        . DllCall("kernel32\GetCurrentProcessId", "uint")
-    DirCreate(srOutputDir)
+    srOutputDir := StudyBridgeCreateWorkspace("reader_startup")
     srState := Map(
         "database", studyLibraryDir "\study_library.db",
         "outputDir", srOutputDir
@@ -11008,18 +11390,22 @@ StudyLibraryReaderSnapshot() {
             EnvSet(srName, srValue)
     }
     srGroups := []
-    if !srSucceeded
-        return srGroups
-    for srRow in StudyLibraryReadRows(srOutputDir "\groups.tsv") {
-        if (srRow.Length < 6)
-            continue
-        srGroups.Push(Map(
-            "id", Integer(srRow[1]),
-            "addedToAnkiAt", srRow.Length >= 10
-                ? StudyLibraryHexDecode(srRow[10]) : "",
-            "ankiStatus", srRow.Length >= 11
-                ? StudyLibraryHexDecode(srRow[11]) : "not_checked"
-        ))
+    try {
+        if srSucceeded {
+            for srRow in StudyLibraryReadRows(srOutputDir "\groups.tsv") {
+                if (srRow.Length < 6)
+                    continue
+                srGroups.Push(Map(
+                    "id", Integer(srRow[1]),
+                    "addedToAnkiAt", srRow.Length >= 10
+                        ? StudyLibraryHexDecode(srRow[10]) : "",
+                    "ankiStatus", srRow.Length >= 11
+                        ? StudyLibraryHexDecode(srRow[11]) : "not_checked"
+                ))
+            }
+        }
+    } finally {
+        StudyBridgeCleanupWorkspace(srOutputDir)
     }
     return srGroups
 }
@@ -11078,9 +11464,7 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
     }
 
     DirCreate(studyLibraryDir)
-    srOutputDir := A_Temp "\JRPG_Study_Reader_"
-        . DllCall("kernel32\GetCurrentProcessId", "uint")
-    DirCreate(srOutputDir)
+    srOutputDir := StudyBridgeCreateWorkspace("reader")
     srGui := Gui(
         "+Resize +MinSize720x480 +OwnDialogs",
         "JRPG Translator - Study Reader"
@@ -11725,6 +12109,74 @@ StudyLibraryRemoveVersion(slState, *) {
     if (slBackupPath != "")
         slResult .= "`n`nRecovery backup:`n" slBackupPath
     MsgBox(slResult, "Study Library", "OK Iconi")
+}
+
+StudyLibraryContextMenu(
+    slState, slGui, slControl, slRow, slIsRightClick, slX, slY
+) {
+    try slControlHwnd := slControl.Hwnd
+    catch
+        return
+    if (slControlHwnd != slState["list"].Hwnd)
+        return
+
+    if (slRow > 0) {
+        slClickedId := StudyLibraryRowGroupId(slState, slRow)
+        if (slClickedId > 0) {
+            slSelectedIds := StudyLibrarySelectedGroupIds(slState)
+            ; Preserve an existing multi-selection when its row is right-clicked.
+            ; A click on any other row starts a new single-row selection.
+            if !StudyLibraryGroupIdSelected(slSelectedIds, slClickedId) {
+                slControl.Modify(0, "-Select")
+                slControl.Modify(slRow, "Select Focus Vis")
+            } else
+                slControl.Modify(slRow, "Focus Vis")
+            if (slState["currentGroupId"] != slClickedId)
+                StudyLibraryLoadGroup(slState, slClickedId)
+            StudyLibraryUpdateSelectionActions(slState)
+        }
+    }
+
+    slSelectedIds := StudyLibrarySelectedGroupIds(slState)
+    slSelectedCount := slSelectedIds.Length
+    slMenuItems := []
+    if (slSelectedCount > 0) {
+        if (slSelectedCount = 1) {
+            slMenuItems.Push(Map(
+                "label", "Study",
+                "action", StudyLibraryOpenSelectedReader.Bind(slState)
+            ))
+        }
+        slEditLabel := slSelectedCount > 1
+            ? "Edit " slSelectedCount " selected..." : "Edit details..."
+        slMenuItems.Push(Map(
+            "label", slEditLabel,
+            "action", StudyLibraryEditDetails.Bind(slState)
+        ))
+        if (slSelectedCount = 1 && slState["versions"].Length > 0) {
+            slRemoveLabel := slState["versions"].Length = 1
+                ? "Remove explanation..." : "Remove version..."
+            slMenuItems.Push(Map(
+                "label", slRemoveLabel,
+                "action", StudyLibraryRemoveVersion.Bind(slState)
+            ))
+        }
+        slMenuItems.Push(Map("separator", true))
+    }
+    slMenuItems.Push(Map(
+        "label", "Filters...",
+        "action", StudyLibraryOpenFilters.Bind(slState)
+    ))
+    slMenuItems.Push(Map(
+        "label", "Columns...",
+        "action", StudyLibraryOpenColumns.Bind(slState)
+    ))
+    slChoice := CPThemedContextPopup(
+        slGui.Hwnd, slX, slY, slMenuItems
+    )
+    if (slChoice >= 1 && slChoice <= slMenuItems.Length
+        && slMenuItems[slChoice].Has("action"))
+        slMenuItems[slChoice]["action"].Call()
 }
 
 StudyLibraryValueChoices(
@@ -12920,8 +13372,7 @@ OpenStudyLibraryWindow(slStandalone := false) {
     slActiveLibrary := StudyLibraryConfiguredName()
     StudyLibraryActivateName(slActiveLibrary)
     DirCreate(studyLibraryDir)
-    slOutputDir := A_Temp "\JRPG_Study_Library"
-    DirCreate(slOutputDir)
+    slOutputDir := StudyBridgeCreateWorkspace("library")
     slGuiOptions := "+Resize +MinSize640x440 +OwnDialogs"
     if !slStandalone
         slGuiOptions .= " +Owner" ui.Hwnd
@@ -13157,6 +13608,7 @@ OpenStudyLibraryWindow(slStandalone := false) {
     slOpenImage.OnEvent("Click", StudyLibraryOpenImage.Bind(slState))
     slGui.OnEvent("Escape", StudyLibraryClose.Bind(slState))
     slGui.OnEvent("Close", StudyLibraryClose.Bind(slState))
+    slGui.OnEvent("ContextMenu", StudyLibraryContextMenu.Bind(slState))
 
     slGui.Show("Hide w900 h600")
     slDpi := GetWindowDPI(slGui.Hwnd)
@@ -13703,20 +14155,19 @@ CPControllerTokenDisplay(token) {
     return token
 }
 
-CPJoystickNativeName(controllerId, forget := false) {
-    ; AutoHotkey's legacy `NJoyName` lookup can enter unstable driver code when
-    ; a device disappears between enumeration and the name query.  Because the
-    ; controller timer runs continuously, use the documented WinMM capability
-    ; API instead and cache the result for the lifetime of this connection.
-    static cachedNames := Map()
+CPJoystickNativeCapabilities(controllerId, forget := false) {
+    ; AutoHotkey's legacy joystick lookups can enter unstable driver code when
+    ; a device disappears between enumeration and a state query. Read and cache
+    ; both the device name and its native axis ranges through WinMM instead.
+    static cachedCapabilities := Map()
     controllerId := Integer(controllerId)
     if forget {
-        if cachedNames.Has(controllerId)
-            cachedNames.Delete(controllerId)
-        return ""
+        if cachedCapabilities.Has(controllerId)
+            cachedCapabilities.Delete(controllerId)
+        return false
     }
-    if cachedNames.Has(controllerId)
-        return cachedNames[controllerId]
+    if cachedCapabilities.Has(controllerId)
+        return cachedCapabilities[controllerId]
 
     ; JOYCAPSW is 728 bytes: two WORDs, a 32-character product name,
     ; 19 UINT capability fields, a 32-character registry key, and a
@@ -13725,12 +14176,37 @@ CPJoystickNativeName(controllerId, forget := false) {
     result := 1
     try result := DllCall("winmm\joyGetDevCapsW"
         , "uptr", controllerId - 1, "ptr", caps.Ptr, "uint", caps.Size, "uint")
-    if (result = 0)
-        try controllerName := Trim(StrGet(caps.Ptr + 4, 32, "UTF-16"))
-    if !IsSet(controllerName) || controllerName = ""
+    if (result != 0)
+        return false
+
+    controllerName := ""
+    try controllerName := Trim(StrGet(caps.Ptr + 4, 32, "UTF-16"))
+    if (controllerName = "")
         controllerName := "Joystick " controllerId
-    cachedNames[controllerId] := controllerName
-    return controllerName
+
+    axisRanges := Map(
+        "X", [NumGet(caps, 68, "uint"), NumGet(caps, 72, "uint")],
+        "Y", [NumGet(caps, 76, "uint"), NumGet(caps, 80, "uint")],
+        "Z", [NumGet(caps, 84, "uint"), NumGet(caps, 88, "uint")],
+        "R", [NumGet(caps, 104, "uint"), NumGet(caps, 108, "uint")],
+        "U", [NumGet(caps, 112, "uint"), NumGet(caps, 116, "uint")],
+        "V", [NumGet(caps, 120, "uint"), NumGet(caps, 124, "uint")]
+    )
+    capabilities := Map("name", controllerName, "axisRanges", axisRanges)
+    cachedCapabilities[controllerId] := capabilities
+    return capabilities
+}
+
+CPJoystickNativeName(controllerId, forget := false) {
+    capabilities := CPJoystickNativeCapabilities(controllerId, forget)
+    if !IsObject(capabilities)
+        return forget ? "" : "Joystick " Integer(controllerId)
+    return capabilities["name"]
+}
+
+CPJoystickNativeAxisRanges(controllerId) {
+    capabilities := CPJoystickNativeCapabilities(controllerId)
+    return IsObject(capabilities) ? capabilities["axisRanges"] : false
 }
 
 CPJoystickNativeSnapshot(controllerId) {
@@ -13747,9 +14223,42 @@ CPJoystickNativeSnapshot(controllerId) {
     if (result != 0)
         return false
     return Map(
+        "axes", Map(
+            "X", NumGet(stateBuffer, 8, "uint"),
+            "Y", NumGet(stateBuffer, 12, "uint"),
+            "Z", NumGet(stateBuffer, 16, "uint"),
+            "R", NumGet(stateBuffer, 20, "uint"),
+            "U", NumGet(stateBuffer, 24, "uint"),
+            "V", NumGet(stateBuffer, 28, "uint")
+        ),
         "buttons", NumGet(stateBuffer, 32, "uint"),
         "pov", NumGet(stateBuffer, 40, "uint")
     )
+}
+
+CPControllerAppendLegacyState(snapshot, controllerId, legacyState) {
+    controllerName := CPJoystickNativeName(controllerId)
+    if !snapshot["connected"] {
+        snapshot["connected"] := true
+        snapshot["name"] := controllerName
+    }
+    pressedButtons := legacyState["buttons"]
+    Loop 32 {
+        buttonIndex := A_Index
+        if (pressedButtons & (1 << (buttonIndex - 1)))
+            snapshot["tokens"]["J:Button " buttonIndex] := true
+    }
+    pov := legacyState["pov"]
+    if (pov < 36000) {
+        if (pov >= 31500 || pov <= 4500)
+            snapshot["tokens"]["J:D-pad Up"] := true
+        if (pov >= 4500 && pov <= 13500)
+            snapshot["tokens"]["J:D-pad Right"] := true
+        if (pov >= 13500 && pov <= 22500)
+            snapshot["tokens"]["J:D-pad Down"] := true
+        if (pov >= 22500 && pov <= 31500)
+            snapshot["tokens"]["J:D-pad Left"] := true
+    }
 }
 
 CPControllerReadSnapshot() {
@@ -13762,7 +14271,17 @@ CPControllerReadSnapshot() {
         [0x1000, "X:A"], [0x2000, "X:B"],
         [0x4000, "X:X"], [0x8000, "X:Y"]
     ]
+    ; XInput is cheap enough to check every poll.  WinMM device discovery is
+    ; deliberately throttled: repeatedly probing every possible legacy slot
+    ; while a controller/driver is disappearing can destabilize vendor drivers.
+    static controllerBackend := ""
+    static legacyControllerIds := []
+    static xinputDisconnectStartedMs := 0
+    static nextLegacyDiscoveryMs := 0
+    static DISCONNECT_GRACE_MS := 750
+    static LEGACY_DISCOVERY_INTERVAL_MS := 1000
     snapshot := Map("connected", false, "name", "", "tokens", Map())
+    nowMs := DllCall("kernel32\GetTickCount64", "uint64")
 
     Loop 4 {
         userIndex := A_Index - 1
@@ -13783,11 +14302,60 @@ CPControllerReadSnapshot() {
         if (state["rightTrigger"] >= 128)
             snapshot["tokens"]["X:RT"] := true
     }
-    if snapshot["connected"]
+    if snapshot["connected"] {
+        controllerBackend := "xinput"
+        legacyControllerIds := []
+        xinputDisconnectStartedMs := 0
+        nextLegacyDiscoveryMs := 0
         return snapshot
+    }
+
+    ; Do not immediately reinterpret an unplugged XInput device as a legacy
+    ; joystick.  Give Windows and the controller driver time to settle first;
+    ; a reconnect is still noticed immediately by the XInput loop above.
+    if (controllerBackend = "xinput") {
+        if !xinputDisconnectStartedMs
+            xinputDisconnectStartedMs := nowMs
+        if ((nowMs - xinputDisconnectStartedMs) < DISCONNECT_GRACE_MS)
+            return snapshot
+        controllerBackend := ""
+        legacyControllerIds := []
+        xinputDisconnectStartedMs := 0
+        nextLegacyDiscoveryMs := 0
+    } else {
+        xinputDisconnectStartedMs := 0
+    }
 
     ; DualSense and other non-XInput devices are exposed through the legacy
-    ; joystick API. Button numbering follows Windows' controller panel.
+    ; joystick API. Once found, only the known device slots are polled at the
+    ; normal 20 ms rate. Button numbering follows Windows' controller panel.
+    if (controllerBackend = "legacy" && legacyControllerIds.Length) {
+        stillConnectedIds := []
+        for controllerId in legacyControllerIds {
+            legacyState := CPJoystickNativeSnapshot(controllerId)
+            if !IsObject(legacyState) {
+                CPJoystickNativeName(controllerId, true)
+                continue
+            }
+            stillConnectedIds.Push(controllerId)
+            CPControllerAppendLegacyState(snapshot, controllerId, legacyState)
+        }
+        legacyControllerIds := stillConnectedIds
+        if snapshot["connected"]
+            return snapshot
+
+        ; The active legacy controller disappeared.  Reset immediately, then
+        ; defer broad discovery briefly instead of hammering all driver slots.
+        controllerBackend := ""
+        nextLegacyDiscoveryMs := nowMs + DISCONNECT_GRACE_MS
+        return snapshot
+    }
+
+    if (nowMs < nextLegacyDiscoveryMs)
+        return snapshot
+    nextLegacyDiscoveryMs := nowMs + LEGACY_DISCOVERY_INTERVAL_MS
+
+    detectedLegacyIds := []
     Loop 16 {
         controllerId := A_Index
         legacyState := CPJoystickNativeSnapshot(controllerId)
@@ -13795,28 +14363,12 @@ CPControllerReadSnapshot() {
             CPJoystickNativeName(controllerId, true)
             continue
         }
-        controllerName := CPJoystickNativeName(controllerId)
-        if !snapshot["connected"] {
-            snapshot["connected"] := true
-            snapshot["name"] := controllerName
-        }
-        pressedButtons := legacyState["buttons"]
-        Loop 32 {
-            buttonIndex := A_Index
-            if (pressedButtons & (1 << (buttonIndex - 1)))
-                snapshot["tokens"]["J:Button " buttonIndex] := true
-        }
-        pov := legacyState["pov"]
-        if (pov < 36000) {
-            if (pov >= 31500 || pov <= 4500)
-                snapshot["tokens"]["J:D-pad Up"] := true
-            if (pov >= 4500 && pov <= 13500)
-                snapshot["tokens"]["J:D-pad Right"] := true
-            if (pov >= 13500 && pov <= 22500)
-                snapshot["tokens"]["J:D-pad Down"] := true
-            if (pov >= 22500 && pov <= 31500)
-                snapshot["tokens"]["J:D-pad Left"] := true
-        }
+        detectedLegacyIds.Push(controllerId)
+        CPControllerAppendLegacyState(snapshot, controllerId, legacyState)
+    }
+    if snapshot["connected"] {
+        controllerBackend := "legacy"
+        legacyControllerIds := detectedLegacyIds
     }
     return snapshot
 }
@@ -14632,9 +15184,12 @@ CPThemedChoicePopupOnKeyDown(wParam, lParam, msg, hwnd) {
             )
             return true
         case 0x0D, 0x20: ; Enter / Space
+            cpPopupResult := cpPopupState.Has("resultValues")
+                ? cpPopupState["resultValues"][cpPopupState["focusIndex"]]
+                : cpPopupState["focusIndex"]
             CPThemedChoicePopupFinish(
                 cpPopupState, cpPopupState["gui"],
-                cpPopupState["focusIndex"]
+                cpPopupResult
             )
             return true
     }
@@ -14738,6 +15293,130 @@ CPThemedChoicePopup(ownerHwnd, anchorHwnd, choices) {
     cpX := Max(cpVirtualX, Min(cpX, cpVirtualX + cpVirtualW - cpPopupW))
     if (cpY + cpPopupH > cpVirtualY + cpVirtualH)
         cpY := Max(cpVirtualY, cpAnchorTop - cpPopupH)
+    cpPopup.Show("x" cpX " y" cpY)
+    CPThemedChoicePopupRegister(cpPopupState)
+    CPThemedChoicePopupFocus(cpPopupState, 1)
+    try WinActivate("ahk_id " cpPopup.Hwnd)
+    cpWatch := CPThemedChoicePopupWatch.Bind(
+        cpPopupState, cpPopup.Hwnd, cpPopup
+    )
+    SetTimer(cpWatch, 80)
+    try {
+        while !cpPopupState["closed"]
+            Sleep(20)
+    } finally {
+        SetTimer(cpWatch, 0)
+        CPThemedChoicePopupUnregister(cpPopupState)
+        try cpPopup.Destroy()
+    }
+    return cpPopupState["result"]
+}
+
+CPThemedContextPopup(ownerHwnd, clientX, clientY, items) {
+    global controlDarkMode
+    if !items.Length
+        return 0
+
+    cpOwnerValid := ownerHwnd
+        && DllCall("user32\IsWindow", "ptr", ownerHwnd, "int")
+    cpPopupState := Map(
+        "closed", false,
+        "result", 0,
+        "rows", [],
+        "resultValues", [],
+        "disabledRows", [],
+        "separators", [],
+        "focusIndex", 1
+    )
+    cpOptions := "+ToolWindow -Caption +Border +AlwaysOnTop"
+    if cpOwnerValid
+        cpOptions .= " +Owner" ownerHwnd
+    cpPopup := Gui(cpOptions)
+    cpPopup.MarginX := 4
+    cpPopup.MarginY := 4
+    cpPopup.SetFont("s9", "Segoe UI")
+    cpColors := CPPalette(controlDarkMode)
+    cpPopup.BackColor := cpColors["surface"]
+    cpPopupState["gui"] := cpPopup
+    cpPopupState["colors"] := cpColors
+
+    cpLongestLabel := 0
+    for cpItem in items {
+        if cpItem.Has("label")
+            cpLongestLabel := Max(cpLongestLabel, StrLen(cpItem["label"]))
+    }
+    cpMenuWidth := Max(220, Min(390, 42 + cpLongestLabel * 8))
+    cpHasPreviousRow := false
+    for cpItemIndex, cpItem in items {
+        if (cpItem.Has("separator") && cpItem["separator"]) {
+            cpSeparatorPosition := cpHasPreviousRow ? "xm y+4" : "xm ym"
+            cpSeparator := cpPopup.Add(
+                "Text",
+                cpSeparatorPosition " w" cpMenuWidth " h1"
+                    . " Background" cpColors["border"]
+            )
+            cpPopupState["separators"].Push(cpSeparator)
+            cpHasPreviousRow := false
+            continue
+        }
+        if !cpItem.Has("label")
+            continue
+        cpEnabled := !cpItem.Has("enabled") || cpItem["enabled"]
+        cpPosition := cpHasPreviousRow ? "xm y+1" : "xm y+4"
+        cpRowOptions := cpPosition " w" cpMenuWidth " h29 0x200"
+            . " Background" cpColors["surface"]
+            . " c" (cpEnabled ? cpColors["text"] : cpColors["muted"])
+        if cpEnabled
+            cpRowOptions .= " +Tabstop"
+        cpChoiceRow := cpPopup.Add(
+            "Text", cpRowOptions, "  " cpItem["label"]
+        )
+        if cpEnabled {
+            cpPopupState["rows"].Push(cpChoiceRow)
+            cpPopupState["resultValues"].Push(cpItemIndex)
+            cpChoiceRow.OnEvent(
+                "Click", CPThemedChoicePopupFinish.Bind(
+                    cpPopupState, cpPopup, cpItemIndex
+                )
+            )
+        } else
+            cpPopupState["disabledRows"].Push(cpChoiceRow)
+        cpHasPreviousRow := true
+    }
+    if !cpPopupState["rows"].Length
+        return 0
+
+    cpPopup.OnEvent(
+        "Escape", CPThemedChoicePopupFinish.Bind(cpPopupState, cpPopup, 0)
+    )
+    cpPopup.OnEvent(
+        "Close", CPThemedChoicePopupFinish.Bind(cpPopupState, cpPopup, 0)
+    )
+    cpPopup.Show("Hide AutoSize")
+    CPApplyOwnedDialogTheme(cpPopup)
+    for cpDisabledRow in cpPopupState["disabledRows"]
+        try cpDisabledRow.Opt(
+            "+Background" cpColors["surface"] " c" cpColors["muted"]
+        )
+    for cpSeparator in cpPopupState["separators"]
+        try cpSeparator.Opt("+Background" cpColors["border"])
+    CPThemedChoicePopupPaintFocus(cpPopupState, 1)
+    cpPopup.GetPos(,, &cpPopupW, &cpPopupH)
+
+    cpScreenPoint := Buffer(8, 0)
+    NumPut("int", clientX, "int", clientY, cpScreenPoint, 0)
+    if cpOwnerValid
+        try DllCall(
+            "user32\ClientToScreen", "ptr", ownerHwnd,
+            "ptr", cpScreenPoint.Ptr, "int"
+        )
+    cpX := NumGet(cpScreenPoint, 0, "int")
+    cpY := NumGet(cpScreenPoint, 4, "int")
+    cpVirtualX := SysGet(76), cpVirtualY := SysGet(77)
+    cpVirtualW := SysGet(78), cpVirtualH := SysGet(79)
+    cpX := Max(cpVirtualX, Min(cpX, cpVirtualX + cpVirtualW - cpPopupW))
+    cpY := Max(cpVirtualY, Min(cpY, cpVirtualY + cpVirtualH - cpPopupH))
+
     cpPopup.Show("x" cpX " y" cpY)
     CPThemedChoicePopupRegister(cpPopupState)
     CPThemedChoicePopupFocus(cpPopupState, 1)
@@ -15690,7 +16369,7 @@ LaunchOverlay(*) {
         DbgCP("LaunchOverlay Run OK, pid=" pid " cmd=" cmd " wd=" runDir)
     } Catch as ex {
 
-        DbgCP("LaunchOverlay Run EXCEPTION: " e.Message "  cmd=" cmd " wd=" ovDir)
+        DbgCP("LaunchOverlay Run EXCEPTION: " ex.Message "  cmd=" cmd " wd=" ovDir)
     }
 
     Sleep(150)
@@ -15711,7 +16390,7 @@ LaunchOverlay(*) {
         DbgCP("LaunchOverlay found window: Translator")
         try WinSetTransparent(overlayTrans, "Translator")
         Catch as ex {
-            DbgCP("WinSetTransparent failed on 'Translator': " e.Message)
+            DbgCP("WinSetTransparent failed on 'Translator': " ex.Message)
         }
         SetTitleMatchMode oldMode
         SendOverlayTheme("Translator")
@@ -15850,7 +16529,7 @@ LaunchExplainerOverlay(*) {
         ; then transparency
         try WinSetTransparent(overlayTrans_EW, "Explainer")
         Catch as ex {
-            DbgCP("WinSetTransparent failed: " e.Message)
+            DbgCP("WinSetTransparent failed: " ex.Message)
         }
         ; start periodic watcher to persist movement/resizes
         StartExplainerBoundsWatcher()
@@ -15860,16 +16539,23 @@ LaunchExplainerOverlay(*) {
     SendOverlayTheme("Explainer")
 }
 
+ToastDestroy(cpToastGui) {
+    cpToastHwnd := 0
+    try cpToastHwnd := IsObject(cpToastGui) ? cpToastGui.Hwnd : 0
+    if cpToastHwnd && DllCall("user32\IsWindow", "ptr", cpToastHwnd, "int")
+        try cpToastGui.Destroy()
+}
+
 Toast(msg){
     static g := 0
-    try g.Destroy()
+    ToastDestroy(g)
     g := Gui("+ToolWindow -Caption +AlwaysOnTop +E0x20")
     g.BackColor := "101825"
     g.MarginX := 12, g.MarginY := 8
     g.SetFont("s11", "Segoe UI")
     g.Add("Text", "cWhite", msg)
     g.Show("AutoSize NoActivate x20 y20")
-    SetTimer(() => g.Destroy(), -1100)
+    SetTimer(ToastDestroy.Bind(g), -1100)
 }
 
 ; =========================
@@ -15958,12 +16644,23 @@ CPRegisterOverlayAdjustHotkeys() {
     CPOverlayAdjustHotkeysBound := true
 }
 
-CPJoystickAxis(controllerId, axisName) {
-    value := ""
-    try value := GetKeyState(controllerId "Joy" axisName)
-    if (value = "")
+CPJoystickAxis(controllerId, axisName, snapshot := false, axisRanges := false) {
+    if !IsObject(snapshot)
+        snapshot := CPJoystickNativeSnapshot(controllerId)
+    if !(IsObject(snapshot) && snapshot.Has("axes") && snapshot["axes"].Has(axisName))
         return ""
-    return value + 0.0
+    if !IsObject(axisRanges)
+        axisRanges := CPJoystickNativeAxisRanges(controllerId)
+    if !(IsObject(axisRanges) && axisRanges.Has(axisName))
+        return ""
+
+    axisRange := axisRanges[axisName]
+    minimum := axisRange[1] + 0.0
+    maximum := axisRange[2] + 0.0
+    if (maximum <= minimum)
+        return 50.0
+    normalized := (snapshot["axes"][axisName] - minimum) * 100.0 / (maximum - minimum)
+    return Max(0.0, Min(100.0, normalized))
 }
 
 CPXInputLibrary() {
@@ -16046,9 +16743,10 @@ CPScanOverlayAdjustControllers() {
         controllerName := CPJoystickNativeName(controllerId)
 
         rightAxes := CPControllerRightAxes(controllerName)
+        axisRanges := CPJoystickNativeAxisRanges(controllerId)
         baseline := Map()
         for axisName in ["X", "Y", "Z", "R", "U", "V"] {
-            value := CPJoystickAxis(controllerId, axisName)
+            value := CPJoystickAxis(controllerId, axisName, legacyState, axisRanges)
             baseline[axisName] := (value = "") ? 50.0 : value
         }
         controllers.Push(Map(
@@ -16057,6 +16755,7 @@ CPScanOverlayAdjustControllers() {
             "name", controllerName,
             "rightX", rightAxes[1],
             "rightY", rightAxes[2],
+            "axisRanges", axisRanges,
             "baseline", baseline
         ))
     }
@@ -16077,11 +16776,14 @@ CPReadOverlayAdjustAxes(controller) {
         )
     }
 
+    current := CPJoystickNativeSnapshot(controller["id"])
+    if !IsObject(current)
+        return false
     return Map(
-        "moveX", CPOverlayAdjustAxis(controller, "X"),
-        "moveY", CPOverlayAdjustAxis(controller, "Y"),
-        "sizeX", CPOverlayAdjustAxis(controller, controller["rightX"]),
-        "sizeY", CPOverlayAdjustAxis(controller, controller["rightY"])
+        "moveX", CPOverlayAdjustAxis(controller, "X", current),
+        "moveY", CPOverlayAdjustAxis(controller, "Y", current),
+        "sizeX", CPOverlayAdjustAxis(controller, controller["rightX"], current),
+        "sizeY", CPOverlayAdjustAxis(controller, controller["rightY"], current)
     )
 }
 
@@ -16102,11 +16804,14 @@ CPReadOverlayAdjustButtons(controller) {
         , "i)(DualSense|DualShock|Wireless Controller|PlayStation)")
     confirmButtonIndex := isPlayStationController ? 2 : 1
     cancelButtonIndex := isPlayStationController ? 3 : 2
-    confirmPressed := false
-    cancelPressed := false
-    try confirmPressed := GetKeyState(controller["id"] "Joy" confirmButtonIndex)
-    try cancelPressed := GetKeyState(controller["id"] "Joy" cancelButtonIndex)
-    return Map("confirm", !!confirmPressed, "cancel", !!cancelPressed)
+    currentState := CPJoystickNativeSnapshot(controller["id"])
+    if !IsObject(currentState)
+        return false
+    buttonBits := currentState["buttons"]
+    return Map(
+        "confirm", !!(buttonBits & (1 << (confirmButtonIndex - 1))),
+        "cancel", !!(buttonBits & (1 << (cancelButtonIndex - 1)))
+    )
 }
 
 CPOverlayAdjustControllerKey(controller) {
@@ -16218,8 +16923,8 @@ CPDetectOverlayAdjustController() {
     return true
 }
 
-CPOverlayAdjustAxis(controller, axisName) {
-    value := CPJoystickAxis(controller["id"], axisName)
+CPOverlayAdjustAxis(controller, axisName, snapshot := false) {
+    value := CPJoystickAxis(controller["id"], axisName, snapshot, controller["axisRanges"])
     if (value = "")
         return 0.0
     centered := (value - controller["baseline"][axisName]) / 50.0

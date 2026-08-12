@@ -24,6 +24,8 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from anki_bridge import (
     AnkiUnavailable,
+    anki_endpoint_available,
+    anki_process_running,
     normalize_japanese,
     notes_for_scope,
     plain_text,
@@ -35,10 +37,71 @@ from example_sentence import call_model, extract_json_object, load_project_envir
 REVIEW_METADATA_KEY = "anki_candidates_reviewed_through"
 HIDDEN_VOCABULARY_TABLE = "anki_candidate_hidden_vocabulary"
 RECOMMENDATION_TABLE = "anki_candidate_recommendations"
-RECOMMENDATION_PROMPT_VERSION = "2"
+RECOMMENDATION_PROMPT_VERSION = "3"
 HIDDEN_MIGRATION_METADATA_KEY = "anki_candidate_hidden_migrated_global"
 ENTRY_DASH_RE = re.compile(r"\s*(?:—|–|--|\s-\s)\s*")
 BULLET_RE = re.compile(r"^\s*(?:[*•・]|[-–—]|\d+[.)])\s+")
+
+PROMPT_LANGUAGE_NAMES = {
+    "de": "German",
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "it": "Italian",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "uk": "Ukrainian",
+    "zh-cn": "Simplified Chinese",
+    "zh-tw": "Traditional Chinese",
+}
+
+EXPLANATION_HEADING_LANGUAGES = {
+    "natural english translation": "English",
+    "natural english paraphrase": "English",
+    "original japanese": "English",
+    "detailed analysis": "English",
+    "natürliche deutsche übersetzung": "German",
+    "japanischer originaltext": "German",
+    "detaillierte analyse": "German",
+    "traducción natural al español": "Spanish",
+    "español original": "Spanish",
+    "análisis detallado": "Spanish",
+    "traduction française naturelle": "French",
+    "français original": "French",
+    "analyse détaillée": "French",
+    "traduzione naturale in italiano": "Italian",
+    "italiano originale": "Italian",
+    "analisi dettagliata": "Italian",
+    "自然な日本語での言い換え": "Japanese",
+    "日本語原文": "Japanese",
+    "詳しい分析": "Japanese",
+    "자연스러운 한국어 번역": "Korean",
+    "일본어 원문": "Korean",
+    "상세 분석": "Korean",
+    "natuurlijke nederlandse vertaling": "Dutch",
+    "origineel japans": "Dutch",
+    "gedetailleerde analyse": "Dutch",
+    "naturalne tłumaczenie na polski": "Polish",
+    "oryginalny tekst japoński": "Polish",
+    "szczegółowa analiza": "Polish",
+    "tradução natural para português": "Portuguese",
+    "japonês original": "Portuguese",
+    "análise detalhada": "Portuguese",
+    "естественный перевод на русский": "Russian",
+    "оригинальный японский текст": "Russian",
+    "подробный разбор": "Russian",
+    "природний переклад українською": "Ukrainian",
+    "оригінальний японський текст": "Ukrainian",
+    "докладний розбір": "Ukrainian",
+    "自然简体中文翻译": "Simplified Chinese",
+    "详细分析": "Simplified Chinese",
+    "自然繁體中文翻譯": "Traditional Chinese",
+    "詳細分析": "Traditional Chinese",
+}
 
 
 def encode_field(value: object) -> str:
@@ -193,6 +256,40 @@ def decode_optional_hex(value: str) -> str:
         return ""
 
 
+def recommendation_reason_language(
+    prompt_profile: str, section_headings: str, explanation_context: str
+) -> str:
+    """Resolve the language used by the selected saved explanation.
+
+    Bundled prompt profiles have a stable language suffix.  Recognized localized
+    section headings cover legacy/default profiles and renamed custom prompts.
+    For an otherwise unknown custom prompt, the model receives a short excerpt
+    and is told to match that excerpt rather than falling back to English.
+    """
+    profile = unicodedata.normalize("NFKC", prompt_profile or "").casefold()
+    profile = profile.replace("_", "-")
+    for code in sorted(PROMPT_LANGUAGE_NAMES, key=len, reverse=True):
+        if profile == code or profile.endswith("-" + code):
+            return PROMPT_LANGUAGE_NAMES[code]
+
+    for heading in str(section_headings or "").splitlines():
+        normalized = unicodedata.normalize("NFKC", heading).casefold()
+        normalized = normalized.strip().rstrip(":：").strip()
+        language = EXPLANATION_HEADING_LANGUAGES.get(normalized)
+        if language:
+            return language
+
+    if str(explanation_context or "").strip():
+        return "Match the language used in explanation_context"
+    return "English"
+
+
+def recommendation_language_context(value: str, limit: int = 600) -> str:
+    """Keep enough saved explanation text for unknown custom-prompt languages."""
+    text = " ".join(str(value or "").split())
+    return text[:limit].rstrip()
+
+
 def cached_recommendations(
     preferences_database: Path,
 ) -> dict[str, dict[str, object]]:
@@ -322,6 +419,26 @@ def anki_matches(
 ) -> tuple[dict[str, set[str]], str, str]:
     """Return normalized Japanese already present in each mapped parent deck."""
     matches: dict[str, set[str]] = {}
+    mapped_profiles = [
+        profile
+        for profile in sorted(profiles, key=str.casefold)
+        if (mapping := mappings.get(profile.casefold()))
+        and all(mapping.get(key) for key in ("deck", "model", "japanese_field"))
+    ]
+    if mapped_profiles and not anki_endpoint_available():
+        for profile in mapped_profiles:
+            matches[profile.casefold()] = set()
+        if anki_process_running():
+            message = (
+                "Anki is running, but AnkiConnect did not answer on "
+                "127.0.0.1:8765. Install or enable AnkiConnect, then restart Anki."
+            )
+        else:
+            message = (
+                "Anki is not running. Open Anki and keep it running while "
+                "refreshing links."
+            )
+        return matches, "unavailable", message
     attempted = 0
     connected = 0
     messages: list[str] = []
@@ -432,6 +549,7 @@ def selected_groups(connection: sqlite3.Connection) -> list[sqlite3.Row]:
         )
         SELECT g.id AS group_id, g.game_profile, g.source_japanese,
                g.updated_at, s.id AS explanation_id, s.version,
+               s.prompt_profile,
                c.version_count,
                COALESCE(d.added_to_anki_at, '') AS added_to_anki_at,
                COALESCE(a.status, 'not_checked') AS anki_status
@@ -524,13 +642,45 @@ def snapshot(
             linked = bool(str(row["added_to_anki_at"] or "").strip()) or (
                 str(row["anki_status"] or "") == "found"
             )
+            section_rows = connection.execute(
+                "SELECT section_key, heading, content FROM explanation_sections "
+                "WHERE explanation_id = ? ORDER BY sort_order",
+                (int(row["explanation_id"]),),
+            ).fetchall()
+            section_headings = "\n".join(
+                str(section_row["heading"] or "") for section_row in section_rows
+            )
+            context_candidates = [
+                str(section_row["content"] or "")
+                for section_row in section_rows
+                if str(section_row["section_key"] or "")
+                in {"translation", "analysis", "vocabulary"}
+            ]
+            explanation_context = recommendation_language_context(
+                next((value for value in context_candidates if value.strip()), "")
+            )
+            reason_language = recommendation_reason_language(
+                str(row["prompt_profile"] or ""),
+                section_headings,
+                explanation_context,
+            )
+            reason_language_context = (
+                explanation_context
+                if reason_language.startswith("Match the language")
+                else ""
+            )
+            language_profile = (
+                recommendation_profile + "\0reason-language=" + reason_language
+            )
+            if reason_language_context:
+                language_profile += "\0" + reason_language_context
             if (
                 scope != "hidden"
                 and not linked
                 and normalized_source not in profile_matches
             ):
                 recommendation_key = candidate_hash(
-                    "sentence", source, recommendation_profile=recommendation_profile
+                    "sentence", source, recommendation_profile=language_profile
                 )
                 recommendation = recommendations.get(recommendation_key)
                 sentence_rows.append(
@@ -550,19 +700,23 @@ def snapshot(
                         encode_field(
                             "" if recommendation is None else recommendation["reason"]
                         ),
+                        encode_field(reason_language),
+                        encode_field(reason_language_context),
                     )
                 )
 
-            section = connection.execute(
-                "SELECT content FROM explanation_sections "
-                "WHERE explanation_id = ? AND section_key = 'vocabulary' "
-                "ORDER BY sort_order LIMIT 1",
-                (int(row["explanation_id"]),),
-            ).fetchone()
-            if section is None:
+            vocabulary_section = next(
+                (
+                    section_row
+                    for section_row in section_rows
+                    if str(section_row["section_key"] or "") == "vocabulary"
+                ),
+                None,
+            )
+            if vocabulary_section is None:
                 continue
             seen_in_group: set[str] = set()
-            for entry in parse_vocabulary(str(section[0] or "")):
+            for entry in parse_vocabulary(str(vocabulary_section["content"] or "")):
                 normalized_front = normalize_japanese(
                     entry.front, remove_attached_readings=True
                 )
@@ -593,6 +747,9 @@ def snapshot(
                         "back": entry.back,
                         "meaning": entry.meaning,
                         "occurrences": 1,
+                        "reason_language": reason_language,
+                        "explanation_context": reason_language_context,
+                        "language_profile": language_profile,
                     }
                 else:
                     current["occurrences"] = int(current["occurrences"]) + 1
@@ -604,6 +761,9 @@ def snapshot(
                             front=entry.front,
                             back=entry.back,
                             meaning=entry.meaning,
+                            reason_language=reason_language,
+                            explanation_context=reason_language_context,
+                            language_profile=language_profile,
                         )
 
         if scope == "hidden":
@@ -620,6 +780,10 @@ def snapshot(
                     "back": display,
                     "meaning": "Not present in the active Study Library",
                     "occurrences": 0,
+                    "reason_language": "English",
+                    "explanation_context": "",
+                    "language_profile": recommendation_profile
+                    + "\0reason-language=English",
                 }
 
         vocabulary_rows = []
@@ -633,7 +797,7 @@ def snapshot(
                 "vocabulary",
                 str(item["front"]),
                 str(item["back"]),
-                recommendation_profile,
+                str(item["language_profile"]),
             )
             recommendation = recommendations.get(recommendation_key)
             vocabulary_rows.append(
@@ -654,14 +818,19 @@ def snapshot(
                     encode_field(
                         "" if recommendation is None else recommendation["reason"]
                     ),
+                    encode_field(item["reason_language"]),
+                    encode_field(item["explanation_context"]),
                 )
             )
 
         write_rows(sentence_path, sentence_rows)
         write_rows(vocabulary_path, vocabulary_rows)
-        all_rows = sentence_rows + vocabulary_rows
-        assessed_count = sum(1 for item in all_rows if int(item[-3]) >= 0)
-        recommended_count = sum(1 for item in all_rows if int(item[-3]) == 1)
+        assessed_count = sum(1 for item in sentence_rows if int(item[6]) >= 0)
+        assessed_count += sum(1 for item in vocabulary_rows if int(item[9]) >= 0)
+        recommended_count = sum(1 for item in sentence_rows if int(item[6]) == 1)
+        recommended_count += sum(
+            1 for item in vocabulary_rows if int(item[9]) == 1
+        )
         write_rows(
             status_path,
             ((
@@ -761,7 +930,10 @@ Requirements:
 - Return exactly one result for every supplied id and preserve each id exactly.
 - recommended must be true or false.
 - score must be an integer from 1 (weak) to 5 (excellent).
-- reason must be a single concise sentence in English.
+- reason must be a single concise sentence in the language specified by that
+  candidate's reason_language field. If it says to match explanation_context,
+  infer the language from that excerpt. Mixed-language batches are allowed, so
+  determine the reason language separately for every candidate.
 - Do not rewrite or translate the candidates.
 
 Candidates:
@@ -822,6 +994,12 @@ def generate_recommendations(
                         "id": row[5],
                         "kind": "sentence",
                         "japanese": decode_field(row[3]),
+                        "reason_language": decode_field(row[9])
+                        if len(row) > 9
+                        else "English",
+                        "explanation_context": decode_field(row[10])
+                        if len(row) > 10
+                        else "",
                     }
                 )
 
@@ -838,6 +1016,12 @@ def generate_recommendations(
                         "japanese": decode_field(row[4]),
                         "full_entry": decode_field(row[5]),
                         "meaning_and_context": decode_field(row[6]),
+                        "reason_language": decode_field(row[12])
+                        if len(row) > 12
+                        else "English",
+                        "explanation_context": decode_field(row[13])
+                        if len(row) > 13
+                        else "",
                     }
                 )
 

@@ -12,6 +12,7 @@ import io
 import json
 import os
 import re
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -47,6 +48,20 @@ class AnkiUnavailable(RuntimeError):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def anki_endpoint_available(timeout: float = 0.15) -> bool:
+    """Return quickly when the local AnkiConnect listener is not available.
+
+    On Windows, urllib can spend roughly two seconds establishing that a closed
+    localhost port is unavailable.  Candidate-list refreshes only need a cheap
+    reachability check before attempting the normal AnkiConnect requests.
+    """
+    try:
+        with socket.create_connection(("127.0.0.1", 8765), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def encode_field(value: object) -> str:
@@ -203,35 +218,59 @@ def anki_html(value: str) -> str:
     return html.escape(normalized).replace("\n", "<br>")
 
 
-def anki_html_with_screenshot(value: str, filename: str) -> str:
-    """Place a source screenshot after Japanese and before the translation."""
+def _anki_source_image_html(filename: str) -> str:
+    """Return the shared, phone-friendly source-image markup."""
+    safe_filename = html.escape(filename, quote=True)
+    return (
+        '<div class="jrpg-translator-source-image" style="margin:0.75em 0">'
+        f'<img src="{safe_filename}" style="max-width:100%;height:auto">'
+        "</div>"
+    )
+
+
+def anki_explanation_html(value: str, filename: str = "") -> str:
+    """Format a structured explanation with portable in-card navigation.
+
+    Only headings recognized by the same conservative parser as the Study
+    Reader become navigation targets. Custom/unstructured responses keep the
+    former escaped plain-text layout. Anki's card WebViews do not reliably
+    navigate ordinary fragment links inside field HTML, so the generated
+    controls use fixed local ``scrollIntoView()`` calls. Model/user text is
+    never inserted into those calls.
+    """
     normalized = value.replace("\r\n", "\n").replace("\r", "\n")
     lines = normalized.split("\n")
-    headings: list[tuple[int, str]] = []
+    heading_rows: list[tuple[int, str, str]] = []
     for index, line in enumerate(lines):
         recognized = _recognized_heading(line)
         if recognized is not None:
-            headings.append((index, recognized[0]))
+            heading_rows.append((index, recognized[0], recognized[1]))
 
-    insert_at: int | None = None
-    original_heading = next(
-        (index for index, key in headings if key == "original"), None
-    )
-    if original_heading is not None:
-        # Normally the translation is the next section. If a localized/custom
-        # prompt puts another recognized section first, keep the image directly
-        # after the complete Original Japanese section instead.
-        insert_at = next(
-            (index for index, _key in headings if index > original_heading),
-            len(lines),
+    # Do not imply reliable structure when the model/custom prompt returned
+    # fewer than two recognized sections. Preserve the established fallback,
+    # including the conservative screenshot placement used by older cards.
+    if len(heading_rows) < 2:
+        if not filename:
+            return anki_html(value)
+        insert_at: int | None = None
+        original_heading = next(
+            (index for index, key, _heading in heading_rows if key == "original"),
+            None,
         )
-    else:
-        # A custom prompt may omit the Original Japanese heading. Prefer placing
-        # the image before a recognized translation; otherwise use the end of
-        # the first paragraph as a conservative, early-context fallback.
-        insert_at = next(
-            (index for index, key in headings if key == "translation"), None
-        )
+        if original_heading is not None:
+            insert_at = next(
+                (
+                    index
+                    for index, _key, _heading in heading_rows
+                    if index > original_heading
+                ),
+                len(lines),
+            )
+        else:
+            insert_at = next(
+                (index for index, key, _heading in heading_rows if key == "translation"),
+                None,
+            )
         if insert_at is None:
             saw_text = False
             for index, line in enumerate(lines):
@@ -242,32 +281,113 @@ def anki_html_with_screenshot(value: str, filename: str) -> str:
                     break
         if insert_at is None:
             insert_at = len(lines)
+        before = anki_html("\n".join(lines[:insert_at]).rstrip("\n"))
+        after = anki_html("\n".join(lines[insert_at:]).lstrip("\n"))
+        image = _anki_source_image_html(filename)
+        if before and after:
+            return before + "<br><br>" + image + "<br><br>" + after
+        if before:
+            return before + "<br><br>" + image
+        if after:
+            return image + "<br><br>" + after
+        return image
 
-    before = anki_html("\n".join(lines[:insert_at]).rstrip("\n"))
-    after = anki_html("\n".join(lines[insert_at:]).lstrip("\n"))
-    safe_filename = html.escape(filename, quote=True)
-    image = (
-        '<div class="jrpg-translator-source-image" style="margin:0.75em 0">'
-        f'<img src="{safe_filename}" style="max-width:100%;height:auto">'
-        "</div>"
+    id_counts: dict[str, int] = {}
+    sections: list[dict[str, object]] = []
+    for position, (line_index, key, heading) in enumerate(heading_rows):
+        end_index = (
+            heading_rows[position + 1][0]
+            if position + 1 < len(heading_rows)
+            else len(lines)
+        )
+        id_counts[key] = id_counts.get(key, 0) + 1
+        suffix = "" if id_counts[key] == 1 else f"-{id_counts[key]}"
+        sections.append(
+            {
+                "key": key,
+                "heading": heading,
+                "anchor": f"jrpg-section-{key}{suffix}",
+                "content": "\n".join(lines[line_index + 1 : end_index]).strip(),
+            }
+        )
+
+    link_style = "color:#55baf2;text-decoration:underline;cursor:pointer"
+    toc_links = " &middot; ".join(
+        f'<span class="tappable" '
+        f'onclick="document.getElementById(\'{section["anchor"]}\')'
+        f'.scrollIntoView();" style="{link_style}">'
+        f'{html.escape(str(section["heading"]))}</span>'
+        for section in sections
     )
-    if before and after:
-        return before + "<br><br>" + image + "<br><br>" + after
-    if before:
-        return before + "<br><br>" + image
-    if after:
-        return image + "<br><br>" + after
-    return image
+    parts = [
+        '<div id="jrpg-explanation-top"></div>',
+        '<div class="jrpg-translator-toc" '
+        'style="border:1px solid #888;padding:10px;margin-bottom:18px;'
+        'border-radius:6px">'
+        "<b>📑 Jump to section:</b><br>"
+        f"{toc_links}</div>",
+    ]
+
+    preamble = "\n".join(lines[: heading_rows[0][0]]).strip()
+    if preamble:
+        parts.append(f'<div class="jrpg-explanation-preamble">{anki_html(preamble)}</div>')
+
+    image_inserted = False
+    has_original = any(section["key"] == "original" for section in sections)
+    for section_index, section in enumerate(sections):
+        # If a custom prompt omitted Original Japanese, retain the useful old
+        # behavior of placing context immediately before the translation. When
+        # there is no translation either, place it after the first section.
+        if (
+            filename
+            and not image_inserted
+            and not has_original
+            and section["key"] == "translation"
+        ):
+            parts.append(_anki_source_image_html(filename))
+            image_inserted = True
+
+        parts.append("<hr>")
+        parts.append(
+            f'<h3 id="{section["anchor"]}">'
+            f'{html.escape(str(section["heading"]))}:</h3>'
+        )
+        content = str(section["content"])
+        if content:
+            parts.append(f'<div class="jrpg-explanation-section">{anki_html(content)}</div>')
+
+        if filename and not image_inserted and section["key"] == "original":
+            parts.append(_anki_source_image_html(filename))
+            image_inserted = True
+        elif (
+            filename
+            and not image_inserted
+            and not has_original
+            and section_index == 0
+            and not any(item["key"] == "translation" for item in sections)
+        ):
+            parts.append(_anki_source_image_html(filename))
+            image_inserted = True
+
+        parts.append(
+            '<p><span class="tappable" '
+            'onclick="document.getElementById(\'jrpg-explanation-top\')'
+            f'.scrollIntoView();" style="{link_style}">↑ Back to top</span></p>'
+        )
+
+    if filename and not image_inserted:
+        parts.append(_anki_source_image_html(filename))
+    return "".join(parts)
+
+
+def anki_html_with_screenshot(value: str, filename: str) -> str:
+    """Backward-compatible wrapper for structured explanation export."""
+    return anki_explanation_html(value, filename)
 
 
 def anki_html_with_screenshot_at_end(value: str, filename: str) -> str:
     """Append context media to a short reviewed vocabulary definition."""
-    safe_filename = html.escape(filename, quote=True)
-    image = (
-        '<div class="jrpg-translator-source-image" style="margin:0.75em 0">'
-        f'<img src="{safe_filename}" style="max-width:100%;height:auto">'
-        "</div>"
-    )
+    image = _anki_source_image_html(filename)
     content = anki_html(value)
     return content + ("<br><br>" if content else "") + image
 
@@ -665,13 +785,13 @@ def add_note(database: Path, output_dir: Path) -> int:
             _image_size,
         ) = prepare_anki_screenshot(screenshot_source)
 
-    back_html = anki_html(back)
-    if screenshot_filename:
-        back_html = (
-            anki_html_with_screenshot_at_end(back, screenshot_filename)
-            if card_kind == "vocabulary"
-            else anki_html_with_screenshot(back, screenshot_filename)
-        )
+    back_html = (
+        anki_html(back)
+        if card_kind == "vocabulary"
+        else anki_explanation_html(back, screenshot_filename)
+    )
+    if screenshot_filename and card_kind == "vocabulary":
+        back_html = anki_html_with_screenshot_at_end(back, screenshot_filename)
 
     note = {
         "deckName": deck_name,
@@ -711,7 +831,7 @@ def add_note(database: Path, output_dir: Path) -> int:
             note["fields"][explanation_field] = (
                 anki_html_with_screenshot_at_end(back, stored_media_filename)
                 if card_kind == "vocabulary"
-                else anki_html_with_screenshot(back, stored_media_filename)
+                else anki_explanation_html(back, stored_media_filename)
             )
 
     try:
