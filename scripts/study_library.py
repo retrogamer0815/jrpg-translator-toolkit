@@ -356,10 +356,11 @@ def snapshot(database: Path, output_dir: Path) -> int:
                 "WHERE search_gt.group_id = g.id AND search_t.name LIKE ?) "
                 "OR EXISTS ("
                 "SELECT 1 FROM explanations search_e "
-                "WHERE search_e.group_id = g.id AND search_e.raw_text LIKE ?))"
+                "WHERE search_e.group_id = g.id "
+                "AND (search_e.raw_text LIKE ? OR search_e.key_grammar LIKE ?)))"
             )
             like = f"%{query}%"
-            parameters.extend((like, like, like, like, like, like))
+            parameters.extend((like, like, like, like, like, like, like))
 
         sql = """
             SELECT g.id, g.game_profile, g.updated_at, g.source_japanese,
@@ -378,7 +379,14 @@ def snapshot(database: Path, output_dir: Path) -> int:
                    COALESCE(d.added_to_anki_at, '') AS added_to_anki_at,
                    COALESCE(a.status, 'not_checked') AS anki_status,
                    COALESCE(a.note_id, 0) AS anki_note_id,
-                   COALESCE(a.checked_at, '') AS anki_checked_at
+                   COALESCE(a.checked_at, '') AS anki_checked_at,
+                   COALESCE((
+                       SELECT latest_e.key_grammar
+                       FROM explanations latest_e
+                       WHERE latest_e.group_id = g.id
+                       ORDER BY latest_e.version DESC
+                       LIMIT 1
+                   ), '') AS key_grammar
             FROM explanation_groups g
             JOIN explanations e ON e.group_id = g.id
             LEFT JOIN explanation_group_details d ON d.group_id = g.id
@@ -409,6 +417,7 @@ def snapshot(database: Path, output_dir: Path) -> int:
                     encode_field(row["anki_status"]),
                     int(row["anki_note_id"]),
                     encode_field(row["anki_checked_at"]),
+                    encode_field(row["key_grammar"]),
                 )
             )
         write_rows(output_dir / "groups.tsv", rows)

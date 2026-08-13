@@ -77,6 +77,7 @@ global CPMaxPngAdjustState := Map("active", false)
 global CPMaxPngAdjustSyncing := false
 global CPControllerColorDialogState := Map("active", false)
 global CPWelcomeDialog := 0
+global CPStudyLibraryWelcomeDialog := 0
 global CPStudyLibraryState := 0
 global CPStudyReaderState := 0
 global CPStudyCandidateState := 0
@@ -378,6 +379,8 @@ global CPPanelInteractiveResize := false
 global CPPanelResizeOpacitySuspended := false
 global CPPanelLastLayoutW := 0
 global CPPanelLastLayoutH := 0
+global CPTabScreenSnapshotHwnd := 0
+global CPTabScreenSnapshotBitmap := 0
 
 CPRegisterCanvasMessages() {
     global ui, CPCanvasMessagesRegistered
@@ -1215,14 +1218,14 @@ CPCreateComboArrowOverlays() {
         cpArrowCtrl := ui.Add("Text", "x0 y0 w1 h1 Hidden Center +0x100 +0x200 +0x04000000", Chr(9662))
         cpArrowCtrl.Cursor := "Hand"
         cpArrowCtrl.OnEvent("Click", CPComboArrowClick.Bind(cpComboHwnd))
-        CPComboArrowOverlays.Push(Map("combo", cpComboCtrl, "arrow", cpArrowCtrl))
+        CPComboArrowOverlays.Push(Map("combo", cpComboCtrl, "arrow", cpArrowCtrl, "state", ""))
     }
     CPUpdateComboArrowOverlays()
     CPClipScrollableControlsToViewport(false)
     CPMaintainFooterZOrder()
 }
 
-CPUpdateComboArrowOverlays(*) {
+CPUpdateComboArrowOverlays(force := false, *) {
     global ui, controlDarkMode, CPComboArrowOverlays
     if !(IsSet(ui) && ui && ui.Hwnd && IsSet(CPComboArrowOverlays) && IsObject(CPComboArrowOverlays))
         return
@@ -1234,20 +1237,31 @@ CPUpdateComboArrowOverlays(*) {
         cpArrowCtrl := cpArrowEntry["arrow"]
         cpArrowShow := controlDarkMode && DllCall("user32\IsWindowVisible", "ptr", cpArrowCombo.Hwnd, "int")
         if !cpArrowShow {
-            cpArrowCtrl.Visible := false
+            cpArrowNextState := "hidden"
+            cpArrowCurrentState := cpArrowEntry.Has("state") ? cpArrowEntry["state"] : ""
+            if (force || cpArrowCurrentState != cpArrowNextState) {
+                cpArrowCtrl.Visible := false
+                cpArrowEntry["state"] := cpArrowNextState
+            }
             continue
         }
 
         cpArrowCombo.GetPos(&cpArrowX, &cpArrowY, &cpArrowW, &cpArrowH)
         cpArrowWidth := Min(26, Max(20, Floor(cpArrowH * 0.85)))
-        cpArrowCtrl.Move(cpArrowX + cpArrowW - cpArrowWidth, cpArrowY + 1, cpArrowWidth - 1, Max(1, cpArrowH - 2))
         cpArrowEnabled := DllCall("user32\IsWindowEnabled", "ptr", cpArrowCombo.Hwnd, "int")
+        cpArrowNextState := "visible|" cpArrowX "|" cpArrowY "|" cpArrowW "|" cpArrowH "|" cpArrowEnabled
+        cpArrowCurrentState := cpArrowEntry.Has("state") ? cpArrowEntry["state"] : ""
+        if (!force && cpArrowCurrentState = cpArrowNextState)
+            continue
+
+        cpArrowCtrl.Move(cpArrowX + cpArrowW - cpArrowWidth, cpArrowY + 1, cpArrowWidth - 1, Max(1, cpArrowH - 2))
         cpArrowCtrl.Opt("+Background" cpArrowColors["surface"])
         cpArrowCtrl.SetFont("s9 c" (cpArrowEnabled ? cpArrowColors["text"] : cpArrowColors["muted"]))
         cpArrowCtrl.Visible := true
         try DllCall("user32\SetWindowPos", "ptr", cpArrowCtrl.Hwnd, "ptr", 0
-            , "int", 0, "int", 0, "int", 0, "int", 0, "uint", SWP_KEEP_GEOMETRY)
+             , "int", 0, "int", 0, "int", 0, "int", 0, "uint", SWP_KEEP_GEOMETRY)
         try cpArrowCtrl.Redraw()
+        cpArrowEntry["state"] := cpArrowNextState
     }
 }
 
@@ -2677,6 +2691,11 @@ CPShowControlPanelReady(activate := true) {
         try DllCall("dwmapi\DwmFlush")
         CPSetWindowCloaked(ui.Hwnd, false)
     }
+    ; Applying transparency while the window is hidden/cloaked is not reliable:
+    ; DWM may present the first visible frame as fully opaque and only notice the
+    ; layered alpha after the window next moves.  Reapply it after the prepared
+    ; window is genuinely visible and uncloaked.
+    CPApplyControlPanelOpacity(false)
     if activate
         try WinActivate("ahk_id " ui.Hwnd)
 }
@@ -3002,13 +3021,146 @@ CPSelectCustomTab(cpTabIndex, *) {
         return
 
     CPFocusVisualNavHwnd := 0
-    try tab.Value := cpTabIndex
-    ; Complete the native page visibility change and its paint in this same
-    ; event-loop turn. Yielding to a timer here lets DWM briefly composite the
-    ; layered parent after the old page is hidden but before the new one draws.
-    CPRedrawActiveTabPage()
-    CPSetTabFocusIndicator(false)
-    CPRenderCustomTabBar(true)
+    CPChangeTabPageAtomically(cpTabIndex, false)
+}
+
+CPShowTabScreenSnapshot(*) {
+    global ui, controlPanelOpacity
+    global CPTabScreenSnapshotHwnd, CPTabScreenSnapshotBitmap
+
+    ; WinSetTransparent turns the control panel into a layered top-level window.
+    ; Windows can briefly omit that whole window while native tab pages exchange
+    ; visibility. A child cover cannot help because it disappears with its parent.
+    ; Capture the final composited pixels from the screen and hold them in a
+    ; separate, non-activating owned window until the new page has been painted.
+    if (controlPanelOpacity >= 100)
+        return false
+    if !(IsSet(ui) && ui && ui.Hwnd)
+        return false
+    if !DllCall("user32\IsWindowVisible", "ptr", ui.Hwnd, "int")
+        return false
+
+    cpRect := Buffer(16, 0)
+    if !DllCall("user32\GetWindowRect", "ptr", ui.Hwnd, "ptr", cpRect.Ptr, "int")
+        return false
+    cpX := NumGet(cpRect, 0, "int")
+    cpY := NumGet(cpRect, 4, "int")
+    cpW := NumGet(cpRect, 8, "int") - cpX
+    cpH := NumGet(cpRect, 12, "int") - cpY
+    if (cpW < 1 || cpH < 1)
+        return false
+
+    cpScreenDc := DllCall("user32\GetDC", "ptr", 0, "ptr")
+    if !cpScreenDc
+        return false
+    cpMemoryDc := DllCall("gdi32\CreateCompatibleDC", "ptr", cpScreenDc, "ptr")
+    cpBitmap := cpMemoryDc
+        ? DllCall("gdi32\CreateCompatibleBitmap", "ptr", cpScreenDc
+            , "int", cpW, "int", cpH, "ptr")
+        : 0
+    if !cpMemoryDc || !cpBitmap {
+        if cpMemoryDc
+            DllCall("gdi32\DeleteDC", "ptr", cpMemoryDc)
+        DllCall("user32\ReleaseDC", "ptr", 0, "ptr", cpScreenDc)
+        return false
+    }
+
+    cpOldObject := DllCall("gdi32\SelectObject", "ptr", cpMemoryDc, "ptr", cpBitmap, "ptr")
+    cpCaptured := DllCall("gdi32\BitBlt", "ptr", cpMemoryDc
+        , "int", 0, "int", 0, "int", cpW, "int", cpH
+        , "ptr", cpScreenDc, "int", cpX, "int", cpY
+        , "uint", 0x40CC0020, "int") ; CAPTUREBLT | SRCCOPY
+    if cpOldObject
+        DllCall("gdi32\SelectObject", "ptr", cpMemoryDc, "ptr", cpOldObject, "ptr")
+    DllCall("gdi32\DeleteDC", "ptr", cpMemoryDc)
+    DllCall("user32\ReleaseDC", "ptr", 0, "ptr", cpScreenDc)
+    if !cpCaptured {
+        DllCall("gdi32\DeleteObject", "ptr", cpBitmap)
+        return false
+    }
+
+    cpSnapshotHwnd := CPTabScreenSnapshotHwnd
+    if !(cpSnapshotHwnd && DllCall("user32\IsWindow", "ptr", cpSnapshotHwnd, "int")) {
+        cpModule := DllCall("kernel32\GetModuleHandleW", "ptr", 0, "ptr")
+        cpSnapshotHwnd := DllCall("user32\CreateWindowExW"
+            , "uint", 0x080000A0 ; WS_EX_NOACTIVATE|TOOLWINDOW|TRANSPARENT
+            , "str", "Static", "ptr", 0
+            , "uint", 0x8800004E ; WS_POPUP|DISABLED|SS_BITMAP|SS_REALSIZECONTROL
+            , "int", cpX, "int", cpY, "int", cpW, "int", cpH
+            , "ptr", ui.Hwnd, "ptr", 0, "ptr", cpModule, "ptr", 0, "ptr")
+        if !cpSnapshotHwnd {
+            DllCall("gdi32\DeleteObject", "ptr", cpBitmap)
+            return false
+        }
+        CPTabScreenSnapshotHwnd := cpSnapshotHwnd
+    }
+
+    cpPreviousBitmap := DllCall("user32\SendMessageW", "ptr", cpSnapshotHwnd
+        , "uint", 0x0172, "ptr", 0, "ptr", cpBitmap, "ptr") ; STM_SETIMAGE
+    if cpPreviousBitmap
+        DllCall("gdi32\DeleteObject", "ptr", cpPreviousBitmap)
+    CPTabScreenSnapshotBitmap := cpBitmap
+
+    DllCall("user32\SetWindowPos", "ptr", cpSnapshotHwnd, "ptr", 0
+        , "int", cpX, "int", cpY, "int", cpW, "int", cpH
+        , "uint", 0x0010 | 0x0040) ; NOACTIVATE | SHOWWINDOW
+    DllCall("user32\RedrawWindow", "ptr", cpSnapshotHwnd, "ptr", 0, "ptr", 0
+        , "uint", 0x0001 | 0x0100) ; INVALIDATE | UPDATENOW
+    try DllCall("dwmapi\DwmFlush")
+    return true
+}
+
+CPHideTabScreenSnapshot(*) {
+    global CPTabScreenSnapshotHwnd, CPTabScreenSnapshotBitmap
+
+    cpSnapshotHwnd := CPTabScreenSnapshotHwnd
+    if (cpSnapshotHwnd && DllCall("user32\IsWindow", "ptr", cpSnapshotHwnd, "int")) {
+        DllCall("user32\ShowWindow", "ptr", cpSnapshotHwnd, "int", 0) ; SW_HIDE
+        cpBitmap := DllCall("user32\SendMessageW", "ptr", cpSnapshotHwnd
+            , "uint", 0x0172, "ptr", 0, "ptr", 0, "ptr") ; STM_SETIMAGE
+        if cpBitmap
+            DllCall("gdi32\DeleteObject", "ptr", cpBitmap)
+    } else if CPTabScreenSnapshotBitmap {
+        DllCall("gdi32\DeleteObject", "ptr", CPTabScreenSnapshotBitmap)
+    }
+    CPTabScreenSnapshotBitmap := 0
+}
+
+CPChangeTabPageAtomically(cpTabIndex, cpShowNavFocus := unset) {
+    global ui, tab, CPTabBarHasNavFocus
+    if !(IsSet(ui) && ui && ui.Hwnd && IsSet(tab) && tab && tab.Hwnd)
+        return false
+
+    if IsSet(cpShowNavFocus)
+        CPTabBarHasNavFocus := cpShowNavFocus ? true : false
+
+    cpCurrentTab := 0
+    try cpCurrentTab := tab.Value
+    if (cpCurrentTab = cpTabIndex) {
+        CPRenderCustomTabBar()
+        return false
+    }
+
+    cpSnapshotVisible := CPShowTabScreenSnapshot()
+    cpChanged := false
+    try {
+        try tab.Value := cpTabIndex
+        try cpChanged := tab.Value = cpTabIndex
+        if cpChanged {
+            CPCanvasScrollTo(0, 0, false, false, false)
+            CPRedrawActiveTabPage()
+            CPUpdateComboArrowOverlays()
+            CPRenderCustomTabBar(true)
+            ; Commit the completed parent frame while the independent copy of the
+            ; previous frame still masks any layered-window composition gap.
+            if cpSnapshotVisible
+                try DllCall("dwmapi\DwmFlush")
+        }
+    } finally {
+        if cpSnapshotVisible
+            CPHideTabScreenSnapshot()
+    }
+    return cpChanged
 }
 
 CPRedrawActiveTabPage(*) {
@@ -3082,7 +3234,9 @@ CPCreateCustomTabBar() {
         cpTabCtrl.GetPos(,, &cpTabNaturalW)
         CPTabNaturalWidths.Push(Max(46, cpTabNaturalW + 18))
         cpTabCtrl.Cursor := "Hand"
-        cpTabCtrl.OnEvent("Click", CPSelectCustomTab.Bind(cpTabPage))
+        ; Mouse tab selection is handled centrally by CPMouseTabClick. Registering
+        ; an additional Click callback here made a single click run two complete
+        ; page-update paths, which was especially visible on a layered window.
         CPTabButtons.Push(cpTabCtrl)
     }
     CPConfigurePreferredPanelWidth()
@@ -4146,12 +4300,9 @@ CPNavSwitchTab(dir) {
         visibleIndex := 1
 
     nextVisibleIndex := Mod(visibleIndex - 1 + dir + count, count) + 1
-    try tab.Value := CPTabVisiblePages[nextVisibleIndex]
-    CPRedrawActiveTabPage()
     try tab.Focus()
     CPFocusVisualNavHwnd := tab.Hwnd
-    CPSetTabFocusIndicator(true)
-    CPRenderCustomTabBar(true)
+    CPChangeTabPageAtomically(CPTabVisiblePages[nextVisibleIndex], true)
     SetTimer(CPEnsureFocusedControlVisible, -1)
 }
 
@@ -4997,6 +5148,13 @@ ResolvePath(p) {
     return A_ScriptDir "\" expanded
 }
 
+CPWriteExplainerTerminalResult(message, requestId) {
+    global overlayDir
+    EnsureOverlayDir()
+    CPAtomicWriteOverlayMessage(overlayDir "\explainer.txt", message)
+    CPAtomicWriteOverlayMessage(overlayDir "\explainer.done", requestId)
+}
+
 ScreenshotCleanupLedgerPath() {
     return A_ScriptDir "\Settings\screenshot_cleanup_pending.txt"
 }
@@ -5637,11 +5795,16 @@ CPSyncExplanationSelectionFromControls() {
 }
 
 ExplainNow(*) {
+    static explainRunning := false
     global pythonExe, explainScript
     global explainProvider, explainOpenAIModel, explainGeminiModel
-    global debugMode, explainsDir, studyLibraryDir
+    global debugMode, explainsDir, studyLibraryDir, overlayDir
     px := ResolvePath(pythonExe)
     ex := ResolvePath(explainScript)
+    if explainRunning {
+        Toast("An explanation is already being generated")
+        return
+    }
     if !(FileExist(px) && FileExist(ex)) {
         MsgBox("Set valid paths for python.exe and explainer script first.`n`npythonExe:`n" px "`n`nexplainer:`n" ex, "Missing", 48)
         return
@@ -5708,24 +5871,71 @@ ExplainNow(*) {
     EnvSet "STUDY_LIBRARY_PROFILE", activeGameProfile
     EnvSet "EXPLAIN_PROMPT_PROFILE", Trim(ddlEPr.Text)
     
-    outFile := A_Temp "\learn_out.txt"
-    errFile := A_Temp "\learn_err.txt"
-    try FileDelete(outFile)
+    requestId := A_NowUTC "-" A_TickCount
+    safeRequestId := RegExReplace(requestId, "[^0-9A-Za-z_-]", "_")
+    errFile := A_Temp "\JRPG_Explain_" safeRequestId ".err"
     try FileDelete(errFile)
-
-    cmd := Format('cmd /c chcp 65001>nul & "{1}" "{2}" 1>"{3}" 2>"{4}"', px, ex, outFile, errFile)
+    EnvSet("JRPG_REQUEST_ID", requestId)
+    EnvSet("JRPG_MODEL_TIMEOUT_SECONDS", "75")
+    EnvSet("EXPLAIN_ERROR_FILE", errFile)
+    cmd := Format('"{1}" "{2}"', px, ex)
     DbgCP("ExplainNow -> " cmd)
     Toast("Generating explanation…")
     SignalExplainerBusy()
-    exitCode := RunWait(cmd, , "Hide")
-    out := (FileExist(outFile) ? Trim(FileRead(outFile, "UTF-8")) : "")
-    err := (FileExist(errFile)  ? FileRead(errFile, "UTF-8")      : "")
+    explainRunning := true
+    pid := 0
+    try Run(cmd, A_ScriptDir, "Hide", &pid)
+    catch as launchError {
+        explainRunning := false
+        EnvSet("EXPLAIN_ERROR_FILE", "")
+        msg := "Explanation could not start.`n`nThe bundled Python process could not be launched.`n`nDetails: " launchError.Message
+        CPWriteExplainerTerminalResult(msg, requestId)
+        Toast("Explanation failed")
+        MsgBox(msg, "Explain failed", 16)
+        DbgCP("ExplainNow launch error: " msg)
+        return
+    }
+
+    startedAt := A_TickCount
+    timedOut := false
+    while ProcessExist(pid) {
+        if ((A_TickCount - startedAt) >= 120000) {
+            timedOut := true
+            try ProcessClose(pid)
+            break
+        }
+        Sleep(50)
+    }
+
+    err := (FileExist(errFile) ? Trim(FileRead(errFile, "UTF-8")) : "")
+    try FileDelete(errFile)
+    donePath := overlayDir "\explainer.done"
+    doneToken := ""
+    try if FileExist(donePath)
+        doneToken := Trim(FileRead(donePath, "UTF-8"))
+    explainRunning := false
+    EnvSet("EXPLAIN_ERROR_FILE", "")
+
+    if timedOut {
+        msg := "Explanation timed out.`n`nThe selected model did not finish within two minutes. Please try again, check the internet connection, or select another model."
+        CPWriteExplainerTerminalResult(msg, requestId)
+        Toast("Explanation failed")
+        MsgBox(msg, "Explain failed", 16)
+        DbgCP("ExplainNow timeout")
+        return
+    }
+
+    exitCode := (doneToken = requestId && err = "") ? 0 : 1
+    if (exitCode != 0 && err = "") {
+        err := "Explanation failed.`n`nThe model process ended without returning a result. Please try again. If this repeats, check the selected provider, model, API key, and internet connection."
+        CPWriteExplainerTerminalResult(err, requestId)
+    }
 
     if (exitCode = 0) {
         Toast("Explanation updated")
-        DbgCP("ExplainNow OK: " out)
+        DbgCP("ExplainNow OK")
     } else {
-        msg := "(Explain exit " exitCode ")`n" (Trim(err)!="" ? err : out)
+        msg := err
         MsgBox(msg, "Explain failed", 16)
         DbgCP("ExplainNow ERR: " msg)
     }
@@ -7098,6 +7308,40 @@ StudyLibraryOpenAnki(slState, *) {
     StudyAnkiDiscover(saState)
 }
 
+StudyLibraryAddSelectedToAnki(slState, *) {
+    slSelectedIds := StudyLibrarySelectedGroupIds(slState)
+    if (slSelectedIds.Length != 1)
+        return
+    if (slState["currentGroupId"] != slSelectedIds[1])
+        StudyLibraryLoadGroup(slState, slSelectedIds[1])
+    if (slState["currentGroupId"] <= 0 || !slState["versions"].Length)
+        return
+    ; The Library and Reader detail states expose the same loaded explanation,
+    ; version, media and Anki fields. Reuse the reviewed Reader workflow so
+    ; duplicate checks, mappings, screenshots and HTML formatting stay shared.
+    StudyReaderOpenAnkiAddDialog(slState)
+}
+
+StudyLibraryShowAnkiMenu(slState, *) {
+    slChoices := []
+    slActions := []
+    if (StudyLibrarySelectedGroupIds(slState).Length = 1
+        && slState["currentGroupId"] > 0
+        && slState["versions"].Length) {
+        slChoices.Push("Add selected explanation...")
+        slActions.Push(StudyLibraryAddSelectedToAnki.Bind(slState))
+    }
+    slChoices.Push("Review Anki candidates...")
+    slActions.Push(StudyLibraryOpenCandidates.Bind(slState))
+    slChoices.Push("Anki connection and link check...")
+    slActions.Push(StudyLibraryOpenAnki.Bind(slState))
+    slChoice := CPThemedChoicePopup(
+        slState["gui"].Hwnd, slState["ankiButton"].Hwnd, slChoices
+    )
+    if (slChoice >= 1 && slChoice <= slActions.Length)
+        slActions[slChoice].Call()
+}
+
 StudyAnkiDeckScope(saParentDeck, saDecks) {
     saScoped := []
     saParentFolded := StrLower(Trim(saParentDeck))
@@ -7176,11 +7420,15 @@ StudyReaderRefreshAfterAnkiAdd(saReaderState) {
     global CPStudyLibraryState
     saGroupId := saReaderState["currentGroupId"]
     saVersion := saReaderState["currentVersion"]
+    ; The reviewed-add dialog can be owned by either the Reader or the Library.
+    ; Reload its owner once, then refresh the other open view if there is one.
     try StudyLibraryLoadGroup(saReaderState, saGroupId, saVersion)
     if (CPStudyLibraryState && CPStudyLibraryState.Has("gui")) {
-        try StudyLibraryRefresh(CPStudyLibraryState)
-        if (CPStudyLibraryState["currentGroupId"] = saGroupId)
-            try StudyLibraryLoadGroup(CPStudyLibraryState, saGroupId, saVersion)
+        if (CPStudyLibraryState != saReaderState) {
+            try StudyLibraryRefresh(CPStudyLibraryState)
+            if (CPStudyLibraryState["currentGroupId"] = saGroupId)
+                try StudyLibraryLoadGroup(CPStudyLibraryState, saGroupId, saVersion)
+        }
     }
 }
 
@@ -7605,7 +7853,8 @@ StudyReaderOpenReviewedAnkiDialog(
             "An exact normalized Japanese match is currently marked as "
                 . "present in Anki.`n`n"
                 . "If you deleted an older card in Anki, return to the Study "
-                . "Library, choose Anki..., and select Refresh Anki status "
+                . "Library, choose Anki... > Anki connection and link check..., "
+                . "then select Refresh Anki status "
                 . "before trying again.",
             "Already in Anki", "ok", "info"
         )
@@ -11757,7 +12006,9 @@ StudyLibrarySelectedGroupIds(slState) {
 }
 
 StudyLibraryRowGroupId(slState, slRow) {
-    try return Integer(slState["list"].GetText(slRow, 9))
+    try return Integer(
+        slState["list"].GetText(slRow, slState["columns"].Length + 1)
+    )
     return 0
 }
 
@@ -11799,6 +12050,8 @@ StudyLibraryUpdateSelectionActions(slState, *) {
     slState["editDetailsButton"].Text := slCount > 1
         ? "Edit " slCount " selected..." : "Edit details..."
     slState["editDetailsButton"].Enabled := slCount > 0
+    if slState.Has("studyButton")
+        slState["studyButton"].Enabled := slCount = 1
 }
 
 StudyLibraryEditDetails(slState, *) {
@@ -12143,8 +12396,12 @@ StudyLibraryContextMenu(
     if (slSelectedCount > 0) {
         if (slSelectedCount = 1) {
             slMenuItems.Push(Map(
-                "label", "Study",
+                "label", "Open in Reader...",
                 "action", StudyLibraryOpenSelectedReader.Bind(slState)
+            ))
+            slMenuItems.Push(Map(
+                "label", "Add selected explanation to Anki...",
+                "action", StudyLibraryAddSelectedToAnki.Bind(slState)
             ))
         }
         slEditLabel := slSelectedCount > 1
@@ -12593,10 +12850,20 @@ CPListViewSaveColumnOrder(
 
 StudyLibraryCreateColumns() {
     global iniPath
-    slVisibleRaw := "," StrLower(IniRead(
+    slVisibleValue := StrLower(IniRead(
         iniPath, "study_library_view", "visibleColumns",
-        "updated,profile,chapter,speaker,tags,source,versions,anki"
-    )) ","
+        "updated,profile,chapter,speaker,tags,source,grammar,versions,anki"
+    ))
+    ; Introduce the new overview column once on upgrades, while preserving any
+    ; later choice to hide it through Columns...
+    if !Integer(IniRead(
+        iniPath, "study_library_view", "keyGrammarColumnIntroduced", 0
+    )) {
+        if !InStr("," slVisibleValue ",", ",grammar,")
+            slVisibleValue .= (slVisibleValue = "" ? "" : ",") "grammar"
+        IniWrite(1, iniPath, "study_library_view", "keyGrammarColumnIntroduced")
+    }
+    slVisibleRaw := "," slVisibleValue ","
     slDefinitions := [
         ["updated", "Date generated", 125, false],
         ["profile", "Profile", 110, false],
@@ -12604,6 +12871,7 @@ StudyLibraryCreateColumns() {
         ["speaker", "Speaker", 100, false],
         ["tags", "Tags", 150, false],
         ["source", "Japanese source", 260, true],
+        ["grammar", "Key grammar", 190, false],
         ["versions", "Versions", 72, false],
         ["anki", "Anki status", 120, false]
     ]
@@ -13034,6 +13302,8 @@ StudyLibraryRefresh(slState, *) {
         slAnkiNoteId := slGroupRow.Length >= 12 ? Integer(slGroupRow[12]) : 0
         slAnkiCheckedAt := slGroupRow.Length >= 13
             ? StudyLibraryHexDecode(slGroupRow[13]) : ""
+        slKeyGrammar := slGroupRow.Length >= 14
+            ? StudyLibraryHexDecode(slGroupRow[14]) : ""
         slEntry := Map(
             "id", slGroupId,
             "profile", slGroupProfile,
@@ -13043,6 +13313,7 @@ StudyLibraryRefresh(slState, *) {
             "chapter", slChapter,
             "speaker", slSpeaker,
             "tags", slTags,
+            "grammar", slKeyGrammar,
             "addedToAnkiAt", slAddedToAnkiAt,
             "ankiStatus", slAnkiStatus,
             "ankiNoteId", slAnkiNoteId,
@@ -13057,6 +13328,7 @@ StudyLibraryRefresh(slState, *) {
             slSpeaker,
             slTags,
             slPreview,
+            slKeyGrammar,
             slVersionCount,
             StudyAnkiStatusLabel(slAnkiStatus, slAddedToAnkiAt),
             slGroupId
@@ -13182,16 +13454,14 @@ StudyLibraryResize(slState, slGui, slMinMax, slWidth, slHeight) {
     slFilterButtonW := 110, slColumnsW := 92
     slColumnsX := slMargin + slFilterButtonW + 8
     slEditX := slColumnsX + slColumnsW + 8
-    slReviewX := slEditX + 140 + 8
-    slStudyX := slReviewX + 132 + 8
-    slAnkiX := slStudyX + 82 + 8
+    slStudyX := slEditX + 140 + 8
+    slAnkiX := slStudyX + 132 + 8
     slState["filterButton"].Move(
         slMargin, slFilterY, slFilterButtonW, slToolbarH
     )
     slState["columnsButton"].Move(slColumnsX, slFilterY, slColumnsW, slToolbarH)
     slState["editDetailsButton"].Move(slEditX, slFilterY, 140, slToolbarH)
-    slState["reviewButton"].Move(slReviewX, slFilterY, 132, slToolbarH)
-    slState["studyButton"].Move(slStudyX, slFilterY, 82, slToolbarH)
+    slState["studyButton"].Move(slStudyX, slFilterY, 132, slToolbarH)
     slState["ankiButton"].Move(slAnkiX, slFilterY, 82, slToolbarH)
 
     slContentY := slFilterY + slToolbarH + slGap
@@ -13346,6 +13616,158 @@ StudyStandaloneMaybeExit(*) {
     SetTimer((*) => ExitApp(), -25)
 }
 
+SaveStudyLibraryWelcomePreference(dontShowAgain) {
+    global iniPath
+    try IniWriteRetry(
+        dontShowAgain.Value ? 1 : 0,
+        iniPath,
+        "study_library",
+        "welcomeDismissed"
+    )
+}
+
+CloseStudyLibraryWelcome(dlg, dontShowAgain, *) {
+    global CPStudyLibraryWelcomeDialog
+    SaveStudyLibraryWelcomePreference(dontShowAgain)
+    try dlg.Destroy()
+    CPStudyLibraryWelcomeDialog := 0
+}
+
+OpenStudyLibraryWelcomeAnkiConnect(*) {
+    try Run("https://ankiweb.net/shared/info/2055492159")
+    catch as ex
+        MsgBox(
+            "The AnkiConnect page could not be opened:`n`n" ex.Message,
+            "Study Library",
+            "OK Icon!"
+        )
+}
+
+OpenStudyLibraryWelcomeFolder(slState, *) {
+    slDirectory := ""
+    if (IsObject(slState) && slState.Has("database"))
+        SplitPath(slState["database"],, &slDirectory)
+    if (slDirectory = "")
+        slDirectory := StudyLibraryConfiguredDirectory()
+    try {
+        if !DirExist(slDirectory)
+            DirCreate(slDirectory)
+        Run('explorer.exe "' slDirectory '"')
+    } catch as ex {
+        MsgBox(
+            "The Study Library folder could not be opened:`n`n" ex.Message,
+            "Study Library",
+            "OK Icon!"
+        )
+    }
+}
+
+ShowStudyLibraryWelcome(slState, *) {
+    global iniPath, CPStudyLibraryWelcomeDialog
+
+    if !IsObject(slState) || !slState.Has("gui")
+        return
+    try {
+        if !slState["gui"].Hwnd
+            return
+    } catch {
+        return
+    }
+    if Integer(IniRead(
+        iniPath, "study_library", "welcomeDismissed", 0
+    ))
+        return
+
+    if (IsObject(CPStudyLibraryWelcomeDialog)
+        && CPStudyLibraryWelcomeDialog.Has("gui")) {
+        try {
+            CPStudyLibraryWelcomeDialog["gui"].Show()
+            WinActivate(
+                "ahk_id " CPStudyLibraryWelcomeDialog["gui"].Hwnd
+            )
+            return
+        }
+    }
+
+    dlg := Gui(
+        "+Owner" slState["gui"].Hwnd " +AlwaysOnTop +OwnDialogs",
+        "Welcome to the Study Library"
+    )
+    dlg.MarginX := 20
+    dlg.MarginY := 18
+    dlg.SetFont("s10", "Segoe UI")
+
+    dlg.SetFont("s17 Bold")
+    dlg.Add("Text", "xm w670", "Welcome to the Study Library")
+    dlg.SetFont("s10 Norm")
+    dlg.Add(
+        "Text", "xm y+10 w670",
+        "Explanations generated while playing can be saved here together "
+        . "with their original Japanese and optional source screenshots."
+    )
+    dlg.Add(
+        "Text", "xm y+12 w670",
+        "Review and organize them later with Profiles, Libraries, filters, "
+        . "chapters, speakers and tags. Open an entry in the Study Reader "
+        . "to browse its sections, edit mistakes, copy text or create a new "
+        . "explanation version."
+    )
+    dlg.Add(
+        "Text", "xm y+12 w670",
+        "Anki integration can check existing cards, send full explanations "
+        . "or selected vocabulary, include compact screenshots, generate "
+        . "example sentences and rank useful Anki candidates."
+    )
+    dlg.SetFont("s10 Bold")
+    dlg.Add("Text", "xm y+16 w670", "Anki setup")
+    dlg.SetFont("s10 Norm")
+    dlg.Add(
+        "Text", "xm y+5 w670",
+        "Install AnkiConnect in desktop Anki, restart Anki and keep it "
+        . "running while using Anki features. Then use Anki... > Anki link "
+        . "check in this window to connect a Study Profile to a deck."
+    )
+    dlg.Add(
+        "Text", "xm y+12 w670 cGray",
+        "Study Libraries are stored locally in the application's Settings "
+        . "folder, so include that folder in your backups. AI features send "
+        . "requests to your configured provider and may incur normal API usage costs."
+    )
+
+    dontShowAgain := dlg.Add(
+        "CheckBox", "xm y+16 Checked",
+        "Don't show this introduction again"
+    )
+    btnAnkiConnect := dlg.Add(
+        "Button", "xm y+20 w170", "Open AnkiConnect Page"
+    )
+    btnOpenFolder := dlg.Add(
+        "Button", "x+10 yp w180", "Open Study Library Folder"
+    )
+    btnClose := dlg.Add("Button", "x+10 yp w110 Default", "Close")
+
+    CPStudyLibraryWelcomeDialog := Map(
+        "gui", dlg,
+        "dontShowAgain", dontShowAgain
+    )
+    btnAnkiConnect.OnEvent(
+        "Click", OpenStudyLibraryWelcomeAnkiConnect
+    )
+    btnOpenFolder.OnEvent(
+        "Click", OpenStudyLibraryWelcomeFolder.Bind(slState)
+    )
+    closeCallback := CloseStudyLibraryWelcome.Bind(
+        dlg, dontShowAgain
+    )
+    btnClose.OnEvent("Click", closeCallback)
+    dlg.OnEvent("Escape", closeCallback)
+    dlg.OnEvent("Close", closeCallback)
+
+    dlg.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(dlg)
+    try btnClose.Focus()
+}
+
 OpenStudyLibrary(*) {
     OpenStudyLibraryWindow(false)
 }
@@ -13403,17 +13825,18 @@ OpenStudyLibraryWindow(slStandalone := false) {
     slLibraryDdl := slGui.Add("DropDownList", "x64 y14 w150 0x210", [])
     slNewLibraryButton := slGui.Add("Button", "x222 y14 w82", "Libraries...")
     slSearch := slGui.Add("Edit", "x316 y14 w328")
-    try slSearch.SetCueBanner("Japanese, explanation, chapter, speaker or tags")
+    try slSearch.SetCueBanner(
+        "Japanese, explanation, grammar, chapter, speaker or tags"
+    )
     slSearchButton := slGui.Add("Button", "x656 y14 w78 Default", "Search")
     slRefreshButton := slGui.Add("Button", "x746 y14 w78", "Refresh")
     slFilterButton := slGui.Add("Button", "x14 y52 w110 h30", "Filters...")
     slColumnsButton := slGui.Add("Button", "x132 y52 w92 h30", "Columns...")
     slEditDetailsButton := slGui.Add("Button", "x232 y52 w140 h30 Disabled", "Edit details...")
-    slReviewButton := slGui.Add(
-        "Button", "x380 y52 w132 h30", "Review for Anki..."
+    slStudyButton := slGui.Add(
+        "Button", "x380 y52 w132 h30 Disabled", "Open in Reader..."
     )
-    slStudyButton := slGui.Add("Button", "x520 y52 w82 h30 Disabled", "Study")
-    slAnkiButton := slGui.Add("Button", "x610 y52 w82 h30", "Anki...")
+    slAnkiButton := slGui.Add("Button", "x520 y52 w82 h30", "Anki...")
     slListOptions := "x14 y94 w430 h530 Grid Multi"
         . " Background" slInitialColors["surface"]
         . " c" slInitialColors["text"]
@@ -13425,7 +13848,7 @@ OpenStudyLibraryWindow(slStandalone := false) {
     ; ListView double-buffering removes row/grid flashing during live resizing
     ; without changing its dark-mode colors or selection behavior.
     SendMessage(0x1036, 0x10000, 0x10000, slList.Hwnd)
-    slList.ModifyCol(9, 0)
+    slList.ModifyCol(slColumns.Length + 1, 0)
     slDetailTitle := slGui.Add("Text", "x468 y94 w638 h24 +0x200", "Select an explanation.")
     slDetailTitle.SetFont("s11 Bold")
     slVersionLabel := slGui.Add("Text", "x468 y125 w58", "Version:")
@@ -13525,7 +13948,6 @@ OpenStudyLibraryWindow(slStandalone := false) {
         "standaloneWindow", slStandalone,
         "groups", [],
         "detailTitle", slDetailTitle,
-        "reviewButton", slReviewButton,
         "studyButton", slStudyButton,
         "ankiButton", slAnkiButton,
         "editDetailsButton", slEditDetailsButton,
@@ -13591,9 +14013,8 @@ OpenStudyLibraryWindow(slStandalone := false) {
     slList.OnEvent("ItemSelect", StudyLibraryUpdateSelectionActions.Bind(slState))
     slList.OnEvent("DoubleClick", StudyLibraryOpenReaderFromList.Bind(slState))
     slList.OnEvent("ColClick", StudyLibraryColumnClicked.Bind(slState))
-    slReviewButton.OnEvent("Click", StudyLibraryOpenCandidates.Bind(slState))
     slStudyButton.OnEvent("Click", StudyLibraryOpenSelectedReader.Bind(slState))
-    slAnkiButton.OnEvent("Click", StudyLibraryOpenAnki.Bind(slState))
+    slAnkiButton.OnEvent("Click", StudyLibraryShowAnkiMenu.Bind(slState))
     slPreviousVersion.OnEvent(
         "Click", StudyLibraryStepVersion.Bind(slState, -1)
     )
@@ -13671,6 +14092,10 @@ OpenStudyLibraryWindow(slStandalone := false) {
     ; Give the populated table focus immediately so its initial selected row is
     ; active and the first double-click reaches the ListView event handler.
     slList.Focus()
+    ; The Study Library has its own concise first-run introduction. Keeping its
+    ; preference separate from the main setup guide also covers users who open
+    ; the standalone Library before ever showing the control panel.
+    SetTimer(ShowStudyLibraryWelcome.Bind(slState), -250)
     ; Delay live resizing for the same reason as in the Reader. In particular,
     ; this prevents the native ListView from rebuilding against a briefly
     ; erased right-hand surface immediately after first show.
@@ -19757,16 +20182,36 @@ CPLayoutControllerOptions(rightEdge) {
     dpadY := directY + checkboxH + optionGap
     cbControllerDpadNavigationEnabled.Move(controllerOptionsX, dpadY, optionsW, checkboxH)
 
-    if (optionsW >= 320)
-        noteLines := 3
-    else if (optionsW >= 250)
-        noteLines := 5
-    else if (optionsW >= 200)
-        noteLines := 6
-    else
-        noteLines := 8
     noteY := dpadY + checkboxH + 8
-    txtControllerDpadNote.Move(controllerOptionsX, noteY, optionsW, noteLines * 19 + 4)
+    noteH := CPMeasureWrappedTextHeight(txtControllerDpadNote, optionsW) + 6
+    txtControllerDpadNote.Move(controllerOptionsX, noteY, optionsW, noteH)
+}
+
+CPMeasureWrappedTextHeight(ctrl, width) {
+    fallbackH := 120
+    if !(ctrl && ctrl.Hwnd)
+        return fallbackH
+
+    dc := DllCall("user32\GetDC", "ptr", ctrl.Hwnd, "ptr")
+    if !dc
+        return fallbackH
+
+    oldFont := 0
+    font := SendMessage(0x0031, 0, 0, ctrl.Hwnd) ; WM_GETFONT
+    if font
+        oldFont := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", font, "ptr")
+
+    rect := Buffer(16, 0)
+    NumPut("int", Max(1, Round(width)), rect, 8)
+    ; DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX
+    DllCall("user32\DrawTextW", "ptr", dc, "wstr", ctrl.Text, "int", -1
+        , "ptr", rect.Ptr, "uint", 0x00000410 | 0x00000800)
+    measuredH := Max(1, NumGet(rect, 12, "int") - NumGet(rect, 4, "int"))
+
+    if oldFont
+        DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldFont, "ptr")
+    DllCall("user32\ReleaseDC", "ptr", ctrl.Hwnd, "ptr", dc)
+    return measuredH
 }
 
 ResizeUI(gui, minMax, w, h){

@@ -110,6 +110,11 @@ OCR_TXT = os.path.join(OVERLAY_DIR, "ocr.txt")
 OCR_DONE = os.path.join(OVERLAY_DIR, "ocr.done")
 os.makedirs(OVERLAY_DIR, exist_ok=True)
 
+MODEL_TIMEOUT_SECONDS = max(
+    15.0,
+    min(180.0, float(os.environ.get("JRPG_MODEL_TIMEOUT_SECONDS", "75"))),
+)
+
 
 def atomic_write_text(path: str, text: str):
     """UTF-8 atomic write so AHK never reads partial content (tolerant of brief locks)."""
@@ -130,6 +135,44 @@ def atomic_write_text(path: str, text: str):
             os.remove(tmp)
         except Exception:
             pass
+
+
+def request_completion_token() -> str:
+    return (os.environ.get("JRPG_REQUEST_ID") or "").strip() or str(time.time_ns())
+
+
+def signal_ocr_completion() -> None:
+    atomic_write_text(OCR_DONE, request_completion_token())
+
+
+def friendly_provider_error(provider_name: str, exc: Exception, action: str = "translation") -> str:
+    """Return a concise overlay-safe explanation while retaining a useful error code."""
+    detail = re.sub(r"\s+", " ", str(exc or "")).strip()
+    lower = detail.lower()
+    code_match = re.search(r"(?:code['\"\s:=]+|\b)(401|403|408|429|500|502|503|504)\b", detail)
+    code = code_match.group(1) if code_match else ""
+    heading = f"{provider_name} {action} failed"
+    if code:
+        heading += f" (error {code})"
+    heading += "."
+
+    if code in {"500", "502", "503"} or "unavailable" in lower or "high demand" in lower or "overloaded" in lower:
+        guidance = "The selected model is temporarily unavailable or under high demand. Please try again shortly or select another model."
+    elif code == "429" or "resource_exhausted" in lower or "rate limit" in lower or "quota" in lower:
+        guidance = "The account or model has reached a rate or quota limit. Please wait and try again, or check the provider billing and quota settings."
+    elif code in {"401", "403"} or "api key" in lower or "authentication" in lower or "permission_denied" in lower:
+        guidance = "Authentication was rejected. Check the selected provider's API key and account permissions."
+    elif code in {"408", "504"} or "deadline" in lower or "timed out" in lower or "timeout" in lower:
+        guidance = "The request timed out before the model returned a result. Please try again or select another model."
+    elif any(token in lower for token in ("connection", "connecterror", "dns", "name resolution", "network", "server disconnected", "certificate", "proxy")):
+        guidance = "A network connection to the provider could not be established. Check the internet connection and try again."
+    else:
+        guidance = "The provider did not return a usable result. Please try again."
+
+    # Keep a short technical detail for support without flooding the overlay.
+    if detail and detail not in guidance and len(detail) <= 240:
+        return f"{heading}\n\n{guidance}\n\nDetails: {detail}"
+    return f"{heading}\n\n{guidance}"
 
 
 # ---- Post-processing mode -----------------------------------------------------
@@ -155,6 +198,8 @@ if PROVIDER == "openai":
     try:
         from openai import OpenAI
     except Exception as e:
+        atomic_write_text(OCR_TXT, friendly_provider_error("OpenAI", e))
+        signal_ocr_completion()
         print(f"OpenAI import failed: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -169,12 +214,16 @@ if PROVIDER == "openai":
             "Add it in the API Keys tab, or set OPENAI_API_KEY in Windows "
             "Environment Variables and restart JRPG Translator.",
         )
-        atomic_write_text(OCR_DONE, str(time.time_ns()))
+        signal_ocr_completion()
         print("Missing OPENAI_API_KEY (or *_LOCAL / _FILE).", file=sys.stderr)
         sys.exit(1)
 
     MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o")
-    _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    _openai_client = OpenAI(
+        api_key=OPENAI_API_KEY,
+        timeout=MODEL_TIMEOUT_SECONDS,
+        max_retries=2,
+    )
 
 # ---- Gemini (optional) --------------------------------------------------------
 _gemini_client = None
@@ -183,6 +232,8 @@ if PROVIDER == "gemini":
         from google import genai
         from google.genai import types
     except Exception as e:
+        atomic_write_text(OCR_TXT, friendly_provider_error("Gemini", e))
+        signal_ocr_completion()
         print("Missing google-genai package. Install with: python -m pip install -U google-genai", file=sys.stderr)
         print(f"Import error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -199,12 +250,20 @@ if PROVIDER == "gemini":
             "GOOGLE_API_KEY) in Windows Environment Variables and restart "
             "JRPG Translator.",
         )
-        atomic_write_text(OCR_DONE, str(time.time_ns()))
+        signal_ocr_completion()
         print("Missing GEMINI_API_KEY/GOOGLE_API_KEY (or *_LOCAL / _FILE).", file=sys.stderr)
         sys.exit(1)
 
     GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL_NAME", "gemini-2.5-flash").strip()
-    _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    try:
+        _gemini_client = genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options=types.HttpOptions(timeout=int(MODEL_TIMEOUT_SECONDS * 1000)),
+        )
+    except TypeError:
+        # Compatibility fallback for an older google-genai package. The AHK
+        # process watchdog still enforces the overall request deadline.
+        _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ---- Common paths -------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(__file__)
@@ -1194,7 +1253,7 @@ def translate_images(paths: List[str],
         raw = call_translation_provider(paths, jp2en)
     except Exception as e:
         provider_name = "Gemini" if PROVIDER == "gemini" else "OpenAI"
-        return f"(Python error) {provider_name} call failed: {e}"
+        return friendly_provider_error(provider_name, e)
 
     out = strip_code_fences(raw)
     corrective_retry_used = False
@@ -1312,6 +1371,15 @@ def translate_images(paths: List[str],
 
 def main() -> None:
     if len(sys.argv) < 2:
+        message = (
+            "Translation could not start.\n\n"
+            "No source screenshot was supplied. Capture the game region again and retry."
+        )
+        try:
+            atomic_write_text(OCR_TXT, message)
+            signal_ocr_completion()
+        except Exception:
+            pass
         print("Usage: python screenshot_translator.py <image1> [<image2> ...]", file=sys.stderr)
         sys.exit(2)
 
@@ -1319,9 +1387,16 @@ def main() -> None:
     jp2en = load_glossary(JP2EN_GLOSSARY_PATH) if USE_TERMINOLOGY_OVERRIDES else []
     en2en = load_glossary(EN2EN_GLOSSARY_PATH) if USE_TERMINOLOGY_OVERRIDES else []
 
-    result = translate_images(images, jp2en, en2en)
-    atomic_write_text(OCR_TXT, result)
-    atomic_write_text(OCR_DONE, str(time.time_ns()))
+    try:
+        result = translate_images(images, jp2en, en2en)
+        atomic_write_text(OCR_TXT, result)
+    except Exception as exc:
+        provider_name = "Gemini" if PROVIDER == "gemini" else "OpenAI"
+        atomic_write_text(OCR_TXT, friendly_provider_error(provider_name, exc))
+        print(f"Translation process failed: {exc}", file=sys.stderr)
+        raise
+    finally:
+        signal_ocr_completion()
 
 
 if __name__ == "__main__":

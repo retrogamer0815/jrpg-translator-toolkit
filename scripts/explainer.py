@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 from study_library_sections import (
     SECTION_SCHEMA,
     ensure_section_schema,
+    extract_key_grammar_metadata,
     extract_strict_speaker_header,
     replace_explanation_sections,
 )
@@ -41,7 +42,13 @@ OVERLAY_DIR   = os.path.join(TEMP_DIR, "JRPG_Overlay")
 LAST_JP       = os.path.join(OVERLAY_DIR, "last_jp.txt")
 LAST_SRC      = os.path.join(OVERLAY_DIR, "last_src.txt")
 EXPLAINER_TXT = os.path.join(OVERLAY_DIR, "explainer.txt")
+EXPLAINER_DONE = os.path.join(OVERLAY_DIR, "explainer.done")
 os.makedirs(OVERLAY_DIR, exist_ok=True)
+
+MODEL_TIMEOUT_SECONDS = max(
+    15.0,
+    min(180.0, float(os.environ.get("JRPG_MODEL_TIMEOUT_SECONDS", "75"))),
+)
 
 import time  # add near the other imports
 
@@ -64,6 +71,42 @@ def atomic_write_text(path: str, text: str):
             os.remove(tmp)
         except Exception:
             pass
+
+
+def request_completion_token() -> str:
+    return (os.environ.get("JRPG_REQUEST_ID") or "").strip() or str(time.time_ns())
+
+
+def signal_explainer_completion() -> None:
+    atomic_write_text(EXPLAINER_DONE, request_completion_token())
+
+
+def friendly_provider_error(provider_name: str, exc: Exception) -> str:
+    detail = re.sub(r"\s+", " ", str(exc or "")).strip()
+    lower = detail.lower()
+    code_match = re.search(r"(?:code['\"\s:=]+|\b)(401|403|408|429|500|502|503|504)\b", detail)
+    code = code_match.group(1) if code_match else ""
+    heading = f"{provider_name} explanation failed"
+    if code:
+        heading += f" (error {code})"
+    heading += "."
+
+    if code in {"500", "502", "503"} or "unavailable" in lower or "high demand" in lower or "overloaded" in lower:
+        guidance = "The selected model is temporarily unavailable or under high demand. Please try again shortly or select another model."
+    elif code == "429" or "resource_exhausted" in lower or "rate limit" in lower or "quota" in lower:
+        guidance = "The account or model has reached a rate or quota limit. Please wait and try again, or check the provider billing and quota settings."
+    elif code in {"401", "403"} or "api key" in lower or "authentication" in lower or "permission_denied" in lower:
+        guidance = "Authentication was rejected. Check the selected provider's API key and account permissions."
+    elif code in {"408", "504"} or "deadline" in lower or "timed out" in lower or "timeout" in lower:
+        guidance = "The request timed out before the model returned an explanation. Please try again or select another model."
+    elif any(token in lower for token in ("connection", "connecterror", "dns", "name resolution", "network", "server disconnected", "certificate", "proxy")):
+        guidance = "A network connection to the provider could not be established. Check the internet connection and try again."
+    else:
+        guidance = "The provider did not return a usable explanation. Please try again."
+
+    if detail and detail not in guidance and len(detail) <= 240:
+        return f"{heading}\n\n{guidance}\n\nDetails: {detail}"
+    return f"{heading}\n\n{guidance}"
 
 def read_text(path: str) -> str:
     try:
@@ -230,6 +273,7 @@ CREATE TABLE IF NOT EXISTS explanations (
     model TEXT NOT NULL DEFAULT '',
     prompt_profile TEXT NOT NULL DEFAULT '',
     raw_text TEXT NOT NULL,
+    key_grammar TEXT NOT NULL DEFAULT '',
     manual_original_text TEXT NOT NULL DEFAULT '',
     manually_edited_at TEXT NOT NULL DEFAULT '',
     text_archive_path TEXT NOT NULL DEFAULT '',
@@ -302,6 +346,7 @@ def archive_study_library_entry(
     provider: str,
     model: str,
     prompt_profile: str,
+    key_grammar: str,
     include_screenshots: bool,
     text_archive_path: str = "",
 ) -> None:
@@ -380,8 +425,8 @@ def archive_study_library_entry(
         cursor = connection.execute(
             "INSERT INTO explanations("
             "group_id, version, created_at, provider, model, prompt_profile, raw_text, "
-            "text_archive_path, preferred"
-            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1)",
+            "key_grammar, text_archive_path, preferred"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
             (
                 group_id,
                 version,
@@ -390,6 +435,7 @@ def archive_study_library_entry(
                 model,
                 prompt_profile,
                 text,
+                key_grammar,
                 stored_text_archive_path,
             ),
         )
@@ -727,6 +773,20 @@ Japanese:
 {jp}
 """
 
+KEY_GRAMMAR_METADATA_INSTRUCTION = """
+After the complete learner-facing explanation, append exactly one private metadata block:
+[[JRPG_TRANSLATOR_METADATA]]
+{"key_grammar":["pattern (short meaning)"]}
+[[/JRPG_TRANSLATOR_METADATA]]
+
+Metadata rules:
+- Select zero, one, or at most two grammar patterns that are most useful for quickly identifying this Japanese sentence.
+- Keep each label compact: the Japanese pattern followed by a short meaning in the same language as the explanation.
+- Prefer recognizable forms such as ～てほしい (want someone to...) rather than a long analysis.
+- Use an empty list when there is no useful grammar pattern.
+- Output valid JSON only inside the metadata block. This block is application data and is not part of the explanation.
+""".strip()
+
 
 def gemini_safety_settings(types):
     """Disable Gemini's adjustable content filters for faithful explanation."""
@@ -756,7 +816,23 @@ source_paths_file = os.environ.get("EXPLAIN_SOURCE_PATHS_FILE", "").strip()
 jp = read_text(source_text_file or LAST_JP).strip()
 source_paths = read_source_paths(source_paths_file)
 if not jp and not source_paths:
-    print("(No Japanese transcript or cached source screenshots found)", file=sys.stderr)
+    message = (
+        "Explanation could not start.\n\n"
+        "No Japanese source text was available. Translate a screenshot first and retry."
+    )
+    if env_flag("EXPLAIN_UPDATE_OVERLAY", True):
+        try:
+            atomic_write_text(EXPLAINER_TXT, message)
+            signal_explainer_completion()
+        except Exception:
+            pass
+    error_file = os.environ.get("EXPLAIN_ERROR_FILE", "").strip()
+    if error_file:
+        try:
+            atomic_write_text(error_file, message)
+        except Exception:
+            pass
+    print(message, file=sys.stderr)
     sys.exit(2)
 
 if jp:
@@ -774,6 +850,7 @@ else:
 source_glossary_prompt = build_source_glossary_prompt(JP2TL_GLOSSARY)
 if source_glossary_prompt:
     prompt += "\n\n" + source_glossary_prompt
+prompt += "\n\n" + KEY_GRAMMAR_METADATA_INSTRUCTION
 
 try:
     text = ""
@@ -811,7 +888,13 @@ try:
         if model_name.startswith("models/"):
             model_name = model_name[len("models/"):]
 
-        client = genai.Client(api_key=api_key)
+        try:
+            client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(timeout=int(MODEL_TIMEOUT_SECONDS * 1000)),
+            )
+        except TypeError:
+            client = genai.Client(api_key=api_key)
         if source_paths:
             content_parts = [types.Part.from_text(text=prompt)]
             for source_path in source_paths:
@@ -908,7 +991,11 @@ try:
         if not api_key:
             raise RuntimeError("Missing OPENAI_API_KEY (or *_LOCAL / _FILE)")
 
-        client = OpenAI(api_key=api_key)
+        client = OpenAI(
+            api_key=api_key,
+            timeout=MODEL_TIMEOUT_SECONDS,
+            max_retries=2,
+        )
         if source_paths:
             input_content = [{"type": "input_text", "text": prompt}]
             input_content.extend(
@@ -927,6 +1014,7 @@ try:
 except Exception as e:
     error_text = str(e)
     update_overlay = env_flag("EXPLAIN_UPDATE_OVERLAY", True)
+    provider_name = "Gemini" if PROVIDER == "gemini" else "OpenAI"
     if update_overlay and "Missing OPENAI_API_KEY" in error_text:
         atomic_write_text(
             EXPLAINER_TXT,
@@ -941,11 +1029,24 @@ except Exception as e:
             "Add it in the API Keys tab, or set GEMINI_API_KEY (or GOOGLE_API_KEY) "
             "in Windows Environment Variables and restart JRPG Translator.",
         )
+    elif update_overlay:
+        atomic_write_text(EXPLAINER_TXT, friendly_provider_error(provider_name, e))
+    if update_overlay:
+        signal_explainer_completion()
+    error_file = (os.environ.get("EXPLAIN_ERROR_FILE") or "").strip()
+    if error_file:
+        try:
+            atomic_write_text(error_file, friendly_provider_error(provider_name, e))
+        except Exception:
+            pass
     print(f"(Python error) Explain call failed: {e}", file=sys.stderr)
     sys.exit(1)
 
 if not text:
     text = "(No explanation returned)"
+
+text, key_grammar_values = extract_key_grammar_metadata(text)
+key_grammar = " • ".join(key_grammar_values)
 
 if TL2TL_GLOSSARY:
     text = apply_target_glossary(text, TL2TL_GLOSSARY, protected_text=jp)
@@ -955,6 +1056,7 @@ if TL2TL_GLOSSARY:
 # current in-game explanation or last-source context.
 if env_flag("EXPLAIN_UPDATE_OVERLAY", True):
     atomic_write_text(EXPLAINER_TXT, text)
+    signal_explainer_completion()
     print(f"Wrote explanation to: {EXPLAINER_TXT}")
 else:
     print("Generated Study Library explanation without updating the live overlay")
@@ -986,6 +1088,7 @@ if env_flag("SAVE_STUDY_LIBRARY"):
             provider=PROVIDER,
             model=(GEM_MODEL if PROVIDER == "gemini" else MODEL_NAME),
             prompt_profile=os.environ.get("EXPLAIN_PROMPT_PROFILE", "").strip(),
+            key_grammar=key_grammar,
             include_screenshots=env_flag("STUDY_LIBRARY_SCREENSHOTS", True),
             text_archive_path=text_archive_path,
         )

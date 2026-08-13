@@ -778,7 +778,7 @@ ClearOcrFile() {
 }
 
 ClearExplainerFile() {
-    global ExplainerTxt
+    global ExplainerTxt, ExplainerDoneTxt
     try {
         tmpPath := ExplainerTxt ".tmp"
         FileAppend("", tmpPath, "UTF-8")
@@ -787,6 +787,11 @@ ClearExplainerFile() {
         try f := FileOpen(ExplainerTxt, "w")
         if IsObject(f)
             f.Close()
+    }
+    try {
+        doneTmp := ExplainerDoneTxt ".tmp"
+        FileAppend("", doneTmp, "UTF-8")
+        FileMove(doneTmp, ExplainerDoneTxt, 1)
     }
 }
 
@@ -1238,9 +1243,37 @@ CapPickPositionHud() {
     MonitorGetWorkArea(MonitorGetPrimary(), &workLeft, &workTop, &workRight, &workBottom)
     hudX := Round(workLeft + (workRight - workLeft - hudW) / 2)
     hudY := workTop + 14
-    ; Show rather than only Move so this HUD returns above the translucent
-    ; selection highlight each time that highlight is redrawn.
-    try state["hud"].Show("NA x" hudX " y" hudY)
+    ; Move without changing z-order. Re-showing this always-on-top HUD during
+    ; every picker update competed with the selection highlight and made their
+    ; overlapping area flicker.
+    try DllCall("user32\SetWindowPos"
+        , "ptr", hudHwnd := state["hud"].Hwnd, "ptr", 0
+        , "int", hudX, "int", hudY, "int", 0, "int", 0
+        , "uint", 0x0015) ; NOSIZE | NOZORDER | NOACTIVATE
+}
+
+CapPickPlaceRegionAboveHud() {
+    global __CapPickState, __SelBand
+    state := __CapPickState
+    if !(IsSet(__SelBand) && IsObject(__SelBand)
+      && state.Has("hud") && IsObject(state["hud"]))
+        return
+
+    bandHwnd := 0, hudHwnd := 0
+    try bandHwnd := __SelBand.Hwnd
+    try hudHwnd := state["hud"].Hwnd
+    if !(bandHwnd && hudHwnd
+      && DllCall("user32\IsWindow", "ptr", bandHwnd, "int")
+      && DllCall("user32\IsWindow", "ptr", hudHwnd, "int"))
+        return
+
+    ; Keep both windows topmost, but establish one fixed order: the selected
+    ; capture area stays directly above the instruction HUD. Later moves use
+    ; SWP_NOZORDER, so neither window repeatedly promotes itself while dragging.
+    try DllCall("user32\SetWindowPos"
+        , "ptr", bandHwnd, "ptr", hudHwnd
+        , "int", 0, "int", 0, "int", 0, "int", 0
+        , "uint", 0x0013) ; NOSIZE | NOMOVE | NOACTIVATE
 }
 
 CapPickUpdateHud(force := false) {
@@ -1769,8 +1802,21 @@ CapPickApplyRegionRect(x, y, w, h) {
     CapPickClampRegionRect(&x, &y, &w, &h)
     state := __CapPickState
     state["x"] := x, state["y"] := y, state["w"] := w, state["h"] := h
-    if IsSet(__SelBand) && IsObject(__SelBand)
-        try __SelBand.Show("NA x" x " y" y " w" w " h" h)
+    if IsSet(__SelBand) && IsObject(__SelBand) {
+        bandHwnd := 0
+        try bandHwnd := __SelBand.Hwnd
+        if bandHwnd {
+            firstPlacement := !(state.Has("regionZOrderReady") && state["regionZOrderReady"])
+            try DllCall("user32\SetWindowPos"
+                , "ptr", bandHwnd, "ptr", 0
+                , "int", x, "int", y, "int", w, "int", h
+                , "uint", 0x0054) ; NOZORDER | NOACTIVATE | SHOWWINDOW
+            if firstPlacement {
+                CapPickPlaceRegionAboveHud()
+                state["regionZOrderReady"] := true
+            }
+        }
+    }
     CapPickUpdateHud()
 }
 
@@ -2337,6 +2383,7 @@ global AudioTxt     := OverlayDir . "\audio.txt"
 global OcrTxt       := OverlayDir . "\ocr.txt"
 global OcrDoneTxt   := OverlayDir . "\ocr.done"
 global ExplainerTxt := OverlayDir . "\explainer.txt"
+global ExplainerDoneTxt := OverlayDir . "\explainer.done"
 global PauseFlag    := OverlayDir "\audio.pause"
 global __OcrText := ""
 global __AudioText := ""
@@ -2344,6 +2391,12 @@ global __LastAudioRaw := ""
 global __LastOcrRaw   := ""
 global __LastOcrDoneRaw := ""
 global __LastExplainRaw := ""
+global __LastExplainDoneRaw := ""
+global __TranslationPid := 0
+global __TranslationRequestId := ""
+global __TranslationStartedAt := 0
+global __TranslationExitedAt := 0
+global __TranslationTimeoutMs := 120000
 
 MinW := 200, MinH := 120
 
@@ -2532,6 +2585,7 @@ if (__EXPLAIN_MODE) {
     ClearAudioFile()
     SetTimer(() => PollOcrFile(), 100)
     SetTimer(() => PollAudioSubtitle(), 100)
+    SetTimer(CheckTranslationProcess, 250)
     PollOcrFile()
     PollAudioSubtitle()
 }
@@ -3788,6 +3842,7 @@ redefineRegion(*) {
 
 flushTranslate(files := unset) {
     global ShotBuf, pythonExe, translatorPy, ControlIni
+    global __TranslationPid, __TranslationRequestId, __TranslationStartedAt, __TranslationExitedAt
     local fileList, n
 
     px := ResolvePath(pythonExe)
@@ -3828,6 +3883,11 @@ flushTranslate(files := unset) {
         return
     }
 
+    if (__TranslationPid && ProcessExist(__TranslationPid)) {
+        showText("A translation request is already in progress.`n`nPlease wait for it to finish before starting another one.")
+        return
+    }
+
     ToolTip()
     ShowOverlayStatus()
 	; === Re-read Control Panel settings just-in-time and export to env ===
@@ -3861,7 +3921,9 @@ EnvSet("SHOT_COLOR_SPEAKER", (colorSpeaker ? "1" : "0"))
 ; Prompt + post-processing
 EnvSet("PROMPT_PROFILE", promptProfile)
 EnvSet("PROMPT_FILE", "")
-EnvSet("POSTPROC_MODE", imgPostproc)
+    EnvSet("POSTPROC_MODE", imgPostproc)
+    EnvSet("PYTHONIOENCODING", "utf-8")
+    EnvSet("JRPG_MODEL_TIMEOUT_SECONDS", "75")
 
 ; --- Pass glossary paths (profile-aware) & policy ---
 ExportGlossaryEnv()
@@ -3871,12 +3933,24 @@ ExportGlossaryEnv()
 ; === end just-in-time settings ===
 
     args := ""
-    args := ""
     for f in fileList
         args .= Format(' "{}"', f)
 
-    cmd := Format('cmd /c chcp 65001>nul & "{}" "{}"{}', px, tp, args)
-    Run(cmd, , "Hide")
+    __TranslationRequestId := A_NowUTC "-" A_TickCount
+    __TranslationStartedAt := A_TickCount
+    __TranslationExitedAt := 0
+    EnvSet("JRPG_REQUEST_ID", __TranslationRequestId)
+    cmd := Format('"{}" "{}"{}', px, tp, args)
+    try Run(cmd, A_ScriptDir, "Hide", &__TranslationPid)
+    catch as ex {
+        requestId := __TranslationRequestId
+        __TranslationPid := 0
+        __TranslationRequestId := ""
+        WriteTranslationTerminalResult(
+            "Translation could not start.`n`nThe bundled Python process could not be launched.`n`nDetails: " ex.Message,
+            requestId
+        )
+    }
 
     ShotBuf := []
 }
@@ -4132,6 +4206,77 @@ CheckCmdSignals() {
     }
 }
 
+WriteTranslationTerminalResult(message, requestId) {
+    global OcrTxt, OcrDoneTxt
+    for pair in [[OcrTxt, message], [OcrDoneTxt, requestId]] {
+        path := pair[1], text := pair[2], tmp := path ".tmp"
+        try {
+            if FileExist(tmp)
+                FileDelete(tmp)
+            FileAppend(text, tmp, "UTF-8")
+            FileMove(tmp, path, true)
+        } catch {
+            try {
+                if FileExist(path)
+                    FileDelete(path)
+                FileAppend(text, path, "UTF-8")
+            }
+        }
+    }
+}
+
+CheckTranslationProcess(*) {
+    global __TranslationPid, __TranslationRequestId, __TranslationStartedAt
+    global __TranslationExitedAt, __TranslationTimeoutMs, OcrDoneTxt
+    if (__TranslationRequestId = "")
+        return
+
+    doneRaw := ""
+    try if FileExist(OcrDoneTxt)
+        doneRaw := Trim(FileRead(OcrDoneTxt, "UTF-8"))
+    if (doneRaw = __TranslationRequestId) {
+        __TranslationPid := 0
+        __TranslationRequestId := ""
+        __TranslationStartedAt := 0
+        __TranslationExitedAt := 0
+        return
+    }
+
+    elapsed := A_TickCount - __TranslationStartedAt
+    if (elapsed >= __TranslationTimeoutMs) {
+        requestId := __TranslationRequestId
+        try if (__TranslationPid && ProcessExist(__TranslationPid))
+            ProcessClose(__TranslationPid)
+        __TranslationPid := 0
+        __TranslationRequestId := ""
+        __TranslationStartedAt := 0
+        __TranslationExitedAt := 0
+        WriteTranslationTerminalResult(
+            "Translation timed out.`n`nThe selected model did not finish within two minutes. Please try again, check the internet connection, or select another model.",
+            requestId
+        )
+        return
+    }
+
+    if (__TranslationPid && !ProcessExist(__TranslationPid)) {
+        if !__TranslationExitedAt
+            __TranslationExitedAt := A_TickCount
+        if ((A_TickCount - __TranslationExitedAt) >= 1500) {
+            requestId := __TranslationRequestId
+            __TranslationPid := 0
+            __TranslationRequestId := ""
+            __TranslationStartedAt := 0
+            __TranslationExitedAt := 0
+            WriteTranslationTerminalResult(
+                "Translation failed.`n`nThe model process ended without returning a result. Please try again. If this repeats, check the selected provider, model, API key, and internet connection.",
+                requestId
+            )
+        }
+    } else {
+        __TranslationExitedAt := 0
+    }
+}
+
 ; ---------- end dynamic hotkeys ----------
 
 ; ================ HOTKEYS ======================
@@ -4158,13 +4303,25 @@ ToggleAudioListening(){
 }
 
 PollExplainerFile(){
-    global ExplainerTxt, __LastExplainRaw, __OcrText, __AudioText
+    global ExplainerTxt, ExplainerDoneTxt, __LastExplainRaw, __LastExplainDoneRaw, __OcrText, __AudioText
     raw := ""
     try if FileExist(ExplainerTxt)
         raw := FileRead(ExplainerTxt, "UTF-8")
-    if (raw = __LastExplainRaw)
+    doneRaw := ""
+    try if FileExist(ExplainerDoneTxt)
+        doneRaw := FileRead(ExplainerDoneTxt, "UTF-8")
+    contentChanged := (raw != __LastExplainRaw)
+    completionChanged := (doneRaw != "" && doneRaw != __LastExplainDoneRaw)
+    if (!contentChanged && !completionChanged)
         return
     __LastExplainRaw := raw
+    if (doneRaw != "")
+        __LastExplainDoneRaw := doneRaw
+
+    if (!contentChanged) {
+        HideOverlayStatus()
+        return
+    }
 
     ; normalize newlines to CRLF (what the Edit control expects)
     norm := StrReplace(raw, "`r`n", "`n")
@@ -4185,6 +4342,7 @@ PollExplainerFile(){
 
 PollOcrFile() {
     global OcrTxt, OcrDoneTxt, __LastOcrRaw, __LastOcrDoneRaw, __OcrText, __AudioText
+    global __TranslationRequestId, __TranslationPid, __TranslationStartedAt, __TranslationExitedAt
     raw := ""
     try if FileExist(OcrTxt)
         raw := FileRead(OcrTxt, "UTF-8")
@@ -4192,6 +4350,9 @@ PollOcrFile() {
     doneRaw := ""
     try if FileExist(OcrDoneTxt)
         doneRaw := FileRead(OcrDoneTxt, "UTF-8")
+
+    if (__TranslationRequestId != "" && Trim(doneRaw) != __TranslationRequestId)
+        return
 
     contentChanged := (raw != __LastOcrRaw)
     completionChanged := (doneRaw != "" && doneRaw != __LastOcrDoneRaw)
@@ -4201,6 +4362,12 @@ PollOcrFile() {
     __LastOcrRaw := raw
     if (doneRaw != "")
         __LastOcrDoneRaw := doneRaw
+    if (__TranslationRequestId != "" && Trim(doneRaw) = __TranslationRequestId) {
+        __TranslationPid := 0
+        __TranslationRequestId := ""
+        __TranslationStartedAt := 0
+        __TranslationExitedAt := 0
+    }
 
     ; A completed request may legitimately return the same translation again.
     ; In that case, keep the existing rendered text but finish the busy state.

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import unicodedata
@@ -20,6 +21,57 @@ class ExplanationSection:
 
 _SPEAKER_HEADER_RE = re.compile(r"^\s*「([^「」\r\n]{1,80})」\s*$")
 _SPEAKER_SENTENCE_PUNCTUATION_RE = re.compile(r"[。.!！、,，；;：:…｡､]")
+
+
+_KEY_GRAMMAR_METADATA_RE = re.compile(
+    r"\[\[JRPG_TRANSLATOR_METADATA\]\](.*?)"
+    r"\[\[/JRPG_TRANSLATOR_METADATA\]\]",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def extract_key_grammar_metadata(raw_text: str) -> tuple[str, list[str]]:
+    """Remove the private model footer and return up to two grammar labels.
+
+    Malformed or missing metadata never invalidates an otherwise useful
+    explanation. A recognized footer is always removed so private application
+    data cannot leak into overlays, text archives, or Anki cards.
+    """
+    text = str(raw_text or "")
+    matches = list(_KEY_GRAMMAR_METADATA_RE.finditer(text))
+    if not matches:
+        marker = re.search(
+            r"\[\[JRPG_TRANSLATOR_METADATA\]\]", text, re.IGNORECASE
+        )
+        return (text[: marker.start()].rstrip(), []) if marker else (text.strip(), [])
+
+    values: list[str] = []
+    payload = matches[-1].group(1).strip()
+    # Some models occasionally wrap otherwise valid JSON in a Markdown fence.
+    # Accept that harmless formatting variation without exposing the private
+    # footer in the learner-facing explanation.
+    payload = re.sub(r"^```(?:json)?\s*", "", payload, flags=re.IGNORECASE)
+    payload = re.sub(r"\s*```$", "", payload).strip()
+    try:
+        decoded = json.loads(payload)
+        candidates = decoded.get("key_grammar", []) if isinstance(decoded, dict) else []
+        if isinstance(candidates, str):
+            candidates = [candidates]
+        if isinstance(candidates, list):
+            seen: set[str] = set()
+            for candidate in candidates:
+                value = re.sub(r"\s+", " ", str(candidate or "")).strip()
+                folded = value.casefold()
+                if value and folded not in seen:
+                    seen.add(folded)
+                    values.append(value[:160])
+                if len(values) >= 2:
+                    break
+    except (TypeError, ValueError, json.JSONDecodeError):
+        values = []
+
+    visible = _KEY_GRAMMAR_METADATA_RE.sub("", text).strip()
+    return visible, values
 
 
 def extract_strict_speaker_header(source_text: str) -> str:
@@ -308,6 +360,11 @@ def ensure_section_schema(connection: sqlite3.Connection) -> None:
             "ALTER TABLE explanations "
             "ADD COLUMN manually_edited_at TEXT NOT NULL DEFAULT ''"
         )
+    if "key_grammar" not in explanation_columns:
+        connection.execute(
+            "ALTER TABLE explanations "
+            "ADD COLUMN key_grammar TEXT NOT NULL DEFAULT ''"
+        )
     detail_columns = {
         str(row[1])
         for row in connection.execute("PRAGMA table_info(explanation_group_details)")
@@ -332,9 +389,9 @@ def ensure_section_schema(connection: sqlite3.Connection) -> None:
             (canonical, int(group_id)),
         )
     connection.execute(
-        "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '6')"
+        "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '7')"
     )
-    connection.execute("PRAGMA user_version = 6")
+    connection.execute("PRAGMA user_version = 7")
 
 
 def replace_explanation_sections(
