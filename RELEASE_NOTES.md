@@ -6,6 +6,24 @@ explanations, selecting useful sentences or vocabulary, and creating cards with
 their original gameplay context. The release also adds AI-assisted study tools,
 spreadsheet export, richer metadata, and a broad reliability and interface pass.
 
+## v0.9.5 in screenshots
+
+### Study Library
+
+Saved explanations, source screenshots, speaker and grammar metadata, version
+history, chapter organization, filtering, and Anki status are available in one
+searchable library.
+
+[![JRPG Translator Study Library](https://raw.githubusercontent.com/retrogamer0815/jrpg-translator-toolkit/main/docs/media/study-library-v095.png)](https://github.com/retrogamer0815/jrpg-translator-toolkit/blob/main/docs/media/study-library-v095.png)
+
+### Review for Anki
+
+Review newly saved or backlogged sentences and vocabulary, filter existing Anki
+matches, and optionally use cached AI recommendations to help choose study
+material.
+
+[![JRPG Translator Review for Anki window](https://raw.githubusercontent.com/retrogamer0815/jrpg-translator-toolkit/main/docs/media/review-for-anki-v095.png)](https://github.com/retrogamer0815/jrpg-translator-toolkit/blob/main/docs/media/review-for-anki-v095.png)
+
 ## Highlights
 
 ### Anki-assisted review

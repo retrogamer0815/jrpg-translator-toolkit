@@ -95,6 +95,29 @@ view. Click either image to view it at full size.
   </tr>
 </table>
 
+Review saved sentences and vocabulary after playing, optionally ask the selected
+AI model to rank useful study candidates, and send chosen material to Anki after
+checking the editable card preview.
+
+<table>
+  <tr>
+    <th width="50%">Review for Anki</th>
+    <th width="50%">Add explanation to Anki</th>
+  </tr>
+  <tr>
+    <td>
+      <a href="docs/media/review-for-anki-v095.png">
+        <img src="docs/media/review-for-anki-v095.png" alt="Review for Anki window with AI-ranked sentence candidates from the Study Library">
+      </a>
+    </td>
+    <td>
+      <a href="docs/media/add-explanation-to-anki-v095.png">
+        <img src="docs/media/add-explanation-to-anki-v095.png" alt="Editable Anki card preview with Japanese text, explanation, destination deck, and source screenshot">
+      </a>
+    </td>
+  </tr>
+</table>
+
 ## Features
 
 - Screenshot translation with OpenAI and Google Gemini vision models.
