@@ -21,7 +21,15 @@ namespace JrpgTranslator.LaunchBox
                 return;
             }
 
-            RuntimeCoordinator.Start(game.Id, game.Title);
+            try
+            {
+                RuntimeCoordinator.Start(game.Id, game.Title);
+            }
+            catch (Exception exception)
+            {
+                // A plugin failure must never prevent LaunchBox from starting the game.
+                RuntimeLog.Write("Unhandled game-launch callback failure: " + exception.Message);
+            }
         }
 
         public void OnAfterGameLaunched(IGame? game, IAdditionalApplication? app, IEmulator? emulator)
@@ -30,7 +38,15 @@ namespace JrpgTranslator.LaunchBox
 
         public void OnGameExited()
         {
-            RuntimeCoordinator.StopActiveSession();
+            try
+            {
+                RuntimeCoordinator.StopActiveSession();
+            }
+            catch (Exception exception)
+            {
+                // Cleanup is best-effort and must never destabilize the host process.
+                RuntimeLog.Write("Unhandled game-exit callback failure: " + exception.Message);
+            }
         }
     }
 
@@ -41,7 +57,14 @@ namespace JrpgTranslator.LaunchBox
             if (string.Equals(eventType, SystemEventTypes.LaunchBoxShutdownBeginning, StringComparison.Ordinal)
                 || string.Equals(eventType, SystemEventTypes.BigBoxShutdownBeginning, StringComparison.Ordinal))
             {
-                RuntimeCoordinator.StopActiveSession();
+                try
+                {
+                    RuntimeCoordinator.StopActiveSession();
+                }
+                catch (Exception exception)
+                {
+                    RuntimeLog.Write("Unhandled host-shutdown callback failure: " + exception.Message);
+                }
             }
         }
     }
@@ -98,6 +121,7 @@ namespace JrpgTranslator.LaunchBox
 
         public static void StopActiveSession()
         {
+            RuntimeSession? session;
             lock (Sync)
             {
                 if (_activeSession == null)
@@ -105,10 +129,14 @@ namespace JrpgTranslator.LaunchBox
                     return;
                 }
 
-                RuntimeSession session = _activeSession;
+                session = _activeSession;
                 _activeSession = null;
-                StopSession(session);
             }
+
+            // Do potentially slow process cleanup after releasing the coordinator
+            // lock. A repeated exit/shutdown callback will now see no active session
+            // and cannot clean up the same processes twice.
+            StopSession(session);
         }
 
         private static void StartTranslator(
@@ -251,7 +279,7 @@ namespace JrpgTranslator.LaunchBox
                 current.ExceptWith(session.JoyToKeyBaseline);
             }
 
-            RuntimeProcessUtilities.StopProcesses(current);
+            RuntimeProcessUtilities.StopProcesses(current, "JoyToKey");
 
             if (!string.IsNullOrWhiteSpace(session.PreviousJoyToKeyProfile))
             {
@@ -278,11 +306,11 @@ namespace JrpgTranslator.LaunchBox
                 translatorProcesses.Add(session.TranslatorProcessId.Value);
             }
 
-            RuntimeProcessUtilities.StopProcesses(translatorProcesses);
+            RuntimeProcessUtilities.StopProcesses(translatorProcesses, "JRPG Translator");
 
             HashSet<int> overlayProcesses = RuntimeProcessUtilities.GetProcessIds("overlay");
             overlayProcesses.ExceptWith(session.OverlayBaseline);
-            RuntimeProcessUtilities.StopProcesses(overlayProcesses);
+            RuntimeProcessUtilities.StopProcesses(overlayProcesses, "overlay");
             RuntimeLog.Write("JRPG Translator was closed after " + session.GameTitle + ".");
         }
     }
@@ -443,7 +471,7 @@ namespace JrpgTranslator.LaunchBox
             return WritePrivateProfileString("LastStatus", "FileName", profile, iniFile);
         }
 
-        public static void StopProcesses(IEnumerable<int> processIds)
+        public static void StopProcesses(IEnumerable<int> processIds, params string[] expectedProcessNames)
         {
             foreach (int processId in processIds.Distinct())
             {
@@ -451,6 +479,14 @@ namespace JrpgTranslator.LaunchBox
                 {
                     using (Process process = Process.GetProcessById(processId))
                     {
+                        if (!MatchesExpectedProcessName(process, expectedProcessNames))
+                        {
+                            // PIDs can be reused after a plugin-started process exits.
+                            // Never terminate a different process that inherited the ID.
+                            RuntimeLog.Write("Skipped cleanup for reused process ID " + processId + ".");
+                            continue;
+                        }
+
                         process.Kill(true);
                         process.WaitForExit(1500);
                     }
@@ -468,6 +504,19 @@ namespace JrpgTranslator.LaunchBox
                     // A process we do not own could not be opened; leave it alone.
                 }
             }
+        }
+
+        private static bool MatchesExpectedProcessName(Process process, IReadOnlyCollection<string> expectedNames)
+        {
+            if (expectedNames.Count == 0)
+            {
+                return false;
+            }
+
+            string processName = process.ProcessName;
+            return expectedNames.Any(expected =>
+                !string.IsNullOrWhiteSpace(expected)
+                && string.Equals(processName, expected, StringComparison.OrdinalIgnoreCase));
         }
     }
 

@@ -16,11 +16,12 @@ global CP_START_PROFILE := ""
 global CP_START_TRANSLATOR := false
 global CP_STUDY_START_MODE := ""
 global CP_STUDY_ONLY_PROCESS := false
-global APP_VERSION := "0.9.5-dev"
+global APP_VERSION := "0.9.5"
 global PROJECT_URL := "https://github.com/retrogamer0815/jrpg-translator-toolkit"
 global BUG_REPORT_URL := PROJECT_URL "/issues/new"
 global WRITTEN_GUIDE_URL := PROJECT_URL "#quick-start"
 global BEGINNER_VIDEO_URL := "https://youtu.be/pdZ0fBS8COc"
+global STUDY_VIDEO_URL := "https://youtu.be/kKdD3X8bjsU"
 for __cpIndex, __cpArg in A_Args {
     __cpArgLower := StrLower(__cpArg)
     if (__cpArgLower = "--background") {
@@ -1060,6 +1061,10 @@ CPPalette(darkMode := -1) {
         "window", "F0F0F0",
         "surface", "FFFFFF",
         "surfaceAlt", "F3F3F3",
+        "headerSurface", "F3F3F3",
+        "headerFocus", "E7E7E7",
+        "headerText", "202020",
+        "headerBorder", "A0A0A0",
         "focus", "F3F8FF",
         "text", "202020",
         "muted", "808080",
@@ -1072,6 +1077,13 @@ CPPalette(darkMode := -1) {
         "window", "202124",
         "surface", "2B2D30",
         "surfaceAlt", "303236",
+        ; Native ListView headers remain light even when Explorer's dark theme is
+        ; requested.  Use a restrained neutral gray instead of stark white so
+        ; the header remains clearly separate from the dark rows without glare.
+        "headerSurface", "D7D9DC",
+        "headerFocus", "C9CCD0",
+        "headerText", "202020",
+        "headerBorder", "AEB1B5",
         "focus", "3A3D42",
         "text", "ECEDEF",
         "muted", "A8ABB2",
@@ -1215,6 +1227,11 @@ CPCreateComboArrowOverlays() {
         try cpComboCtrl := GuiCtrlFromHwnd(cpComboHwnd)
         if !IsObject(cpComboCtrl)
             continue
+        ; Use the same in-control arrow painting as the Study Library.  The
+        ; lightweight Text overlay below remains as the clickable top layer,
+        ; but the native arrow area is now dark even if Windows temporarily
+        ; places that overlay behind a ComboBox during a tab/layout redraw.
+        CPPrepareStudyCombo(cpComboHwnd)
         cpArrowCtrl := ui.Add("Text", "x0 y0 w1 h1 Hidden Center +0x100 +0x200 +0x04000000", Chr(9662))
         cpArrowCtrl.Cursor := "Hand"
         cpArrowCtrl.OnEvent("Click", CPComboArrowClick.Bind(cpComboHwnd))
@@ -1314,10 +1331,31 @@ CPPrepareStudyCombo(cpComboHwnd) {
 }
 
 CPPrepareStudyListHeader(cpHeaderHwnd) {
-    global CPStudyThemedHeaderHwnds
+    global CPStudyThemedHeaderHwnds, CPStudyHeaderSubclassCallback
     if !cpHeaderHwnd || CPStudyThemedHeaderHwnds.Has(cpHeaderHwnd)
         return
-    CPStudyThemedHeaderHwnds[cpHeaderHwnd] := true
+    if !CPStudyHeaderSubclassCallback
+        CPStudyHeaderSubclassCallback := CallbackCreate(CPStudyHeaderWindowProc, "", 4)
+    cpHeaderOriginalProc := DllCall(
+        "user32\SetWindowLongPtr", "ptr", cpHeaderHwnd, "int", -4,
+        "ptr", CPStudyHeaderSubclassCallback, "ptr"
+    )
+    if cpHeaderOriginalProc
+        CPStudyThemedHeaderHwnds[cpHeaderHwnd] := cpHeaderOriginalProc
+}
+
+CPCreateSemiboldStudyHeaderFont(cpHeaderHwnd) {
+    cpHeaderBaseFont := SendMessage(0x0031, 0, 0, cpHeaderHwnd) ; WM_GETFONT
+    if !cpHeaderBaseFont
+        return 0
+    cpHeaderLogFont := Buffer(92, 0) ; LOGFONTW
+    if !DllCall("gdi32\GetObjectW", "ptr", cpHeaderBaseFont,
+        "int", cpHeaderLogFont.Size, "ptr", cpHeaderLogFont.Ptr, "int")
+        return 0
+    ; Keep the native header's size and face, changing only the weight to
+    ; semibold. This improves hierarchy without increasing the row height.
+    NumPut("int", 600, cpHeaderLogFont, 16) ; lfWeight = FW_SEMIBOLD
+    return DllCall("gdi32\CreateFontIndirectW", "ptr", cpHeaderLogFont.Ptr, "ptr")
 }
 
 CPPrepareStudyListView(cpListHwnd, cpHeaderHwnd) {
@@ -1757,7 +1795,7 @@ CPUpdateAllStudyVisualOverlays(*) {
 }
 
 CPStudyHeaderWindowProc(cpHeaderHwnd, cpHeaderMsg, cpHeaderWParam, cpHeaderLParam) {
-    global CPStudyThemedHeaderHwnds
+    global CPStudyThemedHeaderHwnds, controlDarkMode
     cpHeaderMapReady := IsSet(CPStudyThemedHeaderHwnds)
         && IsObject(CPStudyThemedHeaderHwnds)
     cpHeaderOriginalProc := cpHeaderMapReady && CPStudyThemedHeaderHwnds.Has(cpHeaderHwnd)
@@ -1770,13 +1808,13 @@ CPStudyHeaderWindowProc(cpHeaderHwnd, cpHeaderMsg, cpHeaderWParam, cpHeaderLPara
             "uint", cpHeaderMsg, "uptr", cpHeaderWParam, "ptr", cpHeaderLParam,
             "ptr")
     try {
-        if (cpHeaderMsg = 0x000F) { ; WM_PAINT
+        if controlDarkMode && (cpHeaderMsg = 0x000F) { ; WM_PAINT
             cpHeaderDc := DllCall("user32\GetDC", "ptr", cpHeaderHwnd, "ptr")
             if cpHeaderDc {
                 try CPThemePaintAllHeaders(cpHeaderHwnd, cpHeaderDc)
                 DllCall("user32\ReleaseDC", "ptr", cpHeaderHwnd, "ptr", cpHeaderDc)
             }
-        } else if (cpHeaderMsg = 0x0317 || cpHeaderMsg = 0x0318) {
+        } else if controlDarkMode && (cpHeaderMsg = 0x0317 || cpHeaderMsg = 0x0318) {
             if cpHeaderWParam
                 CPThemePaintAllHeaders(cpHeaderHwnd, cpHeaderWParam)
         }
@@ -1789,12 +1827,18 @@ CPStudyHeaderWindowProc(cpHeaderHwnd, cpHeaderMsg, cpHeaderWParam, cpHeaderLPara
 
 CPThemePaintAllHeaders(cpHeaderHwnd, cpHeaderDc) {
     cpHeaderCount := SendMessage(0x1200, 0, 0, cpHeaderHwnd)
-    loop Max(0, cpHeaderCount) {
-        cpHeaderIndex := A_Index - 1
-        cpHeaderRect := Buffer(16, 0)
-        if SendMessage(0x1207, cpHeaderIndex, cpHeaderRect.Ptr, cpHeaderHwnd)
-            CPThemePaintHeader(cpHeaderHwnd, cpHeaderIndex, cpHeaderDc,
-                cpHeaderRect.Ptr, 0)
+    cpHeaderSemiboldFont := CPCreateSemiboldStudyHeaderFont(cpHeaderHwnd)
+    try {
+        loop Max(0, cpHeaderCount) {
+            cpHeaderIndex := A_Index - 1
+            cpHeaderRect := Buffer(16, 0)
+            if SendMessage(0x1207, cpHeaderIndex, cpHeaderRect.Ptr, cpHeaderHwnd)
+                CPThemePaintHeader(cpHeaderHwnd, cpHeaderIndex, cpHeaderDc,
+                    cpHeaderRect.Ptr, 0, cpHeaderSemiboldFont)
+        }
+    } finally {
+        if cpHeaderSemiboldFont
+            DllCall("gdi32\DeleteObject", "ptr", cpHeaderSemiboldFont)
     }
 }
 
@@ -2268,13 +2312,14 @@ CPThemeNotify(wParam, lParam, msg, parentHwnd) {
     return 0x00000004 ; CDRF_SKIPDEFAULT
 }
 
-CPThemePaintHeader(cpHeaderHwnd, cpHeaderIndex, cpHeaderDc, cpHeaderRect, cpHeaderState) {
+CPThemePaintHeader(cpHeaderHwnd, cpHeaderIndex, cpHeaderDc, cpHeaderRect,
+    cpHeaderState, cpHeaderOverrideFont := 0) {
     global controlDarkMode
     if !cpHeaderDc
         return
     cpHeaderColors := CPPalette(controlDarkMode)
     cpHeaderBackHex := (cpHeaderState & 0x0040)
-        ? cpHeaderColors["focus"] : cpHeaderColors["surfaceAlt"]
+        ? cpHeaderColors["headerFocus"] : cpHeaderColors["headerSurface"]
     cpHeaderBrush := DllCall(
         "gdi32\CreateSolidBrush", "uint", CPColorRef(cpHeaderBackHex), "ptr"
     )
@@ -2294,9 +2339,10 @@ CPThemePaintHeader(cpHeaderHwnd, cpHeaderIndex, cpHeaderDc, cpHeaderRect, cpHead
         cpHeaderText := StrGet(cpHeaderTextBuffer, "UTF-16")
 
     DllCall("gdi32\SetTextColor", "ptr", cpHeaderDc,
-        "uint", CPColorRef(cpHeaderColors["text"]))
+        "uint", CPColorRef(cpHeaderColors["headerText"]))
     DllCall("gdi32\SetBkMode", "ptr", cpHeaderDc, "int", 1)
-    cpHeaderFont := SendMessage(0x0031, 0, 0, cpHeaderHwnd)
+    cpHeaderFont := cpHeaderOverrideFont
+        ? cpHeaderOverrideFont : SendMessage(0x0031, 0, 0, cpHeaderHwnd)
     cpHeaderOldFont := cpHeaderFont
         ? DllCall("gdi32\SelectObject", "ptr", cpHeaderDc, "ptr", cpHeaderFont, "ptr") : 0
     cpHeaderTextRect := Buffer(16, 0)
@@ -2313,7 +2359,7 @@ CPThemePaintHeader(cpHeaderHwnd, cpHeaderIndex, cpHeaderDc, cpHeaderRect, cpHead
         DllCall("gdi32\SelectObject", "ptr", cpHeaderDc, "ptr", cpHeaderOldFont)
 
     cpHeaderPen := DllCall("gdi32\CreatePen", "int", 0, "int", 1,
-        "uint", CPColorRef(cpHeaderColors["border"]), "ptr")
+        "uint", CPColorRef(cpHeaderColors["headerBorder"]), "ptr")
     cpHeaderOldPen := DllCall("gdi32\SelectObject", "ptr", cpHeaderDc,
         "ptr", cpHeaderPen, "ptr")
     DllCall("gdi32\MoveToEx", "ptr", cpHeaderDc, "int", cpHeaderRight + 3,
@@ -4334,7 +4380,11 @@ try Hotkey("$Left", CPNavLeft, "On")
     try Hotkey("$Space", CPNavSpace, "On")
     try Hotkey("$PgUp", CPNavPrevTab, "On")
     try Hotkey("$PgDn", CPNavNextTab, "On")
-    try Hotkey("~LButton", CPMouseTabClick, "On")
+    ; Select custom tabs on button release, matching ordinary Windows controls.
+    ; Switching on button-down can temporarily place the disabled screen-snapshot
+    ; cover under the still-active mouse click; Windows then occasionally plays
+    ; its disabled-window notification sound even though the page changes normally.
+    try Hotkey("~LButton Up", CPMouseTabClick, "On")
     try Hotkey("$Esc", CPNavEscape, "On")
     HotIfWinActive()
 
@@ -5869,6 +5919,9 @@ ExplainNow(*) {
     EnvSet "STUDY_LIBRARY_SCREENSHOTS", (saveStudyScreenshots ? "1" : "0")
     EnvSet "STUDY_LIBRARY_DIR", studyLibraryDir
     EnvSet "STUDY_LIBRARY_PROFILE", activeGameProfile
+    EnvSet "STUDY_LIBRARY_CHAPTER", StudyLibraryCurrentChapter(
+        activeGameProfile, studyLibraryDir
+    )
     EnvSet "EXPLAIN_PROMPT_PROFILE", Trim(ddlEPr.Text)
     
     requestId := A_NowUTC "-" A_TickCount
@@ -5983,6 +6036,365 @@ StudyLibraryListNames() {
                 slNames.Push(A_LoopField)
     }
     return slNames
+}
+
+StudyLibraryActiveProfileName() {
+    global iniPath
+    return Trim(IniRead(iniPath, "game_profiles", "active", ""))
+}
+
+StudyLibraryChapterSettingsPath(slDirectory := "") {
+    global studyLibraryDir
+    if (slDirectory = "")
+        slDirectory := studyLibraryDir
+    slDirectory := RTrim(slDirectory, "\/")
+    return slDirectory != "" ? slDirectory "\current_chapters.ini" : ""
+}
+
+StudyLibraryChapterSettingsKey(slProfileName := "") {
+    slProfileName := Trim(slProfileName)
+    if (slProfileName = "")
+        return "unsorted"
+    slSafeProfile := GameProfileSafeName(slProfileName)
+    return slSafeProfile != "" ? "profile_" slSafeProfile : "unsorted"
+}
+
+StudyLibraryCurrentChapter(slProfileName := "", slDirectory := "") {
+    slSettingsPath := StudyLibraryChapterSettingsPath(slDirectory)
+    if (slSettingsPath = "")
+        return ""
+    return Trim(IniRead(
+        slSettingsPath, "chapters",
+        StudyLibraryChapterSettingsKey(slProfileName), ""
+    ))
+}
+
+StudyLibraryWriteCurrentChapter(slProfileName, slChapter, slDirectory := "") {
+    slSettingsPath := StudyLibraryChapterSettingsPath(slDirectory)
+    if (slSettingsPath = "")
+        throw Error("The Study Library folder could not be resolved.")
+    slChapter := Trim(RegExReplace(slChapter, "[\r\n]+", " "))
+    if (StrLen(slChapter) > 240)
+        throw Error("Chapter names can contain up to 240 characters.")
+    IniWriteRetry(
+        slChapter, slSettingsPath, "chapters",
+        StudyLibraryChapterSettingsKey(slProfileName)
+    )
+    return slChapter
+}
+
+StudyLibraryChapterHistorySection(slProfileName := "") {
+    return "history_" StudyLibraryChapterSettingsKey(slProfileName)
+}
+
+StudyLibraryReadChapterHistory(slProfileName := "", slDirectory := "") {
+    slHistory := []
+    slSettingsPath := StudyLibraryChapterSettingsPath(slDirectory)
+    if (slSettingsPath = "" || !FileExist(slSettingsPath))
+        return slHistory
+    try slRawHistory := IniRead(
+        slSettingsPath, StudyLibraryChapterHistorySection(slProfileName)
+    )
+    catch
+        return slHistory
+    slSeen := Map()
+    Loop Parse slRawHistory, "`n", "`r" {
+        slEquals := InStr(A_LoopField, "=")
+        if !slEquals
+            continue
+        slChapter := Trim(SubStr(A_LoopField, slEquals + 1))
+        slIdentity := StrLower(slChapter)
+        if (slChapter != "" && !slSeen.Has(slIdentity)) {
+            slSeen[slIdentity] := true
+            slHistory.Push(slChapter)
+        }
+    }
+    return slHistory
+}
+
+StudyLibraryWriteChapterHistory(
+    slProfileName, slHistory, slDirectory := ""
+) {
+    slSettingsPath := StudyLibraryChapterSettingsPath(slDirectory)
+    if (slSettingsPath = "")
+        throw Error("The Study Library folder could not be resolved.")
+    slSection := StudyLibraryChapterHistorySection(slProfileName)
+    try IniDelete(slSettingsPath, slSection)
+    slWritten := 0, slSeen := Map()
+    for slChapter in slHistory {
+        slChapter := Trim(RegExReplace(slChapter, "[\r\n]+", " "))
+        slIdentity := StrLower(slChapter)
+        if (slChapter = "" || slSeen.Has(slIdentity))
+            continue
+        if (StrLen(slChapter) > 240)
+            throw Error("Chapter names can contain up to 240 characters.")
+        slSeen[slIdentity] := true
+        slWritten += 1
+        IniWriteRetry(
+            slChapter, slSettingsPath, slSection,
+            Format("item_{:04}", slWritten)
+        )
+        ; Keep an accidental years-long history bounded without affecting any
+        ; chapter already stored on an explanation.
+        if (slWritten >= 100)
+            break
+    }
+}
+
+StudyLibraryRememberChapter(slProfileName, slChapter, slDirectory := "") {
+    slChapter := Trim(RegExReplace(slChapter, "[\r\n]+", " "))
+    if (slChapter = "")
+        return
+    slUpdatedHistory := [slChapter]
+    slIdentity := StrLower(slChapter)
+    for slExisting in StudyLibraryReadChapterHistory(
+        slProfileName, slDirectory
+    ) {
+        if (StrLower(slExisting) != slIdentity)
+            slUpdatedHistory.Push(slExisting)
+    }
+    StudyLibraryWriteChapterHistory(
+        slProfileName, slUpdatedHistory, slDirectory
+    )
+}
+
+StudyLibrarySetChapterComboChoices(
+    slChapterCombo, slHistory, slSelected := ""
+) {
+    slSelected := Trim(slSelected)
+    slChoices := []
+    slSelectedIndex := 0
+    for slChapter in slHistory {
+        slChoices.Push(slChapter)
+        if (slSelectedIndex = 0
+            && StrLower(slChapter) = StrLower(slSelected))
+            slSelectedIndex := slChoices.Length
+    }
+    if (slSelected != "" && slSelectedIndex = 0) {
+        slChoices.InsertAt(1, slSelected)
+        slSelectedIndex := 1
+    }
+    slChapterCombo.Delete()
+    if slChoices.Length
+        slChapterCombo.Add(slChoices)
+    if slSelectedIndex
+        slChapterCombo.Choose(slSelectedIndex)
+    else
+        slChapterCombo.Text := ""
+}
+
+StudyLibraryRefreshCurrentChapterDisplay(slState) {
+    if !StudyLibraryStateAlive(slState)
+        return
+    if !slState.Has("currentChapterStatus")
+        return
+    slProfileName := StudyLibraryActiveProfileName()
+    SplitPath(slState["database"],, &slDirectory)
+    slChapter := StudyLibraryCurrentChapter(slProfileName, slDirectory)
+    slState["currentChapterStatus"].Value := "New entries: "
+        . (slChapter != "" ? slChapter : "No chapter")
+}
+
+StudyLibraryCloseCurrentChapterDialog(slState, slDialog, *) {
+    try slDialog.Destroy()
+    if StudyLibraryStateAlive(slState)
+        slState["currentChapterButton"].Enabled := true
+}
+
+StudyLibrarySaveCurrentChapter(
+    slState, slDialog, slChapterCombo, slProfileName, slDirectory,
+    slClear := false, *
+) {
+    slChapter := slClear ? "" : slChapterCombo.Text
+    try {
+        if (slChapter != "")
+            StudyLibraryRememberChapter(
+                slProfileName, slChapter, slDirectory
+            )
+        StudyLibraryWriteCurrentChapter(
+            slProfileName, slChapter, slDirectory
+        )
+    } catch as ex {
+        CPThemedOwnedMessage(
+            slDialog.Hwnd,
+            "The current chapter could not be saved.`n`n" ex.Message,
+            "Current chapter", "ok", "error"
+        )
+        return
+    }
+    StudyLibraryCloseCurrentChapterDialog(slState, slDialog)
+    StudyLibraryRefreshCurrentChapterDisplay(slState)
+    Toast(slClear ? "Current chapter cleared" : "Current chapter saved")
+}
+
+StudyLibraryRemoveSavedChapter(
+    slState, slDialog, slChapterCombo, slProfileName, slDirectory, *
+) {
+    slSelected := Trim(slChapterCombo.Text)
+    slHistory := StudyLibraryReadChapterHistory(slProfileName, slDirectory)
+    slRemaining := [], slFound := false
+    for slChapter in slHistory {
+        if (StrLower(slChapter) = StrLower(slSelected))
+            slFound := true
+        else
+            slRemaining.Push(slChapter)
+    }
+    if !slFound {
+        CPThemedOwnedMessage(
+            slDialog.Hwnd,
+            "Select a remembered chapter from the list first.",
+            "Current chapter", "ok", "info"
+        )
+        return
+    }
+    slCurrent := StudyLibraryCurrentChapter(slProfileName, slDirectory)
+    slRemovesCurrent := StrLower(slCurrent) = StrLower(slSelected)
+    slMessage := "Remove '" slSelected "' from the remembered chapters?"
+        . "`n`nExisting explanations are not changed."
+    if slRemovesCurrent
+        slMessage .= " Because it is currently active, automatic chapter "
+            . "assignment will also be cleared."
+    if (CPThemedOwnedMessage(
+        slDialog.Hwnd, slMessage, "Remove saved chapter",
+        "yesno", "warning"
+    ) != "Yes")
+        return
+    try {
+        StudyLibraryWriteChapterHistory(
+            slProfileName, slRemaining, slDirectory
+        )
+        if slRemovesCurrent {
+            StudyLibraryWriteCurrentChapter(slProfileName, "", slDirectory)
+            slCurrent := ""
+        }
+    } catch as ex {
+        CPThemedOwnedMessage(
+            slDialog.Hwnd,
+            "The saved chapter could not be removed.`n`n" ex.Message,
+            "Current chapter", "ok", "error"
+        )
+        return
+    }
+    StudyLibrarySetChapterComboChoices(
+        slChapterCombo, slRemaining, slCurrent
+    )
+    StudyLibraryRefreshCurrentChapterDisplay(slState)
+}
+
+StudyLibraryClearChapterHistory(
+    slState, slDialog, slChapterCombo, slProfileName, slDirectory, *
+) {
+    slHistory := StudyLibraryReadChapterHistory(slProfileName, slDirectory)
+    if !slHistory.Length {
+        CPThemedOwnedMessage(
+            slDialog.Hwnd, "There are no remembered chapters to clear.",
+            "Current chapter", "ok", "info"
+        )
+        return
+    }
+    if (CPThemedOwnedMessage(
+        slDialog.Hwnd,
+        "Clear all remembered chapters for this Library and Profile?"
+            . "`n`nExisting explanations are not changed. The current chapter "
+            . "remains active until you use Clear current.",
+        "Clear chapter history", "yesno", "warning"
+    ) != "Yes")
+        return
+    try StudyLibraryWriteChapterHistory(slProfileName, [], slDirectory)
+    catch as ex {
+        CPThemedOwnedMessage(
+            slDialog.Hwnd,
+            "The chapter history could not be cleared.`n`n" ex.Message,
+            "Current chapter", "ok", "error"
+        )
+        return
+    }
+    slCurrent := StudyLibraryCurrentChapter(slProfileName, slDirectory)
+    StudyLibrarySetChapterComboChoices(
+        slChapterCombo, [], slCurrent
+    )
+    StudyLibraryRefreshCurrentChapterDisplay(slState)
+}
+
+StudyLibraryOpenCurrentChapter(slState, *) {
+    if !StudyLibraryStateAlive(slState)
+        return
+    slProfileName := StudyLibraryActiveProfileName()
+    slProfileLabel := slProfileName != "" ? slProfileName : "Unsorted"
+    SplitPath(slState["database"],, &slDirectory)
+    slCurrentChapter := StudyLibraryCurrentChapter(
+        slProfileName, slDirectory
+    )
+    slChapterHistory := StudyLibraryReadChapterHistory(
+        slProfileName, slDirectory
+    )
+
+    slState["currentChapterButton"].Enabled := false
+    slDialog := Gui(
+        "+Owner" slState["gui"].Hwnd " +AlwaysOnTop +OwnDialogs",
+        "Current chapter"
+    )
+    slDialog.MarginX := 18, slDialog.MarginY := 16
+    slDialog.SetFont("s10", "Segoe UI")
+    slDialog.Add("Text", "xm w620", "Library: " slState["libraryName"])
+    slDialog.Add("Text", "xm y+6 w620", "Unified Profile: " slProfileLabel)
+    slDialog.Add("Text", "xm y+16 w120", "Current chapter:")
+    slChapterCombo := slDialog.Add(
+        "ComboBox", "x+10 yp-4 w480", slChapterHistory
+    )
+    StudyLibrarySetChapterComboChoices(
+        slChapterCombo, slChapterHistory, slCurrentChapter
+    )
+    slHint := slDialog.Add(
+        "Text", "xm y+14 w620 h56 cGray",
+        "New explanations saved for this Library and Profile receive this "
+        . "chapter automatically. Existing explanations and additional "
+        . "versions are not changed. Previously saved chapters can be selected "
+        . "from the list."
+    )
+    CPRegisterMutedControl(slHint)
+    slSaveButton := slDialog.Add(
+        "Button", "xm y+14 w92 Default", "Save"
+    )
+    slClearButton := slDialog.Add(
+        "Button", "x+8 yp w108", "Clear current"
+    )
+    slRemoveButton := slDialog.Add(
+        "Button", "x+8 yp w120", "Remove saved..."
+    )
+    slClearHistoryButton := slDialog.Add(
+        "Button", "x+8 yp w116", "Clear history..."
+    )
+    slCancelButton := slDialog.Add("Button", "x+8 yp w92", "Cancel")
+    slSaveButton.OnEvent(
+        "Click", StudyLibrarySaveCurrentChapter.Bind(
+            slState, slDialog, slChapterCombo, slProfileName, slDirectory, false
+        )
+    )
+    slClearButton.OnEvent(
+        "Click", StudyLibrarySaveCurrentChapter.Bind(
+            slState, slDialog, slChapterCombo, slProfileName, slDirectory, true
+        )
+    )
+    slRemoveButton.OnEvent(
+        "Click", StudyLibraryRemoveSavedChapter.Bind(
+            slState, slDialog, slChapterCombo, slProfileName, slDirectory
+        )
+    )
+    slClearHistoryButton.OnEvent(
+        "Click", StudyLibraryClearChapterHistory.Bind(
+            slState, slDialog, slChapterCombo, slProfileName, slDirectory
+        )
+    )
+    slCloseCallback := StudyLibraryCloseCurrentChapterDialog.Bind(
+        slState, slDialog
+    )
+    slCancelButton.OnEvent("Click", slCloseCallback)
+    slDialog.OnEvent("Escape", slCloseCallback)
+    slDialog.OnEvent("Close", slCloseCallback)
+    slDialog.Show("AutoSize Center")
+    CPApplyOwnedDialogTheme(slDialog)
+    slChapterCombo.Focus()
 }
 
 StudyLibraryConfiguredName() {
@@ -6947,14 +7359,16 @@ StudyAnkiStatusLabel(saStatus, saManualAddedAt := "") {
 
 StudyAnkiRunBridge(saState, saAction) {
     global pythonExe
+    saOwnerHwnd := 0
+    try saOwnerHwnd := saState["gui"].Hwnd
     saPython := ResolvePath(pythonExe)
     saBridge := A_ScriptDir "\scripts\anki_bridge.py"
     if !(FileExist(saPython) && FileExist(saBridge)) {
-        MsgBox(
+        CPAdaptiveOwnedMessage(
+            saOwnerHwnd,
             "The Anki integration needs valid Python and bridge paths.`n`n"
             . "Python:`n" saPython "`n`nBridge:`n" saBridge,
-            "Study Library - Anki",
-            "OK Icon!"
+            "Study Library - Anki", "ok", "warning", 720
         )
         return false
     }
@@ -6965,7 +7379,10 @@ StudyAnkiRunBridge(saState, saAction) {
     DbgCP("Anki bridge -> " saCommand)
     try saExitCode := RunWait(saCommand, A_ScriptDir, "Hide")
     catch as saError {
-        MsgBox(saError.Message, "Study Library - Anki", "OK Iconx")
+        CPAdaptiveOwnedMessage(
+            saOwnerHwnd, saError.Message,
+            "Study Library - Anki", "ok", "error", 680
+        )
         return false
     }
     return saExitCode = 0
@@ -7171,9 +7588,10 @@ StudyAnkiSaveDialogMapping(saDialogState, saAnnounce := true, *) {
     saMapping := StudyAnkiCurrentMapping(saDialogState)
     if !IsObject(saMapping) {
         if saAnnounce
-            MsgBox(
+            CPAdaptiveOwnedMessage(
+                saDialogState["gui"].Hwnd,
                 "Select a Profile, deck, note type, and fields first.",
-                "Study Library - Anki", "OK Icon!"
+                "Study Library - Anki", "ok", "warning", 560
             )
         return false
     }
@@ -7187,9 +7605,10 @@ StudyAnkiRefreshLinks(saDialogState, *) {
     global CPStudyReaderState
     saMapping := StudyAnkiSaveDialogMapping(saDialogState, false)
     if !IsObject(saMapping) {
-        MsgBox(
+        CPAdaptiveOwnedMessage(
+            saDialogState["gui"].Hwnd,
             "Select a Profile, deck, note type, and fields first.",
-            "Study Library - Anki", "OK Icon!"
+            "Study Library - Anki", "ok", "warning", 560
         )
         return
     }
@@ -7238,10 +7657,11 @@ StudyLibraryOpenAnki(slState, *) {
     global iniPath
     saProfiles := StudyAnkiProfiles(slState)
     if !saProfiles.Length {
-        MsgBox(
+        CPAdaptiveOwnedMessage(
+            slState["gui"].Hwnd,
             "No named Study Library Profiles are available yet.`n`n"
             . "Generate an explanation while a unified Profile is active first.",
-            "Study Library - Anki", "OK Icon!"
+            "Study Library - Anki", "ok", "warning", 650
         )
         return
     }
@@ -9712,16 +10132,98 @@ StudyLibraryRefreshAll(slState, *) {
     StudyLibraryRefreshStorage(slState, true)
 }
 
+StudyLibraryExportWorkbook(slState, *) {
+    global pythonExe, explainGeminiModel, explainOpenAIModel
+    if !(slState.Has("gui") && slState["gui"] && slState["gui"].Hwnd)
+        return
+    slPython := ResolvePath(pythonExe)
+    slExporter := A_ScriptDir "\scripts\study_export.py"
+    if !(FileExist(slPython) && FileExist(slExporter)) {
+        CPThemedOwnedMessage(
+            slState["gui"].Hwnd,
+            "Excel export needs valid Python and exporter paths.`n`n"
+                . "Python:`n" slPython "`n`nExporter:`n" slExporter,
+            "Export Study Library", "ok", "warning"
+        )
+        return
+    }
+    slDefaultName := "JRPG Translator Study Library - "
+        . FormatTime(, "yyyy-MM-dd") ".xlsx"
+    slOutput := FileSelect(
+        "S16", A_Desktop "\" slDefaultName,
+        "Export Study Library", "Excel Workbook (*.xlsx)"
+    )
+    if (slOutput = "")
+        return
+    if (StrLower(SubStr(slOutput, -5)) != ".xlsx")
+        slOutput .= ".xlsx"
+
+    slProvider := CPSyncExplanationSelectionFromControls()
+    slModel := slProvider = "gemini"
+        ? explainGeminiModel : explainOpenAIModel
+    slSettings := StudyCandidatesRecommendationLoadSettings()
+    slCriteriaHex := StudyLibraryHexEncode(
+        slSettings["additionalCriteria"]
+    )
+    slCommand := Format(
+        '"{1}" "{2}" --database "{3}" --preferences-database "{4}" '
+            . '--output "{5}" --provider "{6}" --model "{7}" '
+            . '--learner-level "{8}" --selection-style "{9}" '
+            . '--focus-areas "{10}"',
+        slPython, slExporter, slState["database"],
+        A_ScriptDir "\Settings\anki_candidate_preferences.db",
+        slOutput, slProvider, slModel,
+        slSettings["learnerLevel"], slSettings["selectionStyle"],
+        StudyCandidatesRecommendationFocusCsv(slSettings)
+    )
+    if (slCriteriaHex != "")
+        slCommand .= ' --additional-criteria-hex "' slCriteriaHex '"'
+    slState["exportButton"].Enabled := false
+    slState["status"].Text := "Exporting Study Library..."
+    try {
+        try slExitCode := RunWait(slCommand, A_ScriptDir, "Hide")
+        catch as slError {
+            CPThemedOwnedMessage(
+                slState["gui"].Hwnd,
+                "The Study Library could not be exported.`n`n"
+                    . slError.Message,
+                "Export Study Library", "ok", "error"
+            )
+            return
+        }
+        if (slExitCode != 0) {
+            CPThemedOwnedMessage(
+                slState["gui"].Hwnd,
+                "The Study Library could not be exported "
+                    . "(exporter exit " slExitCode ").",
+                "Export Study Library", "ok", "error"
+            )
+            return
+        }
+        slState["status"].Text := "Exported: " slOutput
+        CPThemedOwnedMessage(
+            slState["gui"].Hwnd,
+            "The Study Library was exported successfully.`n`n" slOutput,
+            "Export complete", "ok", "info"
+        )
+    } finally {
+        if (slState.Has("gui") && slState["gui"] && slState["gui"].Hwnd)
+            slState["exportButton"].Enabled := true
+    }
+}
+
 StudyLibraryRunBridge(slState, slAction, slGroupId := 0, slVersion := 0) {
     global pythonExe
+    slOwnerHwnd := 0
+    try slOwnerHwnd := slState["gui"].Hwnd
     slPython := ResolvePath(pythonExe)
     slBridge := A_ScriptDir "\scripts\study_library.py"
     if !(FileExist(slPython) && FileExist(slBridge)) {
-        MsgBox(
+        CPAdaptiveOwnedMessage(
+            slOwnerHwnd,
             "The Study Library viewer needs valid Python and bridge paths.`n`n"
             . "Python:`n" slPython "`n`nBridge:`n" slBridge,
-            "Study Library",
-            "OK Icon!"
+            "Study Library", "ok", "warning", 720
         )
         return false
     }
@@ -9745,20 +10247,20 @@ StudyLibraryRunBridge(slState, slAction, slGroupId := 0, slVersion := 0) {
         ? "updated" : "read"
     try slExitCode := RunWait(slCommand, A_ScriptDir, "Hide")
     catch as slBridgeError {
-        MsgBox(
+        CPAdaptiveOwnedMessage(
+            slOwnerHwnd,
             "The Study Library could not be " slBridgeOperation ".`n`n"
             . slBridgeError.Message,
-            "Study Library",
-            "OK Iconx"
+            "Study Library", "ok", "error", 680
         )
         return false
     }
     if (slExitCode != 0) {
-        MsgBox(
+        CPAdaptiveOwnedMessage(
+            slOwnerHwnd,
             "The Study Library could not be " slBridgeOperation
             . " (bridge exit " slExitCode ").",
-            "Study Library",
-            "OK Iconx"
+            "Study Library", "ok", "error", 620
         )
         return false
     }
@@ -10653,7 +11155,8 @@ StudyReaderGenerateNewVersion(srNewState, *) {
         "EXPLAIN_SOURCE_TEXT_FILE", "EXPLAIN_SOURCE_PATHS_FILE",
         "EXPLAIN_UPDATE_OVERLAY", "SAVE_EXPLAINS", "SAVE_STUDY_LIBRARY",
         "STUDY_LIBRARY_SCREENSHOTS", "STUDY_LIBRARY_DIR",
-        "STUDY_LIBRARY_PROFILE", "SETTINGS_DIR", "JRPG_DEBUG",
+        "STUDY_LIBRARY_PROFILE", "STUDY_LIBRARY_CHAPTER",
+        "SETTINGS_DIR", "JRPG_DEBUG",
         "PYTHONIOENCODING"
     ]
     srOldEnvironment := Map()
@@ -10697,6 +11200,9 @@ StudyReaderGenerateNewVersion(srNewState, *) {
         EnvSet("STUDY_LIBRARY_SCREENSHOTS", "1")
         EnvSet("STUDY_LIBRARY_DIR", srStudyDir)
         EnvSet("STUDY_LIBRARY_PROFILE", srReaderState["currentProfile"])
+        ; A new version belongs to an existing explanation group. Its manually
+        ; edited or originally assigned chapter must remain untouched.
+        EnvSet("STUDY_LIBRARY_CHAPTER", "")
         EnvSet("SETTINGS_DIR", A_ScriptDir "\\Settings")
         EnvSet("JRPG_DEBUG", debugMode ? "1" : "0")
         EnvSet("PYTHONIOENCODING", "utf-8")
@@ -12329,6 +12835,7 @@ StudyLibrarySaveDetails(
 }
 
 StudyLibraryRemoveVersion(slState, *) {
+    global controlDarkMode
     slIndex := slState["versionDdl"].Value
     if (slState["currentGroupId"] <= 0 || slIndex < 1
         || slIndex > slState["versions"].Length)
@@ -12344,7 +12851,15 @@ StudyLibraryRemoveVersion(slState, *) {
         . "are moved into the Study Library Trash folder. Plain-text copies are "
         . "not deleted."
     slDialogTitle := slOnlyVersion ? "Remove explanation" : "Remove explanation version"
-    if (MsgBox(slQuestion, slDialogTitle, "YesNo Icon! Default2") != "Yes")
+    slOwnerHwnd := 0
+    try slOwnerHwnd := slState["gui"].Hwnd
+    slRemoveChoice := controlDarkMode
+        ? CPThemedOwnedMessage(
+            slOwnerHwnd, slQuestion, slDialogTitle,
+            "yesno", "warning", 680
+        )
+        : MsgBox(slQuestion, slDialogTitle, "YesNo Icon! Default2")
+    if (slRemoveChoice != "Yes")
         return
     if !StudyLibraryRunBridge(
         slState, "remove-version", slState["currentGroupId"], slVersion
@@ -12361,7 +12876,12 @@ StudyLibraryRemoveVersion(slState, *) {
         : "The selected version was removed from the Study Library."
     if (slBackupPath != "")
         slResult .= "`n`nRecovery backup:`n" slBackupPath
-    MsgBox(slResult, "Study Library", "OK Iconi")
+    if controlDarkMode
+        CPThemedOwnedMessage(
+            slOwnerHwnd, slResult, "Study Library", "ok", "info", 720
+        )
+    else
+        MsgBox(slResult, "Study Library", "OK Iconi")
 }
 
 StudyLibraryContextMenu(
@@ -12588,10 +13108,10 @@ StudyLibraryApplyFilters(
     slFromStamp := SubStr(slFromDate.Value, 1, 8) SubStr(slFromTime.Value, 9, 4) "00"
     slToStamp := SubStr(slToDate.Value, 1, 8) SubStr(slToTime.Value, 9, 4) "59"
     if (slDateMode = "custom" && Integer(slToStamp) < Integer(slFromStamp)) {
-        MsgBox(
+        CPAdaptiveOwnedMessage(
+            slDialog.Hwnd,
             "The end of the generated-date range must not be before its start.",
-            "Study Library - Filters",
-            "OK Icon!"
+            "Study Library - Filters", "ok", "warning", 620
         )
         return
     }
@@ -13048,10 +13568,116 @@ StudyLibraryAutoSizeColumn(slState, slColumnIndex, *) {
     }
 }
 
+StudyLibraryColumnIndexByKey(slState, slKey) {
+    if !IsObject(slState) || !slState.Has("columns")
+        return 0
+    for slColumn in slState["columns"] {
+        if (slColumn["key"] = slKey)
+            return slColumn["index"]
+    }
+    return 0
+}
+
+StudyLibraryMeasureListText(slListHwnd, slText) {
+    if !slListHwnd || slText = ""
+        return 0
+    slDc := DllCall("user32\GetDC", "ptr", slListHwnd, "ptr")
+    if !slDc
+        return 0
+    slOldFont := 0
+    try {
+        slFont := DllCall(
+            "user32\SendMessageW", "ptr", slListHwnd,
+            "uint", 0x0031, "ptr", 0, "ptr", 0, "ptr"
+        ) ; WM_GETFONT
+        if slFont
+            slOldFont := DllCall(
+                "gdi32\SelectObject", "ptr", slDc, "ptr", slFont, "ptr"
+            )
+        slSize := Buffer(8, 0)
+        if !DllCall(
+            "gdi32\GetTextExtentPoint32W", "ptr", slDc, "str", slText,
+            "int", StrLen(slText), "ptr", slSize
+        )
+            return 0
+        return NumGet(slSize, 0, "int")
+    } finally {
+        if slOldFont
+            DllCall("gdi32\SelectObject", "ptr", slDc, "ptr", slOldFont)
+        DllCall("user32\ReleaseDC", "ptr", slListHwnd, "ptr", slDc)
+    }
+}
+
+StudyLibraryKeyGrammarInfoTip(slState, slLParam) {
+    if (!StudyLibraryStateAlive(slState) || !slLParam)
+        return
+    try {
+        slGrammarColumn := StudyLibraryColumnIndexByKey(slState, "grammar")
+        if !slGrammarColumn
+            return
+
+        ; NMLVGETINFOTIP places its output pointer after NMHDR and dwFlags.
+        ; Keep the offsets pointer-size aware so this also remains valid if the
+        ; script is launched with a 32-bit AutoHotkey build.
+        slHeaderSize := A_PtrSize * 3
+        slTextPtrOffset := (slHeaderSize + 4 + A_PtrSize - 1)
+            & ~(A_PtrSize - 1)
+        slTextMaxOffset := slTextPtrOffset + A_PtrSize
+        slItemOffset := slTextMaxOffset + 4
+        slSubItemOffset := slItemOffset + 4
+        slItemIndex := NumGet(slLParam, slItemOffset, "int")
+        slSubItemIndex := NumGet(slLParam, slSubItemOffset, "int")
+        if (slItemIndex < 0 || slSubItemIndex != slGrammarColumn - 1)
+            return
+
+        slList := slState["list"]
+        slRow := slItemIndex + 1
+        if (slRow > slList.GetCount())
+            return
+        slText := Trim(slList.GetText(slRow, slGrammarColumn))
+        if slText = ""
+            return
+
+        ; Return a tip only when the stored value is wider than its cell. The
+        ; native ListView tooltip handles its own hover delay and automatically
+        ; disappears on mouse leave, scrolling, or window destruction.
+        slColumnWidth := DllCall(
+            "user32\SendMessageW", "ptr", slList.Hwnd,
+            "uint", 0x101D, "ptr", slSubItemIndex, "ptr", 0, "ptr"
+        ) ; LVM_GETCOLUMNWIDTH
+        if (slColumnWidth <= 0
+            || StudyLibraryMeasureListText(slList.Hwnd, slText) + 16 <= slColumnWidth)
+            return
+
+        slTip := ""
+        for slPart in StrSplit(slText, "•") {
+            slPart := Trim(slPart)
+            if slPart != ""
+                slTip .= (slTip = "" ? "" : "`n") "• " slPart
+        }
+        if slTip = ""
+            slTip := slText
+
+        slTextPtr := NumGet(slLParam, slTextPtrOffset, "ptr")
+        slTextMax := NumGet(slLParam, slTextMaxOffset, "int")
+        if !slTextPtr || slTextMax < 2
+            return
+        slTip := SubStr(slTip, 1, slTextMax - 1)
+        StrPut(slTip, slTextPtr, slTextMax, "UTF-16")
+    }
+}
+
 StudyLibraryHeaderNotify(slState, wParam, lParam, slMsg, slHwnd) {
     if (!StudyLibraryStateAlive(slState) || !lParam)
         return
     try {
+        slNotifyHwnd := NumGet(lParam, 0, "Ptr")
+        slNotifyCode := NumGet(lParam, A_PtrSize * 2, "Int")
+        if (slNotifyHwnd = slState["list"].Hwnd
+            && slNotifyCode = -158) { ; LVN_GETINFOTIPW
+            StudyLibraryKeyGrammarInfoTip(slState, lParam)
+            return
+        }
         if !slState["headerHwnd"]
             slState["headerHwnd"] := DllCall(
                 "user32\SendMessageW", "ptr", slState["list"].Hwnd,
@@ -13217,6 +13843,7 @@ StudyLibraryStateAlive(slState) {
 StudyLibraryRefresh(slState, *) {
     if !StudyLibraryStateAlive(slState)
         return
+    StudyLibraryRefreshCurrentChapterDisplay(slState)
     if (slState.Has("refreshing") && slState["refreshing"])
         return
     slState["refreshing"] := true
@@ -13451,18 +14078,41 @@ StudyLibraryResize(slState, slGui, slMinMax, slWidth, slHeight) {
     slState["refreshButton"].Move(slRefreshX, slToolbarY, slButtonW, slToolbarH)
 
     slFilterY := slToolbarY + slToolbarH + 8
-    slFilterButtonW := 110, slColumnsW := 92
-    slColumnsX := slMargin + slFilterButtonW + 8
-    slEditX := slColumnsX + slColumnsW + 8
-    slStudyX := slEditX + 140 + 8
-    slAnkiX := slStudyX + 132 + 8
+    if (slWidth < 950) {
+        slControlGap := 6
+        slFilterButtonW := 82, slColumnsW := 78, slEditW := 108
+        slStudyW := 104, slAnkiW := 64, slCurrentChapterW := 128
+    } else {
+        slControlGap := 8
+        slFilterButtonW := 110, slColumnsW := 92, slEditW := 140
+        slStudyW := 132, slAnkiW := 82, slCurrentChapterW := 132
+    }
+    slColumnsX := slMargin + slFilterButtonW + slControlGap
+    slEditX := slColumnsX + slColumnsW + slControlGap
+    slStudyX := slEditX + slEditW + slControlGap
+    slAnkiX := slStudyX + slStudyW + slControlGap
+    slCurrentChapterX := slAnkiX + slAnkiW + slControlGap
+    slCurrentChapterStatusX := slCurrentChapterX + slCurrentChapterW + 8
+    slCurrentChapterStatusW := slWidth - slCurrentChapterStatusX - slMargin
     slState["filterButton"].Move(
         slMargin, slFilterY, slFilterButtonW, slToolbarH
     )
     slState["columnsButton"].Move(slColumnsX, slFilterY, slColumnsW, slToolbarH)
-    slState["editDetailsButton"].Move(slEditX, slFilterY, 140, slToolbarH)
-    slState["studyButton"].Move(slStudyX, slFilterY, 132, slToolbarH)
-    slState["ankiButton"].Move(slAnkiX, slFilterY, 82, slToolbarH)
+    slState["editDetailsButton"].Move(slEditX, slFilterY, slEditW, slToolbarH)
+    slState["studyButton"].Move(slStudyX, slFilterY, slStudyW, slToolbarH)
+    slState["ankiButton"].Move(slAnkiX, slFilterY, slAnkiW, slToolbarH)
+    slState["currentChapterButton"].Move(
+        slCurrentChapterX, slFilterY, slCurrentChapterW, slToolbarH
+    )
+    if (slCurrentChapterStatusW >= 90) {
+        slState["currentChapterStatus"].Move(
+            slCurrentChapterStatusX, slFilterY + 4,
+            slCurrentChapterStatusW, 22
+        )
+        slState["currentChapterStatus"].Visible := true
+    } else {
+        slState["currentChapterStatus"].Visible := false
+    }
 
     slContentY := slFilterY + slToolbarH + slGap
     slContentBottom := slHeight - slMargin - slStatusH
@@ -13541,11 +14191,15 @@ StudyLibraryResize(slState, slGui, slMinMax, slWidth, slHeight) {
     slSourceY := slSourceLabelY + 20
     slSourceH := Max(slMinSourceH, slContentBottom - slSourceY)
     slState["source"].Move(slRightX, slSourceY, slRightW, slSourceH)
-    slStorageW := 150
+    slExportW := 120, slStorageW := 150
     slFooterY := slContentBottom + 3
+    slExportX := slMargin + slLeftW - slExportW
     slState["status"].Move(
         slMargin, slFooterY + 4,
-        Max(100, slWidth - slMargin * 2 - slStorageW - 10), 22
+        Max(100, slExportX - slMargin - 10), 22
+    )
+    slState["exportButton"].Move(
+        slExportX, slFooterY, slExportW, 27
     )
     slState["storageButton"].Move(
         slWidth - slMargin - slStorageW, slFooterY, slStorageW, 27
@@ -13636,10 +14290,10 @@ CloseStudyLibraryWelcome(dlg, dontShowAgain, *) {
 OpenStudyLibraryWelcomeAnkiConnect(*) {
     try Run("https://ankiweb.net/shared/info/2055492159")
     catch as ex
-        MsgBox(
+        CPAdaptiveOwnedMessage(
+            0,
             "The AnkiConnect page could not be opened:`n`n" ex.Message,
-            "Study Library",
-            "OK Icon!"
+            "Study Library", "ok", "warning", 680
         )
 }
 
@@ -13654,16 +14308,16 @@ OpenStudyLibraryWelcomeFolder(slState, *) {
             DirCreate(slDirectory)
         Run('explorer.exe "' slDirectory '"')
     } catch as ex {
-        MsgBox(
+        CPAdaptiveOwnedMessage(
+            0,
             "The Study Library folder could not be opened:`n`n" ex.Message,
-            "Study Library",
-            "OK Icon!"
+            "Study Library", "ok", "warning", 680
         )
     }
 }
 
 ShowStudyLibraryWelcome(slState, *) {
-    global iniPath, CPStudyLibraryWelcomeDialog
+    global iniPath, CPStudyLibraryWelcomeDialog, STUDY_VIDEO_URL
 
     if !IsObject(slState) || !slState.Has("gui")
         return
@@ -13738,8 +14392,11 @@ ShowStudyLibraryWelcome(slState, *) {
         "CheckBox", "xm y+16 Checked",
         "Don't show this introduction again"
     )
+    btnStudyVideo := dlg.Add(
+        "Button", "xm y+20 w150", "Watch Study Guide"
+    )
     btnAnkiConnect := dlg.Add(
-        "Button", "xm y+20 w170", "Open AnkiConnect Page"
+        "Button", "x+10 yp w165", "Open AnkiConnect Page"
     )
     btnOpenFolder := dlg.Add(
         "Button", "x+10 yp w180", "Open Study Library Folder"
@@ -13749,6 +14406,9 @@ ShowStudyLibraryWelcome(slState, *) {
     CPStudyLibraryWelcomeDialog := Map(
         "gui", dlg,
         "dontShowAgain", dontShowAgain
+    )
+    btnStudyVideo.OnEvent(
+        "Click", OpenAboutUrl.Bind(STUDY_VIDEO_URL, "the Study Library guide")
     )
     btnAnkiConnect.OnEvent(
         "Click", OpenStudyLibraryWelcomeAnkiConnect
@@ -13837,6 +14497,13 @@ OpenStudyLibraryWindow(slStandalone := false) {
         "Button", "x380 y52 w132 h30 Disabled", "Open in Reader..."
     )
     slAnkiButton := slGui.Add("Button", "x520 y52 w82 h30", "Anki...")
+    slCurrentChapterButton := slGui.Add(
+        "Button", "x610 y52 w132 h30", "Current chapter..."
+    )
+    slCurrentChapterStatus := slGui.Add(
+        "Text", "x750 y57 w356 h22 cGray", "New entries: No chapter"
+    )
+    CPRegisterMutedControl(slCurrentChapterStatus)
     slListOptions := "x14 y94 w430 h530 Grid Multi"
         . " Background" slInitialColors["surface"]
         . " c" slInitialColors["text"]
@@ -13847,7 +14514,13 @@ OpenStudyLibraryWindow(slStandalone := false) {
     ; The table is the largest repainted native surface in this window. Native
     ; ListView double-buffering removes row/grid flashing during live resizing
     ; without changing its dark-mode colors or selection behavior.
-    SendMessage(0x1036, 0x10000, 0x10000, slList.Hwnd)
+    ; Double buffering keeps the native table stable while LVS_EX_INFOTIP lets
+    ; the clipped Key grammar cell expose its full value on hover.
+    slListExtendedStyles := 0x10000 | 0x0400
+    SendMessage(0x1036, slListExtendedStyles, slListExtendedStyles, slList.Hwnd)
+    slListTooltipHwnd := SendMessage(0x104E, 0, 0, slList.Hwnd) ; LVM_GETTOOLTIPS
+    if slListTooltipHwnd
+        SendMessage(0x0418, 0, 520, slListTooltipHwnd) ; TTM_SETMAXTIPWIDTH
     slList.ModifyCol(slColumns.Length + 1, 0)
     slDetailTitle := slGui.Add("Text", "x468 y94 w638 h24 +0x200", "Select an explanation.")
     slDetailTitle.SetFont("s11 Bold")
@@ -13887,6 +14560,9 @@ OpenStudyLibraryWindow(slStandalone := false) {
     slExplanation := slGui.Add("Edit", "x0 y0 w1 h1 Hidden ReadOnly Multi")
     slStatus := slGui.Add("Text", "x14 y736 w1092 h22 cGray", "Loading Study Library...")
     CPRegisterMutedControl(slStatus)
+    slExportButton := slGui.Add(
+        "Button", "x324 y732 w120 h27", "Export..."
+    )
     slStorageButton := slGui.Add(
         "Button", "x956 y732 w150 h27 Disabled", "Storage..."
     )
@@ -13950,6 +14626,8 @@ OpenStudyLibraryWindow(slStandalone := false) {
         "detailTitle", slDetailTitle,
         "studyButton", slStudyButton,
         "ankiButton", slAnkiButton,
+        "currentChapterButton", slCurrentChapterButton,
+        "currentChapterStatus", slCurrentChapterStatus,
         "editDetailsButton", slEditDetailsButton,
         "versionLabel", slVersionLabel,
         "versionDdl", slVersionDdl,
@@ -13976,6 +14654,7 @@ OpenStudyLibraryWindow(slStandalone := false) {
         "sections", [],
         "explanation", slExplanation,
         "status", slStatus,
+        "exportButton", slExportButton,
         "storageButton", slStorageButton,
         "storage", 0,
         "storageLastTick", 0,
@@ -14006,6 +14685,7 @@ OpenStudyLibraryWindow(slStandalone := false) {
     slNewLibraryButton.OnEvent("Click", StudyLibraryOpenManager.Bind(slState))
     slSearchButton.OnEvent("Click", StudyLibraryRefresh.Bind(slState))
     slRefreshButton.OnEvent("Click", StudyLibraryRefreshAll.Bind(slState))
+    slExportButton.OnEvent("Click", StudyLibraryExportWorkbook.Bind(slState))
     slStorageButton.OnEvent("Click", StudyLibraryOpenStorage.Bind(slState))
     slFilterButton.OnEvent("Click", StudyLibraryOpenFilters.Bind(slState))
     slColumnsButton.OnEvent("Click", StudyLibraryOpenColumns.Bind(slState))
@@ -14015,6 +14695,9 @@ OpenStudyLibraryWindow(slStandalone := false) {
     slList.OnEvent("ColClick", StudyLibraryColumnClicked.Bind(slState))
     slStudyButton.OnEvent("Click", StudyLibraryOpenSelectedReader.Bind(slState))
     slAnkiButton.OnEvent("Click", StudyLibraryShowAnkiMenu.Bind(slState))
+    slCurrentChapterButton.OnEvent(
+        "Click", StudyLibraryOpenCurrentChapter.Bind(slState)
+    )
     slPreviousVersion.OnEvent(
         "Click", StudyLibraryStepVersion.Bind(slState, -1)
     )
@@ -15465,6 +16148,27 @@ CPThemedDialogFinish(cpDialogState, cpDialog, cpResult, *) {
     try cpDialog.Destroy()
 }
 
+CPAdaptiveOwnedMessage(ownerHwnd, message, dialogTitle := ""
+    , buttons := "ok", icon := "warning", dialogWidth := 520) {
+    global controlDarkMode
+
+    if controlDarkMode
+        return CPThemedOwnedMessage(
+            ownerHwnd, message, dialogTitle, buttons, icon, dialogWidth
+        )
+
+    cpOptions := buttons = "yesno" ? "YesNo" : "OK"
+    switch icon {
+        case "error":
+            cpOptions .= " Iconx"
+        case "info":
+            cpOptions .= " Iconi"
+        default:
+            cpOptions .= " Icon!"
+    }
+    return MsgBox(message, dialogTitle, cpOptions)
+}
+
 CPThemedOwnedMessage(ownerHwnd, message, dialogTitle := ""
     , buttons := "ok", icon := "warning", dialogWidth := 520) {
     global controlDarkMode
@@ -15541,6 +16245,11 @@ CPThemedOwnedMessage(ownerHwnd, message, dialogTitle := ""
         try DllCall("user32\EnableWindow", "ptr", ownerHwnd, "int", 0)
     try {
         cpDialog.Show("Center")
+        ; Native buttons can finish creating with the light Windows theme only
+        ; after the dialog becomes visible. Reapply the shared dialog theme to
+        ; that final visible state so Study Library information/confirmation
+        ; boxes use the same dark buttons as the rest of the application.
+        CPApplyOwnedDialogTheme(cpDialog)
         try cpInitialButton.Focus()
         while !cpDialogState["closed"]
             Sleep(25)
@@ -18207,7 +18916,7 @@ CPControlPanelCopyData(wParam, lParam, msg, hwnd) {
 }
 
 RefreshGameProfilesList(select := "") {
-    global ddlGameProfile, iniPath
+    global ddlGameProfile, iniPath, CPStudyLibraryState
     list := ListGameProfiles()
     ddlGameProfile.Delete()
     if list.Length {
@@ -18220,6 +18929,8 @@ RefreshGameProfilesList(select := "") {
         ddlGameProfile.Text := ""
     }
     GameProfileUpdateSummary()
+    if StudyLibraryStateAlive(CPStudyLibraryState)
+        StudyLibraryRefreshCurrentChapterDisplay(CPStudyLibraryState)
 }
 
 GameProfileUpdateSummary(*) {
@@ -18435,7 +19146,7 @@ ddlIMG_GM := ui.Add("DropDownList", "x+m w260 0x210", model_gemini_img)
 imgGMInitIdx := ArrIndexOf(model_gemini_img, geminiImgModel)
 ddlIMG_GM.Choose(imgGMInitIdx ? imgGMInitIdx : 1)
 ddlIMG_GM.OnEvent("Change", (*) => (UpdateVars(), SaveAll(), ApplyShotSettings()))
-btnIMG_GM_Add := ui.Add("Button", "x+82 w70", "Add")
+btnIMG_GM_Add := ui.Add("Button", "x+82 w70", "Add...")
 btnIMG_GM_Del := ui.Add("Button", "x+6 w70", "Delete")
 
 ui.Add("Text", "xm y+12 w90", "OpenAI model:")
@@ -18443,14 +19154,14 @@ ddlIMG := ui.Add("DropDownList", "x+m w260 0x210", model_openai_img)
 imgInitIdx := ArrIndexOf(model_openai_img, imgModel)
 ddlIMG.Choose(imgInitIdx ? imgInitIdx : 1)
 ddlIMG.OnEvent("Change", (*) => (UpdateVars(), SaveAll(), ApplyShotSettings()))
-btnIMG_Add := ui.Add("Button", "x+82 w70", "Add")
+btnIMG_Add := ui.Add("Button", "x+82 w70", "Add...")
 btnIMG_Del := ui.Add("Button", "x+6 w70", "Delete")
 
 ; Prompt profile (FIRST)
 ui.Add("Text", "xm y+12 w90", "Prompt:")
 ddlPrompt := ui.Add("DropDownList", "x+m w260 0x210", ListPromptProfiles())
-btnPrEdit  := ui.Add("Button", "x+6 w70", "Edit")
-btnPrNew   := ui.Add("Button", "x+6 w70", "Add")
+btnPrEdit  := ui.Add("Button", "x+6 w70", "Edit...")
+btnPrNew   := ui.Add("Button", "x+6 w70", "Add...")
 btnPrDel   := ui.Add("Button", "x+6 w70", "Delete")
 
 ; Keep captures for the current session, then clear them at the next startup.
@@ -18703,7 +19414,7 @@ ddlEGem := ui.Add("DropDownList", "x+m w300 0x210", model_gemini_explain)
 eGemIdx := ArrIndexOf(model_gemini_explain, explainGeminiModel)
 ddlEGem.Choose(eGemIdx ? eGemIdx : 1)
 ddlEGem.OnEvent("Change", (*) => (UpdateVars(), SaveAll()))
-btnEGem_Add := ui.Add("Button", "x+82 w70", "Add")
+btnEGem_Add := ui.Add("Button", "x+82 w70", "Add...")
 btnEGem_Del := ui.Add("Button", "x+6 w70", "Delete")
 
 ; --- OpenAI row (moved here; use a fresh y step so it sits below Gemini)
@@ -18712,7 +19423,7 @@ ddlEOpenAI := ui.Add("DropDownList", "x+m w300 0x210", model_openai_explain)
 eOpenAIIdx := ArrIndexOf(model_openai_explain, explainOpenAIModel)
 ddlEOpenAI.Choose(eOpenAIIdx ? eOpenAIIdx : 1)
 ddlEOpenAI.OnEvent("Change", (*) => (UpdateVars(), SaveAll()))
-btnEOpenAI_Add := ui.Add("Button", "x+82 w70", "Add")
+btnEOpenAI_Add := ui.Add("Button", "x+82 w70", "Add...")
 btnEOpenAI_Del := ui.Add("Button", "x+6 w70", "Delete")
 
 
@@ -18724,8 +19435,8 @@ SyncExplanationFromIni()
 ; EXPLANATION prompt profile (independent from Screenshot/Audio prompts)
 ui.Add("Text", "xm y+10 w90", "Prompt:")
 ddlEPr     := ui.Add("DropDownList", "x+m w300 0x210", [])
-btnEPrEdit := ui.Add("Button", "x+6 w70", "Edit")
-btnEPrNew  := ui.Add("Button", "x+6 w70", "Add")
+btnEPrEdit := ui.Add("Button", "x+6 w70", "Edit...")
+btnEPrNew  := ui.Add("Button", "x+6 w70", "Add...")
 btnEPrDel  := ui.Add("Button", "x+6 w70", "Delete")
 
 ; anchor to the current Sectionâ€™s left edge, keep same row spacing
@@ -18916,7 +19627,7 @@ CPRegisterMutedControl(txtGameProfileGlobal)
 
 ui.Add("Text", "xm y+24 w120", "Profile:")
 ddlGameProfile := ui.Add("DropDownList", "x+m w330 0x210", [])
-btnGameProfileAdd := ui.Add("Button", "x+8 w80", "Add")
+btnGameProfileAdd := ui.Add("Button", "x+8 w80", "Add...")
 btnGameProfileSave := ui.Add("Button", "x+6 w110", "Save Current")
 btnGameProfileApply := ui.Add("Button", "x+6 w80", "Apply")
 btnGameProfileDelete := ui.Add("Button", "x+6 w80", "Delete")

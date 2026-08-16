@@ -347,6 +347,7 @@ def archive_study_library_entry(
     model: str,
     prompt_profile: str,
     key_grammar: str,
+    chapter: str,
     include_screenshots: bool,
     text_archive_path: str = "",
 ) -> None:
@@ -400,17 +401,18 @@ def archive_study_library_entry(
             )
             group_id = int(cursor.lastrowid)
 
-        # Populate Speaker only when this source group is first created. Later
-        # versions must never overwrite a value that was edited or deliberately
-        # cleared by the user in the Study Library.
+        # Populate deterministic group metadata only when this source group is
+        # first created. Later versions must never overwrite values that were
+        # edited or deliberately cleared by the user in the Study Library.
         if created_group:
+            initial_chapter = chapter.strip()[:240]
             detected_speaker = extract_strict_speaker_header(jp)
-            if detected_speaker:
+            if initial_chapter or detected_speaker:
                 connection.execute(
                     "INSERT INTO explanation_group_details("
-                    "group_id, speaker, updated_at"
-                    ") VALUES(?, ?, ?)",
-                    (group_id, detected_speaker, created_at),
+                    "group_id, chapter, speaker, updated_at"
+                    ") VALUES(?, ?, ?, ?)",
+                    (group_id, initial_chapter, detected_speaker, created_at),
                 )
 
         version = int(
@@ -1089,6 +1091,7 @@ if env_flag("SAVE_STUDY_LIBRARY"):
             model=(GEM_MODEL if PROVIDER == "gemini" else MODEL_NAME),
             prompt_profile=os.environ.get("EXPLAIN_PROMPT_PROFILE", "").strip(),
             key_grammar=key_grammar,
+            chapter=os.environ.get("STUDY_LIBRARY_CHAPTER", "").strip(),
             include_screenshots=env_flag("STUDY_LIBRARY_SCREENSHOTS", True),
             text_archive_path=text_archive_path,
         )

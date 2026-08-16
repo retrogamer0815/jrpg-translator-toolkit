@@ -185,7 +185,7 @@ namespace JrpgTranslator.LaunchBox
             };
             Activated += (_, _) => ResetControllerNavigation();
             Deactivated += (_, _) => ResetControllerNavigation();
-            Closed += (_, _) => _controllerTimer.Stop();
+            Closed += HandleClosed;
 
             NavigateTo(ResolveInitialDirectory(initialPath, mode));
         }
@@ -497,6 +497,20 @@ namespace JrpgTranslator.LaunchBox
 
         private void HandleControllerTick(object? sender, EventArgs e)
         {
+            try
+            {
+                HandleControllerTickCore();
+            }
+            catch (Exception exception)
+            {
+                RuntimeLog.Write("Big Box path-browser controller polling was disabled: " + exception.Message);
+                _controllerTimer.Stop();
+                ResetControllerNavigation();
+            }
+        }
+
+        private void HandleControllerTickCore()
+        {
             if (!IsActive || !XInputController.TryReadNavigationState(out ControllerNavigationState state))
             {
                 ResetControllerNavigation();
@@ -555,6 +569,13 @@ namespace JrpgTranslator.LaunchBox
             }
 
             _controllerPreviousState = state;
+        }
+
+        private void HandleClosed(object? sender, EventArgs e)
+        {
+            _controllerTimer.Stop();
+            _controllerTimer.Tick -= HandleControllerTick;
+            ResetControllerNavigation();
         }
 
         private void DispatchNavigation(ControllerNavigationCommand command, bool native)

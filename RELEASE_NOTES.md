@@ -1,120 +1,101 @@
-# JRPG Translator v0.9.4
+# JRPG Translator v0.9.5
 
-Version 0.9.4 introduces the **Study Library** and **Study Reader**, turning
-saved explanations into an organized, searchable collection with their source
-screenshots and gameplay context. The release also improves controller-first
-operation, low-resolution compatibility, LaunchBox setup, and interface
-polish.
+Version 0.9.5 turns the Study Library into a fuller post-game learning workflow.
+The main addition is optional AnkiConnect integration for reviewing saved
+explanations, selecting useful sentences or vocabulary, and creating cards with
+their original gameplay context. The release also adds AI-assisted study tools,
+spreadsheet export, richer metadata, and a broad reliability and interface pass.
 
 ## Highlights
 
-### A persistent Study Library
+### Anki-assisted review
 
-The Explanation tab can now save explanations to a local SQLite Study Library.
-Each entry keeps the original Japanese, complete explanation, parsed sections,
-Profile, provider, model, prompt, metadata, and optional source screenshots.
+The Study Library can now connect to a running Anki instance through
+AnkiConnect. A read-only link check maps a unified JRPG Translator Profile to an
+Anki deck or parent deck, note type, and fields, then finds exact normalized
+Japanese matches across its subdecks.
 
-Repeated explanations of the same Japanese source are grouped as versions, so
-trying a second or third explanation no longer creates unrelated entries.
-Optional plain-text copies remain available and use `_v02`, `_v03`, and later
-suffixes for repeated attempts.
+From the Library or Reader you can:
 
-The Library provides:
+- Add the complete explanation as an Anki card.
+- Use Japanese without attached reading assistance on the front.
+- Include a compact source screenshot on the back.
+- Navigate long explanation cards with a generated section index and
+  back-to-top links.
+- Select a vocabulary line and create an editable vocabulary card using a
+  cleaned dictionary-form front.
+- Ask the selected AI provider to generate or regenerate a learner-friendly
+  example sentence in Japanese, Japanese with readings, and the explanation
+  language.
 
-- Search and filters for Profile, chapter, speaker, tags, date/time, and Anki
-  status.
-- Sortable, configurable columns with remembered widths.
-- Bulk editing of chapter, speaker, tags, and `Added to Anki` state.
-- Optional source screenshots and storage-size information.
-- Multiple named libraries that can be created, switched, renamed, archived,
-  and restored.
-- Profile-based library selection, including Profiles loaded by the LaunchBox
-  plugin.
+The new **Review for Anki** window collects sentence and vocabulary candidates,
+supports new/backlog review, hides existing Anki matches, remembers finished
+reviews, and can globally ignore vocabulary that should never be suggested
+again.
 
-### A dedicated Study Reader
+### AI recommendations
 
-The new Reader puts the explanation itself first and keeps screenshots,
-original Japanese, and metadata available as context. It supports navigation
-between entries, versions, screenshots, and parsed sections such as the natural
-translation, detailed analysis, vocabulary, nuance, and takeaways.
+Candidate recommendations are cached and can be generated or regenerated for a
+chosen learner level and selection style. Optional settings cover vocabulary,
+grammar, natural phrasing, reading comprehension, and free-form guidance.
 
-Explanations can be edited by section or as a complete document. Manual edits
-are marked and can be reverted to the original model response.
+Each candidate receives a score and short reason in the language of its saved
+explanation. Vocabulary scoring considers the dictionary/base form even when
+the saved line begins with an inflected form.
 
-A new **Copy...** menu copies the current section or complete explanation. When
-viewing Original Japanese, it can also copy the text without attached hiragana
-readings—for example, `お城(しろ)には行(い)けました？` becomes
-`お城には行けました？`—while leaving ordinary parentheses intact.
+### Better Study Library organization
 
-Standalone Study Library and Study Reader launchers are included for reviewing
-material without opening the main control panel first.
+- Set an active chapter once and apply it automatically to new explanations;
+  previously used chapters remain selectable and manageable.
+- Properly formatted speaker headers can populate the Speaker field without
+  guessing unmarked dialogue.
+- New explanations store concise **Key grammar** metadata for quick review,
+  filtering, tooltips, and export.
+- Column order, width, and visibility are remembered.
+- Right-click menus expose the same safe actions as the Library and candidate
+  buttons.
+- Export the Library and Anki review data to an Excel workbook with native date/
+  time values.
 
-### Better explanation saving and provider selection
+### Reader improvements
 
-The Explanation tab now separates:
+Create a new explanation version from the Reader using a different provider,
+model, or shared prompt without changing the main Explanation-tab model.
+Navigation wraps between the first and last entries, retains the current section
+when changing entries or versions, and avoids flashing the full explanation
+during the switch.
 
-- **Save explanations to Study Library**
-- **Include source screenshots in Study Library**
-- **Save plain-text copies**
+### Translation and interface polish
 
-Plain-text copies are sorted under the active unified Profile. Without an active
-Profile, they remain in the main `Settings\Explanations` folder.
+- Speaker-name coloring now handles every formatted speaker header in multi-
+  speaker output.
+- Gemini/OpenAI failures are shown promptly in the overlays instead of leaving
+  an indefinite hourglass.
+- Dark-mode coverage now includes more dropdowns, dialogs, notifications,
+  context menus, tables, scrollbars, and Anki/recommendation windows.
+- Translucent tab switching no longer briefly exposes the desktop.
+- Study windows, capture-region selection, tables, and high-DPI layouts received
+  additional repaint, spacing, focus, and clipping fixes.
 
-An intermittent provider-state bug could incorrectly request an OpenAI key even
-when Gemini was selected. Requests now synchronize the visible provider and
-model before credential validation.
+### Stability and platform updates
 
-### Controller-first control-panel navigation
+This release includes a project-wide AHK lifetime audit: timers and background
+callbacks now verify that their GUI still exists, candidate refreshes tolerate
+the window closing, controller polling is guarded against disconnects, and
+temporary Study bridge output is isolated per operation.
 
-- LB / L1 and RB / R1 move between the main tabs while the control panel is
-  active.
-- Translation/explanation actions assigned to those buttons are suppressed
-  while the panel is being navigated, including matching JoyToKey hotkeys.
-- Assignment dialogs suppress tab switching while capturing a controller
-  button.
-- Held arrow keys sent by JoyToKey now repeat naturally in sliders and color
-  controls.
-- Mapped numpad keys can no longer overwrite **Maximum PNG size** merely while
-  navigating past the field.
+The LaunchBox plugin now contains additional host-safety guards and validates
+stored process IDs before cleanup. The bundled runtime target has moved to
+64-bit Python 3.12 with refreshed active dependencies; unused legacy Google
+Vision/client packages were removed and `openpyxl` was added for Excel export.
 
-Temporary screenshots selected for deletion are now cleaned at application
-startup, after the previous session had a chance to import them into the Study
-Library.
+## Notes
 
-### Better 720p and high-scaling support
-
-The main control panel, Study Library, Study Reader, and LaunchBox setup window
-have received additional high-DPI and low-resolution work. The LaunchBox window
-uses a scrollbar only when needed, keeps Save and Cancel reachable, and no
-longer skips the JoyToKey section while scrolling.
-
-Profile dropdowns in the plugin now correctly commit keyboard/controller
-selections with Enter or Space.
-
-### Interface and reliability polish
-
-- Improved dark-mode coverage across Study windows and dialogs.
-- Remembered Study Library and Reader size, position, columns, and reading
-  state.
-- Reduced startup flashes, window jumping, resize trails, and stale screenshot
-  placement.
-- Fixed the first Study Library double-click after opening.
-- Hardened redraw timers and shutdown callbacks against closed or destroyed
-  controls.
-- Prevented the brief themed-dialog warning that could appear while exiting.
-
-## Compatibility and upgrade notes
-
-- Existing v0.9.3 settings and unified Profiles remain usable.
-- The default database is created locally at
-  `Settings\Study Library\study_library.db` when Study Library saving is used.
-- Additional libraries are kept under `Settings\Study Libraries`.
-- No existing plain-text explanation files are removed.
-- API requests still use the selected OpenAI or Gemini provider; the Study
-  Library itself is local and does not require another service.
-
-## Included source
-
-The repository includes the AutoHotkey control panel and overlays, Python
-translation/explanation and Study Library helpers, standalone Study launchers,
-and the LaunchBox / Big Box integration source.
+- Anki integration requires the AnkiConnect add-on and a running Anki instance.
+- Existing Study Libraries are upgraded in place; database backups are created
+  before destructive Library operations.
+- AI recommendations are optional and cached. Refreshing or reopening the review
+  window does not repeat API calls unless recommendations are explicitly
+  generated again.
+- Existing explanations remain usable. Key grammar and automatically captured
+  speaker/chapter metadata apply to newly generated entries.

@@ -3,7 +3,7 @@
 This preview plugin integrates JRPG Translator and JoyToKey with LaunchBox and
 Big Box on a per-game basis.
 
-Companion source snapshot: JRPG Translator v0.9.5 testing.
+Companion source snapshot: JRPG Translator v0.9.5.
 
 Current behavior:
 

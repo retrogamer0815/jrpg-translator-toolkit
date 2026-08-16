@@ -2,6 +2,119 @@
 
 All notable changes to JRPG Translator are documented here.
 
+## 0.9.5 - 2026-08-16
+
+This release expands the Study Library into a practical Anki-assisted review
+workflow, adds AI-assisted study features, improves explanation metadata and
+export, and includes a broad stability and interface-polish pass.
+
+### Anki integration and review workflow
+
+- Added AnkiConnect integration with connection testing, Profile-to-deck
+  mapping, note-type and field mapping, and exact normalized Japanese matching
+  across a parent deck and its subdecks.
+- Added full-explanation card creation from both the Study Library and Study
+  Reader. Japanese with attached readings can be normalized for the card front,
+  while the complete explanation is placed on the back.
+- Added optional compact JPEG source screenshots to Anki cards. Full
+  explanation cards also receive section headings and a working table of
+  contents with back-to-top links.
+- Added vocabulary-card creation from a selected vocabulary line, with local
+  parsing, editable Front/Back previews, cleaned dictionary-form fronts, deck
+  selection, duplicate protection, and optional source screenshots.
+- Added AI-generated example sentences for vocabulary cards. Generated examples
+  include Japanese without readings, Japanese with readings, and a translation;
+  they can be regenerated without replacing the vocabulary definition.
+- Added the **Review for Anki** window with separate sentence and vocabulary
+  candidate tables, new-since-last-review and backlog views, finishing a review,
+  opening the source in the Reader, adding the selected item, and globally
+  ignoring unwanted vocabulary.
+- Added cached AI recommendations for sentence and vocabulary candidates,
+  including configurable learner level, selection style, study focus, optional
+  guidance, rerating, recommendation scores, and concise reasoning in the
+  explanation language.
+- Recommendation scoring now considers dictionary/base forms represented by an
+  inflected vocabulary line instead of judging only the surface form.
+- Added clearer stale-link guidance when a card was removed in Anki and the
+  Study Library status needs to be refreshed.
+
+### Study Library and Study Reader
+
+- Added a first-run Study Library introduction with setup guidance, AnkiConnect
+  information, documentation access, and a dedicated video guide.
+- Added a compact **Anki...** menu in the Library for link checking, review, and
+  adding the selected full explanation; matching actions are also available
+  from the table context menu.
+- Added right-click menus to the Library and Anki candidate tables using their
+  existing safe actions.
+- Added creation of a new explanation version directly from the Reader, with an
+  independently selected provider/model and shared prompt management. The main
+  Explanation-tab model selection is not changed.
+- Entry and version navigation now wraps at both ends, preserves the selected
+  explanation section, and switches without briefly showing the full
+  explanation.
+- Added persistent column order in addition to the existing column visibility
+  and width settings.
+- Added automatic speaker metadata when a properly formatted speaker header is
+  present. Mixed Japanese scripts and `?` mystery-speaker labels are supported;
+  unformatted text is not guessed.
+- Added an active chapter value with remembered chapter history so newly saved
+  explanations can be categorized automatically and corrected in bulk later.
+- Added **Key grammar** metadata for newly generated explanations, a Library
+  column, full-cell tooltips, filtering/export support, and conservative
+  extraction that does not alter the explanation itself.
+- Added `.xlsx` export for the Library table and Anki review data, including
+  spreadsheet-native date/time values and recommendation details.
+- Added safer per-operation bridge output and temporary workspaces to prevent
+  overlapping Library/Anki operations from reading stale results.
+
+### Translation and explanation improvements
+
+- All valid speaker headers in a translation can now use the configured speaker
+  color; coloring is no longer limited to the first speaker in multi-speaker or
+  multi-screenshot output.
+- Provider and model errors are surfaced promptly in the overlays instead of
+  leaving the hourglass visible indefinitely.
+- Improved Gemini/OpenAI client lifetime handling and tolerant parsing for
+  example-sentence responses.
+- Added structured key-grammar metadata to newly saved Study Library
+  explanations without requiring changes to existing explanation prompts.
+
+### Interface and accessibility polish
+
+- Expanded dark-mode coverage across dropdowns, tables, buttons, dialogs,
+  notifications, context menus, scrollbars, recommendation preferences, and
+  Anki windows while preserving the existing light theme.
+- Improved table headers in dark mode with a softer high-contrast background
+  and clearer header typography.
+- Reduced control-panel startup flicker and fixed translucent tab switching so
+  the desktop is no longer briefly exposed at opacity values below 100%.
+- Reduced redraw flashes and resize artifacts in the Study Library and Reader,
+  while keeping screenshots synchronized with their layouts.
+- Added safer table double-click focus, persistent Study-window position/size,
+  better fixed layouts, clearer button labels/ellipsis usage, and numerous
+  clipping and spacing corrections.
+- Fixed capture-region selection z-order flicker when the selection overlaps
+  its instruction overlay.
+
+### Controller, LaunchBox, and stability
+
+- Migrated remaining legacy controller polling to safer snapshot-based WinMM/
+  XInput handling, with disconnect guards and timer exception containment.
+- Hardened GUI/timer lifetime checks so closing Study, Anki, or main windows
+  during refreshes and background work no longer accesses destroyed controls.
+- Added shutdown guards and fixed intermittent unattended crashes in controller
+  polling and Study candidate refresh paths.
+- Hardened LaunchBox plugin callbacks so setup/controller failures cannot stop a
+  game launch or destabilize LaunchBox.
+- LaunchBox cleanup is now idempotent and validates expected process names
+  before terminating stored PIDs, protecting against PID reuse.
+- Improved controller activation of **Open JRPG Translator...** and lifecycle
+  handling in the LaunchBox path/setup dialogs.
+- Migrated the bundled runtime target to 64-bit Python 3.12 and refreshed the
+  actively used API/audio packages. Removed unused legacy Google Vision/client
+  dependencies and added `openpyxl` for spreadsheet export.
+
 ## 0.9.4 - 2026-08-08
 
 This release adds a persistent Study Library and dedicated Study Reader for

@@ -13,7 +13,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.Win32;
 
-// Companion source snapshot: JRPG Translator v0.9.5 testing.
+// Companion source snapshot: JRPG Translator v0.9.5.
 
 namespace JrpgTranslator.LaunchBox
 {
@@ -307,7 +307,7 @@ namespace JrpgTranslator.LaunchBox
             };
             Activated += (_, _) => ResetControllerNavigation();
             Deactivated += (_, _) => ResetControllerNavigation();
-            Closed += (_, _) => _controllerTimer.Stop();
+            Closed += HandleClosed;
 
             RefreshTranslatorProfiles(game.TranslatorProfile);
             RefreshJoyToKeyProfiles(game.JoyToKeyProfile);
@@ -317,12 +317,25 @@ namespace JrpgTranslator.LaunchBox
 
         private void BringFocusedControlIntoView(object sender, KeyboardFocusChangedEventArgs e)
         {
-            if (sender is not FrameworkElement element)
+            if (!IsLoaded || sender is not FrameworkElement element)
             {
                 return;
             }
 
-            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(element.BringIntoView));
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+            {
+                if (IsLoaded && element.IsLoaded)
+                {
+                    element.BringIntoView();
+                }
+            }));
+        }
+
+        private void HandleClosed(object? sender, EventArgs e)
+        {
+            _controllerTimer.Stop();
+            _controllerTimer.Tick -= HandleControllerTick;
+            ResetControllerNavigation();
         }
 
         private void FitWindowToVisibleWorkArea()
@@ -826,6 +839,20 @@ namespace JrpgTranslator.LaunchBox
 
         private void HandleControllerTick(object? sender, EventArgs e)
         {
+            try
+            {
+                HandleControllerTickCore();
+            }
+            catch (Exception exception)
+            {
+                RuntimeLog.Write("Setup-window controller polling was disabled: " + exception.Message);
+                _controllerTimer.Stop();
+                ResetControllerNavigation();
+            }
+        }
+
+        private void HandleControllerTickCore()
+        {
             if (!IsActive || !XInputController.TryReadNavigationState(out ControllerNavigationState state))
             {
                 ResetControllerNavigation();
@@ -986,7 +1013,9 @@ namespace JrpgTranslator.LaunchBox
             // duplicate activation from producing a visible open/close flicker.
             Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
             {
-                if (ReferenceEquals(profile, _guardedControllerProfile)
+                if (IsLoaded
+                    && profile.IsLoaded
+                    && ReferenceEquals(profile, _guardedControllerProfile)
                     && Environment.TickCount64 <= _guardedControllerProfileUntil)
                 {
                     profile.IsDropDownOpen = true;
@@ -1066,6 +1095,11 @@ namespace JrpgTranslator.LaunchBox
             else if (_refreshTranslatorProfiles.IsKeyboardFocused)
             {
                 _refreshTranslatorProfiles.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                return true;
+            }
+            else if (_openTranslator.IsKeyboardFocused)
+            {
+                _openTranslator.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 return true;
             }
             else if (_joyToKeyEnabled.IsKeyboardFocused)

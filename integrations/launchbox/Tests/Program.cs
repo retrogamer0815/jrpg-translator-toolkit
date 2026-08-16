@@ -8,7 +8,7 @@ using System.Windows.Controls;
 using JrpgTranslator.LaunchBox;
 using Unbroken.LaunchBox.Plugins;
 
-// Companion source snapshot: JRPG Translator v0.9.5 testing.
+// Companion source snapshot: JRPG Translator v0.9.5.
 
 internal static class Program
 {

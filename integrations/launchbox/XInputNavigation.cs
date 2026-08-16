@@ -87,23 +87,26 @@ namespace JrpgTranslator.LaunchBox
             {
                 return XInputGetState14(userIndex, out state) == ErrorSuccess;
             }
-            catch (DllNotFoundException)
+            catch (Exception exception) when (IsUnavailableXInputException(exception))
             {
                 try
                 {
                     return XInputGetState910(userIndex, out state) == ErrorSuccess;
                 }
-                catch (DllNotFoundException)
+                catch (Exception fallbackException) when (IsUnavailableXInputException(fallbackException))
                 {
                     state = default;
                     return false;
                 }
             }
-            catch (EntryPointNotFoundException)
-            {
-                state = default;
-                return false;
-            }
+        }
+
+        private static bool IsUnavailableXInputException(Exception exception)
+        {
+            return exception is DllNotFoundException
+                || exception is EntryPointNotFoundException
+                || exception is BadImageFormatException
+                || exception is SEHException;
         }
 
         [DllImport("xinput1_4.dll", EntryPoint = "XInputGetState")]
@@ -141,6 +144,7 @@ namespace JrpgTranslator.LaunchBox
         private readonly DispatcherTimer _timer;
         private ControllerNavigationState _previousState;
         private bool _baselineReady;
+        private bool _disposed;
 
         internal XInputDialogCancelScope(Window owner)
         {
@@ -155,31 +159,53 @@ namespace JrpgTranslator.LaunchBox
 
         public void Dispose()
         {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
             _timer.Stop();
+            _timer.Tick -= HandleTick;
         }
 
         private void HandleTick(object? sender, EventArgs e)
         {
-            if (!XInputController.TryReadNavigationState(out ControllerNavigationState state))
+            if (_disposed)
             {
-                _baselineReady = false;
-                _previousState = default;
                 return;
             }
 
-            if (!_baselineReady)
+            try
             {
+                if (!XInputController.TryReadNavigationState(out ControllerNavigationState state))
+                {
+                    _baselineReady = false;
+                    _previousState = default;
+                    return;
+                }
+
+                if (!_baselineReady)
+                {
+                    _previousState = state;
+                    _baselineReady = true;
+                    return;
+                }
+
+                if (state.Cancel && !_previousState.Cancel)
+                {
+                    CloseOwnedDialog();
+                }
+
                 _previousState = state;
-                _baselineReady = true;
-                return;
             }
-
-            if (state.Cancel && !_previousState.Cancel)
+            catch (Exception exception)
             {
-                CloseOwnedDialog();
+                // Native controller polling is optional. Disable it for this dialog
+                // instead of allowing a timer exception to escape into LaunchBox.
+                RuntimeLog.Write("Native dialog controller polling was disabled: " + exception.Message);
+                Dispose();
             }
-
-            _previousState = state;
         }
 
         private void CloseOwnedDialog()
