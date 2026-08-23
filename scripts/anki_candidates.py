@@ -959,6 +959,8 @@ def generate_recommendations(
     focus_areas: str = "vocabulary,grammar,natural_phrasing,reading",
     additional_criteria_hex: str = "",
     force: bool = False,
+    candidate_kind: str = "",
+    candidate_key: str = "",
 ) -> int:
     status_path = output_dir / "candidate_recommendation_status.tsv"
     error_path = output_dir / "candidate_recommendation_error.txt"
@@ -981,13 +983,27 @@ def generate_recommendations(
             selection_style = "balanced"
         focus_areas = focus_areas.strip().lower()
         additional_criteria = decode_optional_hex(additional_criteria_hex)
+        candidate_kind = candidate_kind.strip().lower()
+        candidate_key = candidate_key.strip().lower()
+        if bool(candidate_kind) != bool(candidate_key):
+            raise ValueError("Both the candidate kind and key are required.")
+        if candidate_kind and candidate_kind not in {"sentence", "vocabulary"}:
+            raise ValueError("The selected candidate kind is invalid.")
+        if candidate_key and not re.fullmatch(r"[0-9a-f]{64}", candidate_key):
+            raise ValueError("The selected candidate key is invalid.")
 
         pending: list[dict[str, str]] = []
         sentence_path = output_dir / "candidate_sentences.tsv"
         if sentence_path.is_file():
             for line in sentence_path.read_text(encoding="utf-8").splitlines():
                 row = line.split("\t")
-                if len(row) < 9 or (not force and int(row[6]) >= 0):
+                if len(row) < 9:
+                    continue
+                if candidate_key and (
+                    candidate_kind != "sentence" or row[5].lower() != candidate_key
+                ):
+                    continue
+                if not force and int(row[6]) >= 0:
                     continue
                 pending.append(
                     {
@@ -1007,7 +1023,13 @@ def generate_recommendations(
         if vocabulary_path.is_file():
             for line in vocabulary_path.read_text(encoding="utf-8").splitlines():
                 row = line.split("\t")
-                if len(row) < 12 or (not force and int(row[9]) >= 0):
+                if len(row) < 12:
+                    continue
+                if candidate_key and (
+                    candidate_kind != "vocabulary" or row[8].lower() != candidate_key
+                ):
+                    continue
+                if not force and int(row[9]) >= 0:
                     continue
                 pending.append(
                     {
@@ -1124,6 +1146,30 @@ def generate_recommendations(
         return 2
 
 
+def clear_recommendation(
+    preferences_database: Path, candidate_kind: str, candidate_key: str
+) -> int:
+    """Remove one cached AI assessment without altering source or Anki data."""
+    candidate_kind = candidate_kind.strip().lower()
+    candidate_key = candidate_key.strip().lower()
+    if candidate_kind not in {"sentence", "vocabulary"}:
+        raise ValueError("The selected candidate kind is invalid.")
+    if not re.fullmatch(r"[0-9a-f]{64}", candidate_key):
+        raise ValueError("The selected candidate key is invalid.")
+    ensure_triage_schema(preferences_database)
+    connection = connect_write(preferences_database)
+    try:
+        connection.execute(
+            f"DELETE FROM {RECOMMENDATION_TABLE} "
+            "WHERE candidate_hash = ? AND candidate_kind = ?",
+            (candidate_key, candidate_kind),
+        )
+        connection.commit()
+        return 0
+    finally:
+        connection.close()
+
+
 def finish_review(database: Path, reviewed_through: str) -> int:
     if not reviewed_through.strip():
         raise ValueError("The review snapshot timestamp is missing.")
@@ -1187,6 +1233,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(
             "snapshot",
             "generate-recommendations",
+            "clear-recommendation",
             "finish-review",
             "hide-vocabulary",
             "restore-vocabulary",
@@ -1217,6 +1264,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--additional-criteria-hex", default="")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--candidate-kind", default="")
+    parser.add_argument("--candidate-key", default="")
     return parser
 
 
@@ -1248,6 +1297,14 @@ def main() -> int:
             arguments.focus_areas,
             arguments.additional_criteria_hex,
             arguments.force,
+            arguments.candidate_kind,
+            arguments.candidate_key,
+        )
+    if arguments.command == "clear-recommendation":
+        return clear_recommendation(
+            arguments.preferences_db,
+            arguments.candidate_kind,
+            arguments.candidate_key,
         )
     if arguments.command == "finish-review":
         return finish_review(arguments.db, arguments.reviewed_through)

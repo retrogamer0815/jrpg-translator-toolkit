@@ -2,7 +2,7 @@
 #SingleInstance Off
 #Warn
 #NoTrayIcon
-;@Ahk2Exe-SetVersion 0.9.5.0
+;@Ahk2Exe-SetVersion 0.9.6.0
 ;@Ahk2Exe-SetName JRPG Translator
 ;@Ahk2Exe-SetDescription JRPG Translator
 ;@Ahk2Exe-SetCopyright Copyright (c) 2025 retrogamer0815
@@ -16,7 +16,7 @@ global CP_START_PROFILE := ""
 global CP_START_TRANSLATOR := false
 global CP_STUDY_START_MODE := ""
 global CP_STUDY_ONLY_PROCESS := false
-global APP_VERSION := "0.9.5"
+global APP_VERSION := "0.9.6"
 global PROJECT_URL := "https://github.com/retrogamer0815/jrpg-translator-toolkit"
 global BUG_REPORT_URL := PROJECT_URL "/issues/new"
 global WRITTEN_GUIDE_URL := PROJECT_URL "#quick-start"
@@ -9051,7 +9051,19 @@ StudyCandidatesRunBridge(scState, scAction, scFront := "") {
             && scState.Has("forceRecommendations")
             && scState["forceRecommendations"])
             scCommand .= " --force"
+        if (scAction = "generate-recommendations"
+            && scState.Has("targetRecommendationKey")
+            && scState["targetRecommendationKey"] != "")
+            scCommand .= ' --candidate-kind "'
+                . scState["targetRecommendationKind"] '"'
+                . ' --candidate-key "'
+                . scState["targetRecommendationKey"] '"'
     }
+    else if (scAction = "clear-recommendation")
+        scCommand .= ' --candidate-kind "'
+            . scState["targetRecommendationKind"] '"'
+            . ' --candidate-key "'
+            . scState["targetRecommendationKey"] '"'
     else if (scAction = "finish-review")
         scCommand .= ' --reviewed-through "' scState["snapshotThrough"] '"'
     else if (scAction = "hide-vocabulary" || scAction = "restore-vocabulary")
@@ -9151,11 +9163,15 @@ StudyCandidatesUpdateActions(scState, *) {
     scState["triageButton"].Enabled := scEnabled && scVocabulary
     scHasCandidates := scState["allSentences"].Length
         + scState["allVocabulary"].Length > 0
+    scGenerating := scState.Has("generatingRecommendations")
+        && scState["generatingRecommendations"]
     scState["recommendButton"].Enabled := !scHidden && scHasCandidates
-    scState["recommendButton"].Text := scHasCandidates
-        && scState["unassessedCount"] < 1
-        ? "Regenerate recommendations..."
-        : "Generate recommendations..."
+        && !scGenerating
+    scState["recommendButton"].Text := scGenerating
+        ? "Generating, please wait…"
+        : (scHasCandidates && scState["unassessedCount"] < 1
+            ? "Regenerate recommendations..."
+            : "Generate recommendations...")
     scStatusText := scState.Has("baseStatus") ? scState["baseStatus"] : ""
     scAiStatusText := scState.Has("noticeStatus")
         ? scState["noticeStatus"] : ""
@@ -9172,6 +9188,46 @@ StudyCandidatesUpdateActions(scState, *) {
         scAiStatusText := "AI: Not yet assessed."
     scState["status"].Value := scStatusText
     scState["aiStatus"].Value := scAiStatusText
+}
+
+StudyCandidatesRecommendationActivityText(scProviderLabel, scCounts) {
+    scSentenceCount := scCounts.Has("sentences") ? scCounts["sentences"] : 0
+    scVocabularyCount := scCounts.Has("vocabulary") ? scCounts["vocabulary"] : 0
+    scSentenceLabel := scSentenceCount = 1 ? "sentence" : "sentences"
+    scVocabularyLabel := scVocabularyCount = 1
+        ? "vocabulary candidate" : "vocabulary candidates"
+    return "Assessing " scSentenceCount " " scSentenceLabel " and "
+        . scVocabularyCount " " scVocabularyLabel " with " scProviderLabel
+        . ". This may take a moment."
+}
+
+StudyCandidatesSetRecommendationActivity(scState, scActive
+        , scProviderLabel := "", scCounts := 0) {
+    if !StudyCandidatesGuiAlive(scState)
+        return
+    scState["generatingRecommendations"] := scActive
+    if scActive {
+        if IsObject(scCounts)
+            scState["progressText"].Value :=
+                StudyCandidatesRecommendationActivityText(
+                    scProviderLabel, scCounts
+                )
+        scState["progressText"].Visible := true
+        scState["progressBar"].Visible := true
+        ; PBM_SETMARQUEE: native looping activity animation, deliberately not a
+        ; percentage because the model request does not expose partial progress.
+        try SendMessage(0x40A, 1, 32, scState["progressBar"].Hwnd)
+        scState["refreshButton"].Enabled := false
+        scState["recommendButton"].Enabled := false
+        scState["recommendButton"].Text := "Generating, please wait…"
+    } else {
+        try SendMessage(0x40A, 0, 0, scState["progressBar"].Hwnd)
+        scState["progressBar"].Visible := false
+        scState["progressText"].Visible := false
+        scState["refreshButton"].Enabled := true
+        StudyCandidatesUpdateActions(scState)
+    }
+    try DllCall("user32\UpdateWindow", "ptr", scState["gui"].Hwnd)
 }
 
 StudyCandidatesAiResult(scCandidate) {
@@ -9423,32 +9479,32 @@ StudyCandidatesGenerateRecommendations(scState, *) {
     }
     scState["recommendationSettings"] := scRecommendationSettings
     scState["forceRecommendations"] := scRegenerate
-
-    ; A changed learner level, model or recommendation preference represents a
-    ; different assessment profile. Rebuild the snapshot so cached ratings from
-    ; another profile are neither reused nor skipped by generation.
-    if !StudyCandidatesRunBridge(scState, "snapshot") {
-        scState["forceRecommendations"] := false
-        return
-    }
-    if scState["closeRequested"] {
-        scState["forceRecommendations"] := false
-        return
-    }
-    StudyCandidatesReadSnapshot(scState)
-    scCounts := StudyCandidatesRecommendationCounts(scState)
-    if (scCounts["total"] < 1 && !scRegenerate) {
-        scState["forceRecommendations"] := false
-        return
-    }
-
-    scState["baseStatus"] := "Generating recommendations with "
-        . scProviderLabel " / " scModel "..."
-    scState["status"].Value := scState["baseStatus"]
-    scState["refreshButton"].Enabled := false
-    scState["recommendButton"].Enabled := false
-    try DllCall("user32\UpdateWindow", "ptr", scState["gui"].Hwnd)
+    scGenerationOutcome := "failed"
+    scProcessedCounts := scCounts
+    StudyCandidatesSetRecommendationActivity(
+        scState, true, scProviderLabel, scProcessedCounts
+    )
     try {
+        ; A changed learner level, model or recommendation preference represents
+        ; a different assessment profile. Rebuild the snapshot so cached ratings
+        ; from another profile are neither reused nor skipped by generation.
+        if !StudyCandidatesRunBridge(scState, "snapshot")
+            return
+        if scState["closeRequested"]
+            return
+        StudyCandidatesReadSnapshot(scState)
+        scCounts := StudyCandidatesRecommendationCounts(scState, scRegenerate)
+        scProcessedCounts := scCounts
+        if (scCounts["total"] < 1 && !scRegenerate) {
+            scGenerationOutcome := "nothing"
+            return
+        }
+        StudyCandidatesSetRecommendationActivity(
+            scState, true, scProviderLabel, scProcessedCounts
+        )
+        scState["baseStatus"] := "Generating recommendations with "
+            . scProviderLabel " / " scModel "..."
+        scState["status"].Value := scState["baseStatus"]
         if StudyCandidatesRunBridge(scState, "generate-recommendations") {
             if scState["closeRequested"]
                 return
@@ -9460,13 +9516,131 @@ StudyCandidatesGenerateRecommendations(scState, *) {
                     scRows[1][7]
                 )
             StudyCandidatesRefresh(scState)
+            scGenerationOutcome := "success"
         }
     } finally {
         scState["forceRecommendations"] := false
         if StudyCandidatesGuiAlive(scState) && !scState["closeRequested"] {
-            scState["refreshButton"].Enabled := true
-            StudyCandidatesUpdateActions(scState)
+            if (scGenerationOutcome = "success")
+                scState["baseStatus"] := "Recommendations updated for "
+                    . scProcessedCounts["sentences"] " sentences and "
+                    . scProcessedCounts["vocabulary"]
+                    . " vocabulary candidates."
+            else if (scGenerationOutcome = "nothing")
+                scState["baseStatus"] :=
+                    "Recommendations are already up to date."
+            else
+                scState["baseStatus"] :=
+                    "Recommendations could not be generated."
+            StudyCandidatesSetRecommendationActivity(scState, false)
         }
+    }
+}
+
+StudyCandidatesClearRecommendationTarget(scState) {
+    if !IsObject(scState)
+        return
+    if scState.Has("targetRecommendationKind")
+        scState.Delete("targetRecommendationKind")
+    if scState.Has("targetRecommendationKey")
+        scState.Delete("targetRecommendationKey")
+}
+
+StudyCandidatesGenerateSelectedRecommendation(scState, *) {
+    global explainProvider, explainOpenAIModel, explainGeminiModel
+    if !StudyCandidatesGuiAlive(scState)
+        || (scState.Has("closeRequested") && scState["closeRequested"])
+        || (scState.Has("busyCount") && scState["busyCount"] > 0)
+        return
+    scCandidate := StudyCandidatesSelected(scState)
+    if !IsObject(scCandidate) || !scCandidate.Has("recommendationKey")
+        return
+    scProvider := CPSyncExplanationSelectionFromControls()
+    scModel := scProvider = "gemini"
+        ? explainGeminiModel : explainOpenAIModel
+    if !CPApiKeyConfigured(scProvider) {
+        CPThemedOwnedMessage(
+            scState["gui"].Hwnd,
+            CPMissingApiKeyText(scProvider),
+            "Generate recommendation", "ok", "warning", 620
+        )
+        return
+    }
+    scVocabulary := scState["tabs"].Value = 2
+    scKind := scVocabulary ? "vocabulary" : "sentence"
+    scRegenerate := scCandidate.Has("recommendation")
+        && scCandidate["recommendation"] >= 0
+    scCounts := Map(
+        "sentences", scVocabulary ? 0 : 1,
+        "vocabulary", scVocabulary ? 1 : 0,
+        "total", 1
+    )
+    scProviderLabel := scProvider = "gemini" ? "Gemini" : "OpenAI"
+    scState["recommendationSettings"] :=
+        StudyCandidatesRecommendationLoadSettings()
+    scState["targetRecommendationKind"] := scKind
+    scState["targetRecommendationKey"] :=
+        scCandidate["recommendationKey"]
+    scState["forceRecommendations"] := scRegenerate
+    scOutcome := "failed"
+    StudyCandidatesSetRecommendationActivity(
+        scState, true, scProviderLabel, scCounts
+    )
+    try {
+        scState["baseStatus"] := (scRegenerate
+            ? "Regenerating" : "Generating") " recommendation with "
+            . scProviderLabel " / " scModel "..."
+        scState["status"].Value := scState["baseStatus"]
+        if StudyCandidatesRunBridge(
+            scState, "generate-recommendations"
+        ) {
+            if scState["closeRequested"]
+                return
+            StudyCandidatesRefresh(scState)
+            scOutcome := "success"
+        }
+    } finally {
+        scState["forceRecommendations"] := false
+        StudyCandidatesClearRecommendationTarget(scState)
+        if StudyCandidatesGuiAlive(scState) && !scState["closeRequested"] {
+            scState["baseStatus"] := scOutcome = "success"
+                ? "The selected " scKind " recommendation was updated."
+                : "The selected recommendation could not be generated."
+            StudyCandidatesSetRecommendationActivity(scState, false)
+        }
+    }
+}
+
+StudyCandidatesDeleteSelectedRecommendation(scState, *) {
+    if !StudyCandidatesGuiAlive(scState)
+        || (scState.Has("closeRequested") && scState["closeRequested"])
+        || (scState.Has("busyCount") && scState["busyCount"] > 0)
+        return
+    scCandidate := StudyCandidatesSelected(scState)
+    if !IsObject(scCandidate) || !scCandidate.Has("recommendationKey")
+        || !scCandidate.Has("recommendation")
+        || scCandidate["recommendation"] < 0
+        return
+    scVocabulary := scState["tabs"].Value = 2
+    scKind := scVocabulary ? "vocabulary" : "sentence"
+    scMessage := "Delete the cached AI recommendation for the selected "
+        . scKind "?`n`nIts status will return to Unassessed. The Study "
+        . "Library entry and any Anki card remain unchanged."
+    if (CPThemedOwnedMessage(
+        scState["gui"].Hwnd, scMessage, "Delete recommendation",
+        "yesno", "warning", 610
+    ) != "Yes")
+        return
+    scState["targetRecommendationKind"] := scKind
+    scState["targetRecommendationKey"] :=
+        scCandidate["recommendationKey"]
+    try {
+        if StudyCandidatesRunBridge(scState, "clear-recommendation") {
+            scState["baseStatus"] := "The selected recommendation was deleted."
+            StudyCandidatesRefresh(scState)
+        }
+    } finally {
+        StudyCandidatesClearRecommendationTarget(scState)
     }
 }
 
@@ -9637,13 +9811,27 @@ StudyCandidatesContextMenu(
         ))
         scHasRowCommands := true
     }
-    if (scState["recommendButton"].Enabled) {
+    scBusy := (scState.Has("busyCount") && scState["busyCount"] > 0)
+        || (scState.Has("generatingRecommendations")
+            && scState["generatingRecommendations"])
+    if (scHasSelection && !scHidden && !scBusy) {
         if scHasRowCommands
             scMenuItems.Push(Map("separator", true))
+        scHasRecommendation := scCandidate.Has("recommendation")
+            && scCandidate["recommendation"] >= 0
         scMenuItems.Push(Map(
-            "label", scState["recommendButton"].Text,
-            "action", StudyCandidatesGenerateRecommendations.Bind(scState)
+            "label", scHasRecommendation
+                ? "Regenerate recommendation..."
+                : "Generate recommendation...",
+            "action",
+                StudyCandidatesGenerateSelectedRecommendation.Bind(scState)
         ))
+        if scHasRecommendation
+            scMenuItems.Push(Map(
+                "label", "Delete recommendation...",
+                "action",
+                    StudyCandidatesDeleteSelectedRecommendation.Bind(scState)
+            ))
         scHasRowCommands := true
     }
     if scHasRowCommands
@@ -9685,13 +9873,19 @@ StudyCandidatesResize(scState, scGui, scMinMax, scWidth, scHeight) {
     scState["aiFilterDdl"].Move(
         scAiX + scAiLabelW, scMargin, scAiFilterW, 30
     )
-    scTabY := 54
+    scState["progressText"].Move(
+        scMargin, 50, Max(620, scWidth - scMargin * 2), 18
+    )
+    scState["progressBar"].Move(
+        scMargin, 70, Max(620, scWidth - scMargin * 2), 6
+    )
+    scTabY := 80
     scBottomH := 120
-    scTabH := Max(232, scHeight - scTabY - scBottomH - scMargin)
+    scTabH := Max(206, scHeight - scTabY - scBottomH - scMargin)
     scTabW := Max(640, scWidth - scMargin * 2)
     scState["tabs"].Move(scMargin, scTabY, scTabW, scTabH)
     scListX := scMargin + 8, scListY := scTabY + 31
-    scListW := Max(620, scTabW - 16), scListH := Max(192, scTabH - 39)
+    scListW := Max(620, scTabW - 16), scListH := Max(166, scTabH - 39)
     scState["sentenceList"].Move(scListX, scListY, scListW, scListH)
     scState["vocabularyList"].Move(scListX, scListY, scListW, scListH)
     scActionY := scTabY + scTabH + 8
@@ -9818,11 +10012,19 @@ StudyLibraryOpenCandidates(slState, *) {
         ["All statuses", "Recommended only", "Not recommended", "Not yet assessed"]
     )
     scAiFilterDdl.Choose(1)
-    scTabs := scGui.Add("Tab3", "x14 y54 w812 h438", ["Sentences", "Vocabulary"])
+    scProgressText := scGui.Add(
+        "Text", "x14 y50 w812 h18 cGray Hidden", ""
+    )
+    CPRegisterMutedControl(scProgressText)
+    scProgressBar := scGui.Add(
+        "Progress", "x14 y70 w812 h6 Hidden +0x8 Range0-100 Background"
+            . scColors["surface"] " c" scColors["accent"], 0
+    )
+    scTabs := scGui.Add("Tab3", "x14 y80 w812 h412", ["Sentences", "Vocabulary"])
     scTabs.SetFont("c" scColors["text"])
     scTabs.UseTab("Sentences")
     scSentenceList := scGui.Add(
-        "ListView", "x22 y85 w796 h399 Grid Background"
+        "ListView", "x22 y111 w796 h373 Grid Background"
             . scColors["surface"] " c" scColors["text"],
         ["AI result", "Date generated", "Profile", "Japanese source", "Versions"]
     )
@@ -9832,7 +10034,7 @@ StudyLibraryOpenCandidates(slState, *) {
     scSentenceList.ModifyCol(5, 70)
     scTabs.UseTab("Vocabulary")
     scVocabularyList := scGui.Add(
-        "ListView", "x22 y85 w796 h399 Grid Background"
+        "ListView", "x22 y111 w796 h373 Grid Background"
             . scColors["surface"] " c" scColors["text"],
         ["AI result", "Vocabulary", "Meaning / context", "Occurrences", "Profile", "Latest"]
     )
@@ -9871,6 +10073,8 @@ StudyLibraryOpenCandidates(slState, *) {
         "recommendButton", scRecommend,
         "aiFilterLabel", scAiFilterLabel,
         "aiFilterDdl", scAiFilterDdl,
+        "progressText", scProgressText,
+        "progressBar", scProgressBar,
         "tabs", scTabs,
         "sentenceList", scSentenceList,
         "vocabularyList", scVocabularyList,
@@ -9890,6 +10094,7 @@ StudyLibraryOpenCandidates(slState, *) {
         "baseStatus", "",
         "noticeStatus", "",
         "recommendationMessage", "",
+        "generatingRecommendations", false,
         "busyCount", 0,
         "closeRequested", false,
         "closeFinalized", false,
