@@ -23,7 +23,7 @@ namespace JrpgTranslator.LaunchBox
 
             try
             {
-                RuntimeCoordinator.Start(game.Id, game.Title);
+                RuntimeCoordinator.Start(game);
             }
             catch (Exception exception)
             {
@@ -69,15 +69,35 @@ namespace JrpgTranslator.LaunchBox
         }
     }
 
+    internal static class PluginHostEnvironment
+    {
+        public static bool IsBigBoxHost()
+        {
+            try
+            {
+                return string.Equals(
+                    Process.GetCurrentProcess().ProcessName,
+                    "BigBox",
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+
     internal static class RuntimeCoordinator
     {
         private static readonly object Sync = new object();
         private static RuntimeSession? _activeSession;
 
-        public static void Start(string gameId, string gameTitle)
+        public static void Start(IGame gameInfo)
         {
             lock (Sync)
             {
+                string gameId = gameInfo.Id ?? string.Empty;
+                string gameTitle = gameInfo.Title ?? string.Empty;
                 if (_activeSession != null)
                 {
                     if (string.Equals(_activeSession.GameId, gameId, StringComparison.OrdinalIgnoreCase))
@@ -94,17 +114,19 @@ namespace JrpgTranslator.LaunchBox
                 {
                     PluginConfiguration configuration = ConfigurationStore.Load();
                     GameConfiguration game = configuration.GetGame(gameId, gameTitle);
+                    TranslatorGameContext gameContext = RuntimeProcessUtilities.CreateGameContext(gameInfo);
+                    bool useBigBoxUi = PluginHostEnvironment.IsBigBoxHost();
                     if (!game.TranslatorEnabled && !game.JoyToKeyEnabled)
                     {
                         return;
                     }
 
-                    RuntimeSession session = new RuntimeSession(gameId, gameTitle);
+                    RuntimeSession session = new RuntimeSession(gameId, gameTitle, gameContext);
                     _activeSession = session;
 
                     if (game.TranslatorEnabled)
                     {
-                        StartTranslator(configuration, game, session);
+                        StartTranslator(configuration, game, session, useBigBoxUi);
                     }
 
                     if (game.JoyToKeyEnabled)
@@ -142,7 +164,8 @@ namespace JrpgTranslator.LaunchBox
         private static void StartTranslator(
             PluginConfiguration configuration,
             GameConfiguration game,
-            RuntimeSession session)
+            RuntimeSession session,
+            bool useBigBoxUi)
         {
             string executable = PluginPaths.ResolveTranslatorExecutable(configuration);
             if (!File.Exists(executable))
@@ -151,6 +174,7 @@ namespace JrpgTranslator.LaunchBox
                 return;
             }
 
+            session.TranslatorExecutable = executable;
             session.TranslatorBaseline = RuntimeProcessUtilities.GetProcessIds("JRPG Translator");
             session.OverlayBaseline = RuntimeProcessUtilities.GetProcessIds("overlay");
             bool translatorWasRunning = session.TranslatorBaseline.Count > 0;
@@ -162,23 +186,23 @@ namespace JrpgTranslator.LaunchBox
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            startInfo.ArgumentList.Add("--background");
-            if (!translatorWasRunning)
+            foreach (string argument in RuntimeProcessUtilities.BuildTranslatorArguments(
+                translatorWasRunning,
+                useBigBoxUi,
+                game.TranslatorProfile,
+                session.GameContext))
             {
-                startInfo.ArgumentList.Add("--open-translator");
-            }
-            if (!string.IsNullOrWhiteSpace(game.TranslatorProfile))
-            {
-                startInfo.ArgumentList.Add("--profile");
-                startInfo.ArgumentList.Add(game.TranslatorProfile);
+                startInfo.ArgumentList.Add(argument);
             }
 
             using Process? process = Process.Start(startInfo);
             if (translatorWasRunning)
             {
                 RuntimeLog.Write(process == null
-                    ? "The running JRPG Translator could not receive the selected profile."
-                    : "The selected Profile was sent to the running JRPG Translator; it will be left open after the game.");
+                    ? "The running JRPG Translator could not receive the launch settings."
+                    : "The launch settings and "
+                        + (useBigBoxUi ? "Big Box" : "LaunchBox")
+                        + " presentation mode were sent to the running JRPG Translator; it will be left open after the game.");
                 return;
             }
 
@@ -189,7 +213,8 @@ namespace JrpgTranslator.LaunchBox
                 : "JRPG Translator started for " + session.GameTitle
                     + (string.IsNullOrWhiteSpace(game.TranslatorProfile)
                         ? "."
-                        : " with Profile '" + game.TranslatorProfile + "'."));
+                        : " with Profile '" + game.TranslatorProfile + "'.")
+                    + " Presentation mode: " + (useBigBoxUi ? "Big Box." : "desktop."));
         }
 
         private static void StartJoyToKey(
@@ -296,6 +321,8 @@ namespace JrpgTranslator.LaunchBox
         {
             if (!session.TranslatorStartedByPlugin)
             {
+                RuntimeProcessUtilities.SendTranslatorGameContextClear(
+                    session.TranslatorExecutable);
                 return;
             }
 
@@ -317,16 +344,22 @@ namespace JrpgTranslator.LaunchBox
 
     internal sealed class RuntimeSession
     {
-        public RuntimeSession(string gameId, string gameTitle)
+        public RuntimeSession(
+            string gameId,
+            string gameTitle,
+            TranslatorGameContext gameContext)
         {
             GameId = gameId;
             GameTitle = gameTitle;
+            GameContext = gameContext;
         }
 
         public string GameId { get; }
         public string GameTitle { get; }
+        public TranslatorGameContext GameContext { get; }
         public bool TranslatorStartedByPlugin { get; set; }
         public int? TranslatorProcessId { get; set; }
+        public string TranslatorExecutable { get; set; } = string.Empty;
         public HashSet<int> TranslatorBaseline { get; set; } = new HashSet<int>();
         public HashSet<int> OverlayBaseline { get; set; } = new HashSet<int>();
         public string JoyToKeyExecutable { get; set; } = string.Empty;
@@ -335,6 +368,17 @@ namespace JrpgTranslator.LaunchBox
         public int? JoyToKeyStartProcessId { get; set; }
         public string PreviousJoyToKeyProfile { get; set; } = string.Empty;
         public HashSet<int> JoyToKeyBaseline { get; set; } = new HashSet<int>();
+    }
+
+    public sealed class TranslatorGameContext
+    {
+        public string Title { get; set; } = string.Empty;
+        public string Platform { get; set; } = string.Empty;
+        public string BoxArtPath { get; set; } = string.Empty;
+        public string ClearLogoPath { get; set; } = string.Empty;
+        public string PlatformLogoPath { get; set; } = string.Empty;
+        public string PlatformDevicePath { get; set; } = string.Empty;
+        public string PlatformDefaultArtPath { get; set; } = string.Empty;
     }
 
     public static class RuntimeProcessUtilities
@@ -346,6 +390,125 @@ namespace JrpgTranslator.LaunchBox
             string key,
             string value,
             string filePath);
+
+        public static IReadOnlyList<string> BuildTranslatorArguments(
+            bool translatorWasRunning,
+            bool useBigBoxUi,
+            string translatorProfile,
+            TranslatorGameContext? gameContext = null)
+        {
+            List<string> arguments = new List<string>
+            {
+                "--background",
+                useBigBoxUi ? "--bigbox-ui" : "--launchbox-ui"
+            };
+            if (!translatorWasRunning)
+            {
+                arguments.Add("--open-translator");
+            }
+            if (!string.IsNullOrWhiteSpace(translatorProfile))
+            {
+                arguments.Add("--profile");
+                arguments.Add(translatorProfile);
+            }
+            if (gameContext != null)
+            {
+                AddArgumentPair(arguments, "--game-title", gameContext.Title);
+                AddArgumentPair(arguments, "--game-platform", gameContext.Platform);
+                AddArgumentPair(arguments, "--game-box-art", gameContext.BoxArtPath);
+                AddArgumentPair(arguments, "--game-clear-logo", gameContext.ClearLogoPath);
+                AddArgumentPair(arguments, "--platform-clear-logo", gameContext.PlatformLogoPath);
+                AddArgumentPair(arguments, "--platform-device-image", gameContext.PlatformDevicePath);
+                AddArgumentPair(arguments, "--platform-default-art", gameContext.PlatformDefaultArtPath);
+            }
+            return arguments;
+        }
+
+        public static IReadOnlyList<string> BuildTranslatorGameContextClearArguments()
+        {
+            return new[] { "--background", "--clear-game-context" };
+        }
+
+        public static TranslatorGameContext CreateGameContext(IGame game)
+        {
+            TranslatorGameContext context = new TranslatorGameContext
+            {
+                Title = game.Title ?? string.Empty,
+                Platform = game.Platform ?? string.Empty,
+                BoxArtPath = ExistingMediaPath(game.FrontImagePath),
+                ClearLogoPath = ExistingMediaPath(game.ClearLogoImagePath),
+                PlatformLogoPath = ExistingMediaPath(game.PlatformClearLogoImagePath)
+            };
+
+            try
+            {
+                IPlatform? platform = PluginHelper.DataManager.GetPlatformByName(context.Platform);
+                if (platform != null)
+                {
+                    if (string.IsNullOrWhiteSpace(context.PlatformLogoPath))
+                    {
+                        context.PlatformLogoPath = ExistingMediaPath(platform.ClearLogoImagePath);
+                    }
+                    context.PlatformDevicePath = ExistingMediaPath(platform.DeviceImagePath);
+                    context.PlatformDefaultArtPath = ExistingMediaPath(platform.DefaultBoxImagePath);
+                    if (string.IsNullOrWhiteSpace(context.PlatformDefaultArtPath))
+                    {
+                        context.PlatformDefaultArtPath = ExistingMediaPath(platform.BackgroundImagePath);
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                RuntimeLog.Write("Platform artwork lookup failed: " + exception.Message);
+            }
+
+            return context;
+        }
+
+        public static void SendTranslatorGameContextClear(string executable)
+        {
+            if (string.IsNullOrWhiteSpace(executable) || !File.Exists(executable))
+            {
+                return;
+            }
+
+            try
+            {
+                ProcessStartInfo startInfo = new ProcessStartInfo
+                {
+                    FileName = executable,
+                    WorkingDirectory = Path.GetDirectoryName(executable) ?? string.Empty,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                foreach (string argument in BuildTranslatorGameContextClearArguments())
+                {
+                    startInfo.ArgumentList.Add(argument);
+                }
+                using Process? process = Process.Start(startInfo);
+            }
+            catch (Exception exception)
+            {
+                RuntimeLog.Write("Running-game context could not be cleared: " + exception.Message);
+            }
+        }
+
+        private static void AddArgumentPair(
+            ICollection<string> arguments,
+            string name,
+            string? value)
+        {
+            arguments.Add(name);
+            arguments.Add(value ?? string.Empty);
+        }
+
+        private static string ExistingMediaPath(string? path)
+        {
+            string candidate = path?.Trim() ?? string.Empty;
+            return candidate.Length > 0 && File.Exists(candidate)
+                ? candidate
+                : string.Empty;
+        }
 
         public static HashSet<int> GetProcessIds(string processName)
         {

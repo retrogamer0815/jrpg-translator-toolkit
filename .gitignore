@@ -27,6 +27,7 @@ Settings/glossaries/*
 debug.log
 
 # Local builds and backups
+build/
 *.bak
 *.bak-*
 *.build.exe

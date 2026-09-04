@@ -117,6 +117,56 @@ internal static class Program
         Require(runtimeMethods.Any(method => string.Equals(method.Name, "OnBeforeGameLaunching", StringComparison.Ordinal)),
             "The game launch lifecycle plugin was not initialized.");
 
+        TranslatorGameContext dashboardGame = new TranslatorGameContext
+        {
+            Title = "The Legend of Xanadu",
+            Platform = "NEC PC Engine-CD",
+            BoxArtPath = @"C:\LaunchBox\Images\Xanadu.jpg",
+            ClearLogoPath = @"C:\LaunchBox\Images\Xanadu Logo.png",
+            PlatformLogoPath = @"C:\LaunchBox\Images\PC Engine.png",
+            PlatformDevicePath = @"C:\LaunchBox\Images\PC Engine Device.png",
+            PlatformDefaultArtPath = string.Empty
+        };
+        string[] bigBoxArguments = RuntimeProcessUtilities.BuildTranslatorArguments(
+            translatorWasRunning: false,
+            useBigBoxUi: true,
+            translatorProfile: "Retro Style",
+            gameContext: dashboardGame).ToArray();
+        Require(bigBoxArguments.Contains("--background", StringComparer.Ordinal)
+            && bigBoxArguments.Contains("--bigbox-ui", StringComparer.Ordinal)
+            && !bigBoxArguments.Contains("--launchbox-ui", StringComparer.Ordinal)
+            && bigBoxArguments.Contains("--open-translator", StringComparer.Ordinal),
+            "A cold Big Box launch did not receive the expected presentation-mode arguments.");
+        int profileArgumentIndex = Array.IndexOf(bigBoxArguments, "--profile");
+        Require(profileArgumentIndex >= 0
+            && profileArgumentIndex + 1 < bigBoxArguments.Length
+            && string.Equals(bigBoxArguments[profileArgumentIndex + 1], "Retro Style", StringComparison.Ordinal),
+            "The JRPG Translator Profile was not preserved in the Big Box launch contract.");
+        Require(ArgumentValue(bigBoxArguments, "--game-title") == dashboardGame.Title
+            && ArgumentValue(bigBoxArguments, "--game-platform") == dashboardGame.Platform
+            && ArgumentValue(bigBoxArguments, "--game-box-art") == dashboardGame.BoxArtPath
+            && ArgumentValue(bigBoxArguments, "--game-clear-logo") == dashboardGame.ClearLogoPath
+            && ArgumentValue(bigBoxArguments, "--platform-clear-logo") == dashboardGame.PlatformLogoPath
+            && ArgumentValue(bigBoxArguments, "--platform-device-image") == dashboardGame.PlatformDevicePath
+            && ArgumentValue(bigBoxArguments, "--platform-default-art") == string.Empty,
+            "The running-game artwork context was not preserved in the Big Box launch contract.");
+
+        string[] launchBoxArguments = RuntimeProcessUtilities.BuildTranslatorArguments(
+            translatorWasRunning: true,
+            useBigBoxUi: false,
+            translatorProfile: string.Empty).ToArray();
+        Require(launchBoxArguments.Contains("--launchbox-ui", StringComparer.Ordinal)
+            && !launchBoxArguments.Contains("--bigbox-ui", StringComparer.Ordinal)
+            && !launchBoxArguments.Contains("--open-translator", StringComparer.Ordinal),
+            "A running JRPG Translator did not receive the expected LaunchBox presentation-mode reset.");
+
+        string[] clearContextArguments = RuntimeProcessUtilities
+            .BuildTranslatorGameContextClearArguments()
+            .ToArray();
+        Require(clearContextArguments.Contains("--background", StringComparer.Ordinal)
+            && clearContextArguments.Contains("--clear-game-context", StringComparer.Ordinal),
+            "The running-game context cleanup request is incomplete.");
+
         string testIniDirectory = Path.Combine(profileDirectory, "JoyToKeyState");
         Directory.CreateDirectory(testIniDirectory);
         string testIni = Path.Combine(testIniDirectory, "JoyToKey.ini");
@@ -145,5 +195,13 @@ internal static class Program
         {
             throw new InvalidOperationException(message);
         }
+    }
+
+    private static string? ArgumentValue(string[] arguments, string name)
+    {
+        int index = Array.IndexOf(arguments, name);
+        return index >= 0 && index + 1 < arguments.Length
+            ? arguments[index + 1]
+            : null;
     }
 }

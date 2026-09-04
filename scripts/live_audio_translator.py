@@ -503,6 +503,38 @@ def run_audio_test():
         return 1
 
 
+def run_speaker_list():
+    """Keep stdout compatible; optionally return an explicit desktop-UI result."""
+    result_path = os.environ.get("AUDIO_DEVICE_LIST_RESULT_FILE", "").strip()
+    try:
+        names = []
+        for speaker in sc.all_speakers():
+            name = str(speaker.name).replace("\r", " ").replace("\n", " ").strip()
+            if name and name not in names:
+                names.append(name)
+        result = "JRPG_AUDIO_DEVICES:OK\n" + "\n".join(names) + "\n"
+        exit_code = 0
+    except Exception as exc:
+        names = []
+        detail = str(exc).replace("\r", " ").replace("\n", " ").strip()
+        result = "JRPG_AUDIO_DEVICES:ERROR\n" + detail + "\n"
+        exit_code = 1
+    if result_path:
+        # The caller only consumes this file after this process has exited.
+        try:
+            with open(result_path, "w", encoding="utf-8", newline="\n") as result_file:
+                result_file.write(result)
+        except Exception:
+            return 1
+    for name in names:
+        print(name)
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+    return exit_code
+
+
 def trim_display(text):
     text = text.strip()
     if len(text) <= MAX_DISPLAY_CHARS:
@@ -796,13 +828,7 @@ if __name__ == "__main__":
             sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
         except Exception:
             pass
-        for speaker in sc.all_speakers():
-            print(speaker.name)
-        try:
-            sys.stdout.flush()
-        except Exception:
-            pass
-        os._exit(0)
+        os._exit(run_speaker_list())
     if "--test-audio" in sys.argv:
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="ignore")

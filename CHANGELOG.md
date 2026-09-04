@@ -2,6 +2,58 @@
 
 All notable changes to JRPG Translator are documented here.
 
+## 0.9.9-testing.1 - 2026-09-04
+
+This is a testing snapshot for the planned 0.9.9 release. It backs up the
+current Big Box controller interface and its fullscreen Study workflow while
+testing and cosmetic refinement continue. The normal LaunchBox and desktop
+interfaces remain available.
+
+### Big Box control center
+
+- Added automatic Big Box presentation detection through the LaunchBox plugin;
+  desktop LaunchBox continues to open the existing control center.
+- Added a borderless fullscreen, controller-first dashboard with running-game
+  title, platform, Profile, box art and clear-logo context. Artwork keeps its
+  original aspect ratio and falls back through game and platform assets.
+- Added eight frequently used Home actions plus shoulder-button navigation
+  through complete settings pages corresponding to the desktop tabs.
+- Added controller-friendly provider, model, prompt, output-language and audio
+  device selectors, including long scrolling lists and online model catalogue
+  management.
+- Ported capture, audio, overlay appearance, controller bindings, terminology,
+  Profiles, API-key status, paths, prompt management and About/help workflows
+  to the fullscreen presentation.
+- Added consistent high-visibility blue focus frames, focus restoration,
+  controller-release guards and seamless fullscreen handoffs that do not
+  briefly expose the game between dashboard and Study Library.
+
+### Fullscreen Study workflow
+
+- Added Big Box presentations for Study Library, Study Reader and Review for
+  Anki while retaining their production data, settings and desktop behavior.
+- Added controller navigation for tables, buttons, dropdowns, text viewers and
+  owned dialogs, with confirmation-based dropdown selection and safe rapid
+  close handling for asynchronous work.
+- Added fullscreen Library table mode, column order/width/visibility editing,
+  candidate row-action menus and direct sentence or vocabulary Anki actions.
+- Added controller-friendly recommendation generation, filtering, individual
+  regeneration/removal, and sentence/vocabulary page switching.
+- Modernized Library/Reader dialogs and added an internal fullscreen source-
+  image viewer with fit and zoom controls.
+- Moved temporary Study workspace deletion out of the UI process to avoid the
+  first-close Library freeze caused by antivirus or indexing file locks.
+
+### Additional fixes and verification
+
+- Fixed controller-mapped mouse-wheel scrolling of Translator and Explainer
+  overlays when a game was launched through desktop LaunchBox and the physical
+  mouse pointer was not parked in a screen corner.
+- Improved capture-selection completion signaling and asynchronous audio-device
+  discovery used by the controller interface.
+- Added automated Big Box navigation, fullscreen Study/controller, audio-input,
+  workspace-cleanup, overlay syntax and LaunchBox plugin coverage.
+
 ## 0.9.5 - 2026-08-16
 
 This release expands the Study Library into a practical Anki-assisted review

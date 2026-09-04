@@ -1209,8 +1209,9 @@ CapPickWholePixels(stateKey, amount) {
 
 CapPickSignalCompletion(status := "done") {
     global ControlIni
-    IniWrite(A_TickCount "_" Random(1000, 9999), ControlIni, "capture", "pickSeq")
     IniWrite(status, ControlIni, "capture", "pickStatus")
+    ; Publish the sequence last so a polling UI never reads the previous status.
+    IniWrite(A_TickCount "_" Random(1000, 9999), ControlIni, "capture", "pickSeq")
 }
 
 CapPickCreateHud() {
@@ -3596,10 +3597,22 @@ OverlayShouldReceiveGlobalWheel(*) {
         return false
     if !(IsSet(Overlay) && Overlay && Overlay.Hwnd)
         return false
-    ; The global hook exists for JoyToKey/controller scrolling while the real
-    ; pointer is parked out of sight. Everywhere else, leave the wheel to the
-    ; window under the mouse; hovering the overlay uses its local wheel handler.
-    return IsTopVisibleJrpgOverlay(Overlay.Hwnd) && IsMouseParkedInScreenCorner()
+    if !IsTopVisibleJrpgOverlay(Overlay.Hwnd)
+        return false
+
+    ; Controller mappers such as JoyToKey emit an injected wheel event, which
+    ; does not reset AutoHotkey's physical-input idle timer. This lets the top
+    ; overlay receive controller scrolling even when LaunchBox left the real
+    ; pointer in the middle of the screen. A physical mouse-wheel event resets
+    ; that timer and still goes to the window under the pointer (or the overlay's
+    ; local wheel handler), so ordinary mouse use keeps its previous behavior.
+    return IsMouseParkedInScreenCorner() || IsLikelyMappedWheelInput()
+}
+
+IsLikelyMappedWheelInput(minimumPhysicalIdleMs := 25) {
+    try return A_TimeIdlePhysical >= minimumPhysicalIdleMs
+    catch
+        return false
 }
 
 OverlayControllerAdjustmentActive() {

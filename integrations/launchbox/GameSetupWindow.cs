@@ -940,17 +940,7 @@ namespace JrpgTranslator.LaunchBox
 
         private static bool IsBigBoxHost()
         {
-            try
-            {
-                return string.Equals(
-                    Process.GetCurrentProcess().ProcessName,
-                    "BigBox",
-                    StringComparison.OrdinalIgnoreCase);
-            }
-            catch
-            {
-                return false;
-            }
+            return PluginHostEnvironment.IsBigBoxHost();
         }
 
         private void ResetControllerNavigation()
