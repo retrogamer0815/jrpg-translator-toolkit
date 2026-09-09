@@ -402,10 +402,8 @@ namespace JrpgTranslator.LaunchBox
                 "--background",
                 useBigBoxUi ? "--bigbox-ui" : "--launchbox-ui"
             };
-            if (!translatorWasRunning)
-            {
-                arguments.Add("--open-translator");
-            }
+            // Startup overlays belong to the selected Translator Profile (or
+            // its current settings when no Profile is selected), not the host.
             if (!string.IsNullOrWhiteSpace(translatorProfile))
             {
                 arguments.Add("--profile");

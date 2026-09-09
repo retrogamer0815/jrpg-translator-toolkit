@@ -25,6 +25,14 @@ namespace JrpgTranslator.LaunchBox
         private static readonly Brush PrimaryForeground = BrushFrom("#F3F4F6");
         private static readonly Brush MutedForeground = BrushFrom("#AEB3BC");
         private static readonly Brush ControlBorderBrush = BrushFrom("#686B72");
+        private static readonly object CurrentSettingsProfile = new CurrentSettingsProfileChoice();
+
+        // A distinct item keeps the display label from colliding with a real
+        // Profile name. Only real string items are persisted as Profile names.
+        private sealed class CurrentSettingsProfileChoice
+        {
+            public override string ToString() => "None — use current settings";
+        }
 
         private readonly PluginConfiguration _configuration;
         private readonly CheckBox _translatorEnabled;
@@ -141,7 +149,7 @@ namespace JrpgTranslator.LaunchBox
 
             Grid translatorProfileRow = MakeProfileRow(out _translatorProfile, out _refreshTranslatorProfiles);
             _translatorProfile.DropDownClosed += HandleProfileDropDownClosed;
-            _refreshTranslatorProfiles.Click += (_, _) => RefreshTranslatorProfiles(_translatorProfile.Text);
+            _refreshTranslatorProfiles.Click += (_, _) => RefreshTranslatorProfiles(SelectedTranslatorProfile());
             options.Children.Add(translatorProfileRow);
 
             _translatorProfileStatus = new TextBlock
@@ -468,17 +476,25 @@ namespace JrpgTranslator.LaunchBox
         private void RefreshTranslatorProfiles(string preferredProfile)
         {
             IReadOnlyList<string> profiles = TranslatorProfileDiscovery.GetProfiles(_configuration);
-            _translatorProfile.ItemsSource = profiles;
+            List<object> choices = new List<object> { CurrentSettingsProfile };
+            choices.AddRange(profiles);
+            _translatorProfile.ItemsSource = choices;
 
             string? selected = profiles.FirstOrDefault(
                 value => string.Equals(value, preferredProfile, StringComparison.OrdinalIgnoreCase));
-            _translatorProfile.SelectedItem = selected;
+            _translatorProfile.SelectedItem = selected is null ? CurrentSettingsProfile : selected;
 
             string directory = TranslatorProfileDiscovery.GetProfilesDirectory(_configuration);
             _translatorProfileStatus.Text = profiles.Count == 0
                 ? "No Profiles were found in " + DisplayPath(directory)
                 : profiles.Count + (profiles.Count == 1 ? " Profile" : " Profiles")
                     + " found in " + DisplayPath(directory);
+            _translatorProfileStatus.Text += "\nNone uses JRPG Translator's current settings without applying a Profile.";
+        }
+
+        private string SelectedTranslatorProfile()
+        {
+            return _translatorProfile.SelectedItem as string ?? string.Empty;
         }
 
         private void RefreshJoyToKeyProfiles(string preferredProfile)
@@ -546,7 +562,7 @@ namespace JrpgTranslator.LaunchBox
             }
 
             _configuration.TranslatorExecutable = MakeLaunchBoxRelative(selected);
-            RefreshTranslatorProfiles(_translatorProfile.Text);
+            RefreshTranslatorProfiles(SelectedTranslatorProfile());
             UpdatePathStatus();
         }
 
@@ -709,7 +725,7 @@ namespace JrpgTranslator.LaunchBox
             {
                 MessageBox.Show(
                     this,
-                    "Select a Profile, or turn off JRPG Translator for this game.",
+                    "Select a Profile or None to use current settings.",
                     "JRPG Translator Setup",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
@@ -729,11 +745,16 @@ namespace JrpgTranslator.LaunchBox
                 return;
             }
 
+            SaveSelections();
+            DialogResult = true;
+        }
+
+        private void SaveSelections()
+        {
             Result.TranslatorEnabled = _translatorEnabled.IsChecked == true;
-            Result.TranslatorProfile = _translatorProfile.SelectedItem as string ?? string.Empty;
+            Result.TranslatorProfile = SelectedTranslatorProfile();
             Result.JoyToKeyEnabled = _joyToKeyEnabled.IsChecked == true;
             Result.JoyToKeyProfile = _joyToKeyProfile.SelectedItem as string ?? string.Empty;
-            DialogResult = true;
         }
 
         private void HandlePreviewKeyDown(object sender, KeyEventArgs e)

@@ -102,11 +102,25 @@ internal static class Program
         Require(setupFooter != null,
             "The setup window Save/Cancel footer is not pinned outside the scrolling region.");
 
+        TestNoTranslatorProfile(setupWindow, restored, game, serializer, translatorProfilesDirectory);
+
         IGameMenuItemPlugin menuItem = new GameSetupMenuItem();
         Require(menuItem.ShowInLaunchBox && menuItem.ShowInBigBox,
             "The game setup command is not enabled for both LaunchBox and Big Box.");
         Require(menuItem.IconImage != null,
             "The game setup command icon resource could not be loaded.");
+        using (Stream iconResource = typeof(GameSetupMenuItem).Assembly.GetManifestResourceStream(
+            "JrpgTranslator.LaunchBox.Assets.menu-icon.png")!)
+        {
+            // Pin the supplied artwork so a stale embedded icon cannot pass a rebuild.
+            string iconHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(iconResource));
+            Require(iconHash == "68AB3C0F07BFFB251AA6C2CF9280A4DD9AD98D76AAE14F3D8F45ABFEF07779D5",
+                "The menu must embed the updated JRPG Translator icon.");
+        }
+        Require(ReferenceEquals(menuItem.IconImage, new GameSetupMenuItem().IconImage),
+            "The menu icon should be cached across menu instances.");
+        Require(menuItem.IconImage!.Width == 1254 && menuItem.IconImage.Height == 1254,
+            "The menu icon must retain the supplied resolution.");
         Require(!menuItem.SupportsMultipleGames,
             "The game setup command should only appear for a single selected game.");
         Require(string.Equals(menuItem.Caption, "JRPG Translator Setup...", StringComparison.Ordinal),
@@ -135,7 +149,7 @@ internal static class Program
         Require(bigBoxArguments.Contains("--background", StringComparer.Ordinal)
             && bigBoxArguments.Contains("--bigbox-ui", StringComparer.Ordinal)
             && !bigBoxArguments.Contains("--launchbox-ui", StringComparer.Ordinal)
-            && bigBoxArguments.Contains("--open-translator", StringComparer.Ordinal),
+            && !bigBoxArguments.Contains("--open-translator", StringComparer.Ordinal),
             "A cold Big Box launch did not receive the expected presentation-mode arguments.");
         int profileArgumentIndex = Array.IndexOf(bigBoxArguments, "--profile");
         Require(profileArgumentIndex >= 0
@@ -159,6 +173,18 @@ internal static class Program
             && !launchBoxArguments.Contains("--bigbox-ui", StringComparer.Ordinal)
             && !launchBoxArguments.Contains("--open-translator", StringComparer.Ordinal),
             "A running JRPG Translator did not receive the expected LaunchBox presentation-mode reset.");
+
+        foreach (bool wasRunning in new[] { false, true })
+        foreach (bool bigBoxUi in new[] { false, true })
+        foreach (string profile in new[] { string.Empty, "Retro Style" })
+        {
+            string[] startupArguments = RuntimeProcessUtilities.BuildTranslatorArguments(
+                wasRunning, bigBoxUi, profile).ToArray();
+            Require(!startupArguments.Any(argument => argument.StartsWith("--open-", StringComparison.Ordinal)),
+                "The plugin must never override a Profile's startup overlay choices.");
+            Require((ArgumentValue(startupArguments, "--profile") ?? string.Empty) == profile,
+                "Startup must preserve the selected Profile or current-settings fallback.");
+        }
 
         string[] clearContextArguments = RuntimeProcessUtilities
             .BuildTranslatorGameContextClearArguments()
@@ -195,6 +221,84 @@ internal static class Program
         {
             throw new InvalidOperationException(message);
         }
+    }
+
+    private static void TestNoTranslatorProfile(GameSetupWindow window,
+        PluginConfiguration configuration, GameConfiguration originalGame,
+        XmlSerializer serializer, string profilesDirectory)
+    {
+        ComboBox profile = PrivateField<ComboBox>(window, "_translatorProfile");
+        Button refresh = PrivateField<Button>(window, "_refreshTranslatorProfiles");
+        CheckBox enabled = PrivateField<CheckBox>(window, "_translatorEnabled");
+        Require(profile.SelectedItem as string == "Retro Style",
+            "An existing game Profile must remain selected when setup opens.");
+        Require(profile.Items[0].ToString() == "None — use current settings"
+            && profile.Items[0] is not string,
+            "The first Profile choice must explicitly represent current settings, not a saved Profile name.");
+
+        profile.SelectedIndex = 0;
+        Require(window.Result.TranslatorProfile == "Retro Style",
+            "Changing the dropdown must not save a Profile before the user selects Save.");
+        refresh.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        enabled.IsChecked = false;
+        enabled.IsChecked = true;
+        Require(profile.SelectedIndex == 0,
+            "Refresh and re-enabling Translator must preserve None instead of selecting a named Profile.");
+        typeof(GameSetupWindow).GetMethod("SaveSelections", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(window, null);
+        Require(window.Result.TranslatorEnabled && window.Result.TranslatorProfile == string.Empty,
+            "Saving None must clear the old Profile while leaving JRPG Translator enabled.");
+        Require(window.Result.JoyToKeyEnabled
+            && window.Result.JoyToKeyProfile == originalGame.JoyToKeyProfile,
+            "None must not affect JoyToKey profile switching.");
+
+        configuration.UpsertGame(window.Result);
+        using MemoryStream saved = new MemoryStream();
+        serializer.Serialize(saved, configuration);
+        saved.Position = 0;
+        PluginConfiguration loaded = (PluginConfiguration)serializer.Deserialize(saved)!;
+        GameConfiguration game = loaded.GetGame(originalGame.GameId, originalGame.GameTitle);
+        Require(game.TranslatorEnabled && game.TranslatorProfile == string.Empty,
+            "The empty Profile must survive configuration save/reload.");
+        GameSetupWindow reopened = new GameSetupWindow(loaded, game.Clone());
+        Require(PrivateField<ComboBox>(reopened, "_translatorProfile").SelectedIndex == 0,
+            "Reopening setup must show None for an empty saved Profile.");
+        reopened.Close();
+
+        foreach (bool running in new[] { false, true })
+        foreach (bool bigBox in new[] { false, true })
+        {
+            string[] arguments = RuntimeProcessUtilities.BuildTranslatorArguments(
+                running, bigBox, game.TranslatorProfile).ToArray();
+            Require(!arguments.Contains("--profile", StringComparer.Ordinal)
+                && !arguments.Contains("--open-translator", StringComparer.Ordinal),
+                "None must launch with current settings, without a Profile or overlay override in either host.");
+        }
+
+        const string sameLabelProfile = "None — use current settings";
+        File.WriteAllText(Path.Combine(profilesDirectory, sameLabelProfile + ".ini"), "[profile]\nschemaVersion=1\n");
+        GameConfiguration collisionGame = game.Clone();
+        collisionGame.TranslatorProfile = sameLabelProfile;
+        GameSetupWindow collisionWindow = new GameSetupWindow(loaded, collisionGame);
+        Require(PrivateField<ComboBox>(collisionWindow, "_translatorProfile").SelectedItem as string == sameLabelProfile,
+            "A real Profile named like the None label must remain distinct and selectable.");
+        collisionWindow.Close();
+
+        PluginConfiguration noProfiles = new PluginConfiguration
+        {
+            TranslatorExecutable = Path.Combine(profilesDirectory, "empty", "JRPG Translator.exe")
+        };
+        GameSetupWindow emptyWindow = new GameSetupWindow(noProfiles, game.Clone());
+        ComboBox emptyProfile = PrivateField<ComboBox>(emptyWindow, "_translatorProfile");
+        Require(emptyProfile.Items.Count == 1 && emptyProfile.SelectedIndex == 0 && emptyProfile.IsEnabled,
+            "None must be available even when no Profiles have been created.");
+        emptyWindow.Close();
+    }
+
+    private static T PrivateField<T>(GameSetupWindow window, string name) where T : class
+    {
+        return (T)typeof(GameSetupWindow).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(window)!;
     }
 
     private static string? ArgumentValue(string[] arguments, string name)

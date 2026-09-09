@@ -27,6 +27,7 @@ from study_library_sections import (
     replace_explanation_sections,
     replace_group_tags,
 )
+from study_vocabulary import parse_vocabulary
 
 
 def encode_field(value: object) -> str:
@@ -432,6 +433,7 @@ def detail(database: Path, output_dir: Path, group_id: int, version: int) -> int
         "versions.tsv",
         "media.tsv",
         "sections.tsv",
+        "reader_vocabulary.tsv",
         "source.txt",
         "explanation.txt",
     )
@@ -523,6 +525,17 @@ def detail(database: Path, output_dir: Path, group_id: int, version: int) -> int
                 )
             )
         write_rows(output_dir / "sections.tsv", section_output)
+        # Parse only this selected version's saved vocabulary, never the whole
+        # library or a fresh AI response. Include identity to reject stale files.
+        write_rows(
+            output_dir / "reader_vocabulary.tsv",
+            (
+                (group_id, int(selected["version"]), encode_field(entry.display),
+                 encode_field(entry.front), encode_field(entry.back), encode_field(entry.meaning))
+                for section in section_rows if section["section_key"] == "vocabulary"
+                for entry in parse_vocabulary(str(section["content"] or ""))
+            ),
+        )
         write_rows(
             output_dir / "detail.tsv",
             (

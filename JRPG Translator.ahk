@@ -37,6 +37,12 @@ global CPBigBoxArtworkArea := Map()
 global CPBigBoxLogoArea := Map()
 global CPBigBoxArtworkRenderKey := ""
 global CPBigBoxLogoRenderKey := ""
+global CPBigBoxBrandArea := Map()
+global CPBigBoxBrandRenderKey := ""
+global CPBigBoxBackgroundOpacity := 100
+global CPBigBoxAlwaysOnTop := true
+global CPBigBoxBackgroundPreview := -1
+global CPBigBoxBackdrop := Map()
 global CPBigBoxCurrentPage := "home"
 global CPBigBoxPageFocus := Map()
 global CPBigBoxPageChanging := false
@@ -507,6 +513,11 @@ global CPCapturePickerNavigation := Map()
 ; The existing layout remains a fixed minimum design surface. When the window is
 ; smaller, native scrollbars expose that surface instead of compressing controls.
 global CP_CANVAS_MIN_W := 890
+global CPDesktop := Map("ready", false, "modern", false)
+global CPDesktopAudioControls := []
+global CPDesktopExplanationControls := []
+global CPDesktopOverlayLegacy := Map(3, [], 5, [])
+global CPDesktopOrganizeLegacy := Map(6, [], 7, [], 8, [], 9, [], 10, [])
 global CP_CANVAS_MIN_H := 640
 global CP_VIEWPORT_MIN_W := 640
 global CP_VIEWPORT_MIN_H := 380
@@ -525,6 +536,9 @@ global CPCanvasPendingScrollX := 0
 global CPCanvasPendingScrollY := 0
 global CPCanvasPendingScrollValid := false
 global CPCanvasScrollFlushScheduled := false
+global CPCanvasWheelSubclass := 0
+global CPCanvasWheelWindows := Map()
+global CPCanvasShuttingDown := false
 global CPPreferredViewportW := CP_CANVAS_MIN_W
 global CPPreferredViewportH := CP_CANVAS_MIN_H
 global CPWindowWidthSnapActive := false
@@ -544,7 +558,7 @@ CPRegisterCanvasMessages() {
         return
     OnMessage(0x0114, CPOnCanvasScroll) ; WM_HSCROLL
     OnMessage(0x0115, CPOnCanvasScroll) ; WM_VSCROLL
-    OnMessage(0x020A, CPOnCanvasMouseWheel) ; WM_MOUSEWHEEL
+    CPRegisterCanvasWheelWindows()
     OnMessage(0x0231, CPOnWindowEnterSizeMove) ; WM_ENTERSIZEMOVE
     OnMessage(0x0214, CPOnWindowSizing) ; WM_SIZING
     OnMessage(0x0232, CPOnWindowExitSizeMove) ; WM_EXITSIZEMOVE
@@ -606,9 +620,19 @@ CPCanvasMoveChildrenDeferred(dx, dy) {
         if !DllCall("user32\ScreenToClient", "ptr", ui.Hwnd, "ptr", point.Ptr, "int")
             return false
 
-        entry["x"] := NumGet(point, 0, "int") + Round(entry["dx"] * scale)
-        entry["y"] := NumGet(point, 4, "int") + Round(entry["dy"] * scale)
+        entry["oldX"] := NumGet(point, 0, "int"), entry["oldY"] := NumGet(point, 4, "int")
+        entry["w"] := NumGet(rect, 8, "int") - NumGet(rect, 0, "int")
+        entry["h"] := NumGet(rect, 12, "int") - NumGet(rect, 4, "int")
+        entry["x"] := entry["oldX"] + Round(entry["dx"] * scale)
+        entry["y"] := entry["oldY"] + Round(entry["dy"] * scale)
     }
+
+    ; A native control can paint synchronously during WM_WINDOWPOSCHANGED,
+    ; even with SWP_NOREDRAW. Restrict its region to the intersection of the
+    ; old and new viewport BEFORE moving it, then apply the final regions below.
+    ; Otherwise its old clipping region briefly travels into the fixed chrome.
+    if CPDesktopActive()
+        CPCanvasClipBeforeMove(movableControls, scale)
 
     deferred := DllCall("user32\BeginDeferWindowPos", "int", movableControls.Length, "ptr")
     if !deferred
@@ -617,6 +641,8 @@ CPCanvasMoveChildrenDeferred(dx, dy) {
     static SWP_NOSIZE := 0x0001, SWP_NOZORDER := 0x0004, SWP_NOREDRAW := 0x0008
     static SWP_NOACTIVATE := 0x0010, SWP_NOOWNERZORDER := 0x0200
     moveFlags := SWP_NOSIZE | SWP_NOZORDER | SWP_NOREDRAW | SWP_NOACTIVATE | SWP_NOOWNERZORDER
+    if CPDesktopActive()
+        moveFlags |= 0x0100 ; SWP_NOCOPYBITS: clipped controls are redrawn at their new position.
 
     for entry in movableControls {
         ctrl := entry["ctrl"]
@@ -629,24 +655,52 @@ CPCanvasMoveChildrenDeferred(dx, dy) {
     return DllCall("user32\EndDeferWindowPos", "ptr", deferred, "int") != 0
 }
 
+CPCanvasClipBeforeMove(entries, scale) {
+    global CPDesktop, CPCanvasClipStates
+    clipLeft := Round(CPDesktop["side"] * scale)
+    clipTop := Round((CPDesktop["headerH"] + 88) * scale)
+    clipBottom := Round((CPDesktop["height"] - 58) * scale)
+    for entry in entries {
+        hwnd := entry["ctrl"].Hwnd
+        if !DllCall("user32\IsWindowVisible", "ptr", hwnd)
+            continue
+        x := entry["oldX"], y := entry["oldY"], w := entry["w"], h := entry["h"]
+        left := Min(w, Max(0, clipLeft - x, clipLeft - entry["x"]))
+        top := Min(h, Max(0, clipTop - y, clipTop - entry["y"]))
+        bottom := Max(top, Min(h, clipBottom - y, clipBottom - entry["y"]))
+        if !left && !top && bottom = h
+            continue ; Fully inside both positions: no temporary clipping needed.
+        region := DllCall("gdi32\CreateRectRgn", "int", left, "int", top, "int", w, "int", bottom, "ptr")
+        if region && !DllCall("user32\SetWindowRgn", "ptr", hwnd, "ptr", region, "int", 0)
+            DllCall("gdi32\DeleteObject", "ptr", region)
+        if CPCanvasClipStates.Has(hwnd)
+            CPCanvasClipStates.Delete(hwnd) ; Restore the final region after the batch.
+    }
+}
+
 CPCanvasMoveChildren(dx, dy, redraw := true, manageRedraw := true, updateNow := true) {
     global ui, CPCanvasFixedXHwnds, CPCanvasFixedYHwnds
     if (!dx && !dy)
         return
 
     hwnd := ui.Hwnd
-    ; WinSetTransparent makes the control panel a layered window. Suspending
-    ; redraw for that entire top-level surface exposes intermediate compositor
-    ; frames, so move its children as one deferred, non-redrawing batch instead.
+    ; Modern desktop scrolling must not toggle WM_SETREDRAW on the top-level
+    ; window: that temporarily removes WS_VISIBLE and exposes blank frames.
+    ; Move all children in one non-redrawing batch, also for opaque windows.
+    ; Classic translucent windows keep their existing deferred-move path.
     exStyle := hwnd ? DllCall("user32\GetWindowLongPtr", "ptr", hwnd, "int", -20, "ptr") : 0
-    if (hwnd && manageRedraw && (exStyle & 0x00080000)
+    if (hwnd && manageRedraw && (CPDesktopActive() || (exStyle & 0x00080000))
         && CPCanvasMoveChildrenDeferred(dx, dy)) {
         CPClipScrollableControlsToViewport(false)
         if redraw {
-            redrawFlags := 0x0001 | 0x0004 | 0x0080 ; INVALIDATE|ERASE|ALLCHILDREN
-            if updateNow
-                redrawFlags |= 0x0100 ; UPDATENOW
-            DllCall("user32\RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0, "uint", redrawFlags)
+            if CPDesktopActive()
+                CPDesktopRedrawViewport(updateNow)
+            else {
+                redrawFlags := 0x0001 | 0x0004 | 0x0080 ; INVALIDATE|ERASE|ALLCHILDREN
+                if updateNow
+                    redrawFlags |= 0x0100 ; UPDATENOW
+                DllCall("user32\RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0, "uint", redrawFlags)
+            }
         }
         return
     }
@@ -707,24 +761,33 @@ CPClipScrollableControlsToViewport(redraw := false) {
         ctrlTopPx := NumGet(ctrlRect, 4, "int")
         ctrlWidthPx := Max(0, NumGet(ctrlRect, 8, "int") - ctrlLeftPx)
         ctrlHeightPx := Max(0, NumGet(ctrlRect, 12, "int") - ctrlTopPx)
+        visibleLeftPx := 0
+        if CPDesktopActive() {
+            global CPDesktop
+            visibleLeftPx := Max(0, NumGet(headerRect, 0, "int")
+                + Round(CPDesktop.Get("side", 196) * GetWindowDPI(ui.Hwnd) / 96) - ctrlLeftPx)
+        }
         visibleTopPx := Max(0, clipTopPx - ctrlTopPx)
         visibleBottomPx := Min(ctrlHeightPx, clipBottomPx - ctrlTopPx)
         if (visibleBottomPx < visibleTopPx)
             visibleBottomPx := visibleTopPx
 
-        needsSiblingClip := visibleTopPx > 0 || visibleBottomPx < ctrlHeightPx
+        ; Keep modern clipping styles stable throughout scrolling. Changing a
+        ; combo's WS_CLIPSIBLINGS synchronously paints during WM_STYLECHANGED,
+        ; before its new region is applied, exposing content over the header.
+        needsSiblingClip := CPDesktopActive()
+            || visibleLeftPx > 0 || visibleTopPx > 0 || visibleBottomPx < ctrlHeightPx
         scrollStyle := DllCall("user32\GetWindowLongPtr", "ptr", scrollHwnd, "int", -16, "ptr")
         if needsSiblingClip {
-            ; Only controls crossing a sticky boundary need WS_CLIPSIBLINGS.
-            ; Leaving it enabled on ordinary tab content lets hidden controls
-            ; from other pages carve holes into visible dropdowns.
+            ; Classic tab content still enables this only at sticky boundaries.
+            ; Modern geometry-only panels are hidden and cannot obscure fields.
             if !(scrollStyle & 0x04000000) {
                 DllCall("user32\SetWindowLongPtr", "ptr", scrollHwnd, "int", -16
                     , "ptr", scrollStyle | 0x04000000, "ptr")
                 CPCanvasSiblingClipHwnds[scrollHwnd] := true
                 DllCall("user32\SetWindowPos", "ptr", scrollHwnd, "ptr", 0
                     , "int", 0, "int", 0, "int", 0, "int", 0
-                    , "uint", 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
+                    , "uint", 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020 | (CPDesktopActive() && !redraw ? 0x0008 : 0))
             }
         } else if CPCanvasSiblingClipHwnds.Has(scrollHwnd) {
             if (scrollStyle & 0x04000000) {
@@ -732,19 +795,19 @@ CPClipScrollableControlsToViewport(redraw := false) {
                     , "ptr", scrollStyle & ~0x04000000, "ptr")
                 DllCall("user32\SetWindowPos", "ptr", scrollHwnd, "ptr", 0
                     , "int", 0, "int", 0, "int", 0, "int", 0
-                    , "uint", 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
+                    , "uint", 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020 | (CPDesktopActive() && !redraw ? 0x0008 : 0))
             }
             CPCanvasSiblingClipHwnds.Delete(scrollHwnd)
         }
 
-        clipState := ctrlWidthPx "|" ctrlHeightPx "|" visibleTopPx "|" visibleBottomPx
+        clipState := ctrlWidthPx "|" ctrlHeightPx "|" visibleLeftPx "|" visibleTopPx "|" visibleBottomPx
         if (CPCanvasClipStates.Has(scrollHwnd) && CPCanvasClipStates[scrollHwnd] = clipState)
             continue
 
-        if (visibleTopPx = 0 && visibleBottomPx = ctrlHeightPx) {
+        if (visibleLeftPx = 0 && visibleTopPx = 0 && visibleBottomPx = ctrlHeightPx) {
             DllCall("user32\SetWindowRgn", "ptr", scrollHwnd, "ptr", 0, "int", redraw ? 1 : 0)
         } else {
-            clipRegion := DllCall("gdi32\CreateRectRgn", "int", 0, "int", visibleTopPx
+            clipRegion := DllCall("gdi32\CreateRectRgn", "int", Min(ctrlWidthPx, visibleLeftPx), "int", visibleTopPx
                 , "int", ctrlWidthPx, "int", visibleBottomPx, "ptr")
             if clipRegion {
                 if !DllCall("user32\SetWindowRgn", "ptr", scrollHwnd, "ptr", clipRegion
@@ -790,11 +853,20 @@ CPCanvasScrollTo(newX, newY, redraw := true, manageRedraw := true, updateNow := 
     newY := Max(0, Min(CPCanvasScrollMaxY, Round(newY)))
     dx := CPCanvasScrollX - newX
     dy := CPCanvasScrollY - newY
-    CPCanvasSetScrollInfo(0, CP_CANVAS_MIN_W, CPCanvasViewportW, newX)
-    CPCanvasSetScrollInfo(1, CP_CANVAS_MIN_H, CPCanvasViewportH, newY)
-    CPCanvasMoveChildren(dx, dy, redraw, manageRedraw, updateNow)
-    CPCanvasScrollX := newX
-    CPCanvasScrollY := newY
+    ; Keep focus/status timers from repainting a half-moved page. Native paint
+    ; callbacks still run, protected by the pre-move clipping regions.
+    wasCritical := A_IsCritical
+    if CPDesktopActive()
+        Critical "On"
+    try {
+        CPCanvasSetScrollInfo(0, CP_CANVAS_MIN_W, CPCanvasViewportW, newX)
+        CPCanvasSetScrollInfo(1, CP_CANVAS_MIN_H, CPCanvasViewportH, newY)
+        CPCanvasMoveChildren(dx, dy, redraw, manageRedraw, updateNow)
+        CPCanvasScrollX := newX
+        CPCanvasScrollY := newY
+    } finally {
+        Critical wasCritical
+    }
     return (dx || dy)
 }
 
@@ -845,6 +917,7 @@ CPCanvasCancelQueuedScroll(flush := false) {
 
 CPCanvasResetForLayout(manageRedraw := true) {
     global CPCanvasScrollX, CPCanvasScrollY
+    CPCanvasCancelQueuedScroll()
     oldX := CPCanvasScrollX
     oldY := CPCanvasScrollY
     if (oldX || oldY)
@@ -923,42 +996,92 @@ CPOnCanvasScroll(wParam, lParam, msg, hwnd) {
     return 0
 }
 
-CPOnCanvasMouseWheel(wParam, lParam, msg, hwnd) {
-    global ui, CPCanvasScrollX, CPCanvasScrollY, CPCanvasScrollMaxY
-    if !(IsSet(ui) && ui && ui.Hwnd && CPCanvasScrollMaxY > 0)
+CPRegisterCanvasWheelWindows() {
+    global ui, CPCanvasWheelSubclass, CPCanvasWheelWindows, CPCanvasShuttingDown
+    if CPCanvasShuttingDown
         return
-    if (hwnd != ui.Hwnd && !DllCall("user32\IsChild", "ptr", ui.Hwnd, "ptr", hwnd, "int"))
-        return
-    if !WinActive("ahk_id " ui.Hwnd)
-        return
+    if !CPCanvasWheelSubclass {
+        CPCanvasWheelSubclass := CallbackCreate(CPCanvasWheelWindowProc, , 6)
+        ; Unhook while globals are still alive, before AHK destroys its GUIs.
+        OnExit(CPShutdownCanvasMessages, -1)
+    }
+    handles := [ui.Hwnd]
+    for hwnd in CPGetControlHwnds()
+        handles.Push(hwnd)
+    for hwnd in handles {
+        if !CPCanvasWheelWindows.Has(hwnd)
+            && DllCall("comctl32\SetWindowSubclass", "ptr", hwnd, "ptr", CPCanvasWheelSubclass, "uptr", 12, "uptr", CPCanvasWheelSubclass)
+            CPCanvasWheelWindows[hwnd] := true
+    }
+}
 
-    if !CPMouseWheelOverCanvas()
-        return
-
-    delta := (wParam >> 16) & 0xFFFF
-    if (delta & 0x8000)
-        delta -= 0x10000
-    if !delta
-        return
-    CPCanvasScrollTo(CPCanvasScrollX, CPCanvasScrollY - (delta / 120) * 48)
+CPShutdownCanvasMessages(*) {
+    global CPCanvasWheelSubclass, CPCanvasWheelWindows, CPCanvasShuttingDown, CPCanvasMessagesRegistered
+    global CPCanvasPendingScrollValid, CPCanvasScrollFlushScheduled
+    CPCanvasShuttingDown := true
+    SetTimer(CPCanvasFlushQueuedScroll, 0)
+    CPCanvasPendingScrollValid := false
+    CPCanvasScrollFlushScheduled := false
+    if IsSet(CPCanvasMessagesRegistered) && CPCanvasMessagesRegistered {
+        OnMessage(0x0114, CPOnCanvasScroll, 0)
+        OnMessage(0x0115, CPOnCanvasScroll, 0)
+        OnMessage(0x0231, CPOnWindowEnterSizeMove, 0)
+        OnMessage(0x0214, CPOnWindowSizing, 0)
+        OnMessage(0x0232, CPOnWindowExitSizeMove, 0)
+        CPCanvasMessagesRegistered := false
+    }
+    if IsSet(CPCanvasWheelWindows) && IsObject(CPCanvasWheelWindows) {
+        if IsSet(CPCanvasWheelSubclass) && CPCanvasWheelSubclass {
+            for hwnd in CPCanvasWheelWindows.Clone() {
+                if DllCall("user32\IsWindow", "ptr", hwnd)
+                    DllCall("comctl32\RemoveWindowSubclass", "ptr", hwnd, "ptr", CPCanvasWheelSubclass, "uptr", 12)
+            }
+        }
+        CPCanvasWheelWindows.Clear()
+    }
+    ; Keep the callback allocation until process exit: a native call may still
+    ; be unwinding. No window should call it after its globals are released.
     return 0
 }
 
-CPMouseWheelOverCanvas(*) {
+CPCanvasWheelWindowProc(hwnd, msg, wParam, lParam, subclassId, refData) {
+    global CPCanvasWheelWindows, CPCanvasShuttingDown
+    if msg = 0x020A && IsSet(CPCanvasShuttingDown) && !CPCanvasShuttingDown
+        && IsSet(CPCanvasWheelWindows) && CPCanvasWheelWindows.Has(hwnd) && CPCanvasAcceptsWheel(hwnd, lParam) {
+        delta := (wParam >> 16) & 0xFFFF
+        if delta & 0x8000
+            delta -= 0x10000
+        CPCanvasQueueWheel(delta)
+        return 0 ; Do not also change a closed combo or forward to the parent.
+    }
+    if msg = 0x82 { ; WM_NCDESTROY
+        ; The callback address travels with the native subclass, so this
+        ; fallback never needs a global which AHK may already have released.
+        if refData
+            DllCall("comctl32\RemoveWindowSubclass", "ptr", hwnd, "ptr", refData, "uptr", subclassId)
+        if IsSet(CPCanvasWheelWindows) && CPCanvasWheelWindows.Has(hwnd)
+            CPCanvasWheelWindows.Delete(hwnd)
+    }
+    return DllCall("comctl32\DefSubclassProc", "ptr", hwnd, "uint", msg, "ptr", wParam, "ptr", lParam, "ptr")
+}
+
+CPCanvasAcceptsWheel(hwnd, pointParam) {
     global ui, CPCanvasScrollMaxY
     if !(IsSet(ui) && ui && ui.Hwnd && CPCanvasScrollMaxY > 0)
         return false
-    if !WinActive("ahk_id " ui.Hwnd)
+    if !DllCall("user32\IsWindowEnabled", "ptr", ui.Hwnd)
+        || (hwnd != ui.Hwnd && !DllCall("user32\IsChild", "ptr", ui.Hwnd, "ptr", hwnd))
         return false
-
-    mouseWindow := 0
-    mouseControl := 0
-    try MouseGetPos(,, &mouseWindow, &mouseControl, 2)
-    if (!mouseWindow || (mouseWindow != ui.Hwnd
-        && !DllCall("user32\IsChild", "ptr", ui.Hwnd, "ptr", mouseWindow, "int")))
+    ; Use the message's screen coordinates, not a later cursor position. This
+    ; also supports Windows' normal scroll-inactive-windows behavior.
+    pt := Buffer(8), client := Buffer(16)
+    NumPut("int", (pointParam << 48) >> 48, "int", (pointParam << 32) >> 48, pt)
+    DllCall("user32\ScreenToClient", "ptr", ui.Hwnd, "ptr", pt)
+    DllCall("user32\GetClientRect", "ptr", ui.Hwnd, "ptr", client)
+    x := NumGet(pt, 0, "int"), y := NumGet(pt, 4, "int")
+    if x < 0 || y < 0 || x >= NumGet(client, 8, "int") || y >= NumGet(client, 12, "int")
         return false
-
-    hoveredHwnd := mouseControl ? mouseControl : mouseWindow
+    hoveredHwnd := DllCall("user32\ChildWindowFromPointEx", "ptr", ui.Hwnd, "int64", NumGet(pt, 0, "int64"), "uint", 7, "ptr")
     hoveredClass := ""
     try hoveredClass := WinGetClass("ahk_id " hoveredHwnd)
     if (hoveredClass = "msctls_trackbar32")
@@ -966,15 +1089,22 @@ CPMouseWheelOverCanvas(*) {
     if (hoveredHwnd && CPComboDropped(hoveredHwnd))
         return false
 
-    focusedHwnd := CPFocusRingTargetHwnd(CPFocusedHwnd())
+    focusedHwnd := CPFocusRingTargetHwnd(DllCall("user32\GetFocus", "ptr"))
     if (focusedHwnd && CPComboDropped(focusedHwnd))
         return false
     return true
 }
 
-CPMouseWheelHotkey(direction, *) {
-    global CPCanvasScrollX, CPCanvasScrollY
-    CPCanvasScrollTo(CPCanvasScrollX, CPCanvasScrollY + direction * 48)
+CPCanvasQueueWheel(delta) {
+    global CPCanvasScrollX, CPCanvasScrollY, CPCanvasScrollMaxY
+    global CPCanvasPendingScrollX, CPCanvasPendingScrollY, CPCanvasPendingScrollValid
+    if !delta
+        return
+    x := CPCanvasPendingScrollValid ? CPCanvasPendingScrollX : CPCanvasScrollX
+    y := CPCanvasPendingScrollValid ? CPCanvasPendingScrollY : CPCanvasScrollY
+    ; Accumulate high-resolution wheel deltas and paint at most once per frame,
+    ; not once per input message. Wheel input is not an application hotkey.
+    CPCanvasQueueScrollTo(x, Max(0, Min(CPCanvasScrollMaxY, y - delta * 48 / 120)))
 }
 
 CPEnsureFocusedControlVisible(*) {
@@ -1008,6 +1138,10 @@ CPEnsureFocusedControlVisible(*) {
 
     margin := 12
     viewL := NumGet(clientOrigin, 0, "int") + margin
+    if CPDesktopActive() {
+        global CPDesktop
+        viewL += Round(CPDesktop.Get("side", 196) * GetWindowDPI(ui.Hwnd) / 96)
+    }
     viewT := NumGet(clientOrigin, 4, "int") + margin
     viewR := NumGet(clientOrigin, 0, "int") + NumGet(clientRect, 8, "int") - margin
     viewB := NumGet(clientOrigin, 4, "int") + NumGet(clientRect, 12, "int") - margin
@@ -1395,6 +1529,7 @@ CPCreateComboArrowOverlays() {
     CPUpdateComboArrowOverlays()
     CPClipScrollableControlsToViewport(false)
     CPMaintainFooterZOrder()
+    CPRegisterCanvasWheelWindows()
 }
 
 CPUpdateComboArrowOverlays(force := false, *) {
@@ -1407,7 +1542,8 @@ CPUpdateComboArrowOverlays(force := false, *) {
     for cpArrowEntry in CPComboArrowOverlays {
         cpArrowCombo := cpArrowEntry["combo"]
         cpArrowCtrl := cpArrowEntry["arrow"]
-        cpArrowShow := controlDarkMode && DllCall("user32\IsWindowVisible", "ptr", cpArrowCombo.Hwnd, "int")
+        cpArrowShow := controlDarkMode && !CPDesktopIsCombo(cpArrowCombo.Hwnd)
+            && DllCall("user32\IsWindowVisible", "ptr", cpArrowCombo.Hwnd, "int")
         if !cpArrowShow {
             cpArrowNextState := "hidden"
             cpArrowCurrentState := cpArrowEntry.Has("state") ? cpArrowEntry["state"] : ""
@@ -1562,6 +1698,29 @@ CPStudyListWindowProc(cpListHwnd, cpListMsg, cpListWParam, cpListLParam) {
 
 CPStudyComboWindowProc(cpComboHwnd, cpComboMsg, cpComboWParam, cpComboLParam) {
     global CPStudyThemedComboHwnds
+    if CPDesktopIsCombo(cpComboHwnd) {
+        if cpComboMsg = 0x0133 { ; The editable ComboBox's native Edit child.
+            cpColors := CPDesktopPalette()
+            DllCall("gdi32\SetTextColor", "ptr", cpComboWParam, "uint", CPColorRef(cpColors["text"]))
+            DllCall("gdi32\SetBkColor", "ptr", cpComboWParam, "uint", CPColorRef(cpColors["field"]))
+            return CPDesktopBrush(cpColors["field"])
+        }
+        ; Paint the entire closed field in one pass, before Windows can draw
+        ; its bright frame. The native popup, selection and input stay intact.
+        if cpComboMsg = 0x000F {
+            cpDesktopPaint := Buffer(A_PtrSize = 8 ? 72 : 64, 0)
+            cpDesktopDc := DllCall("user32\BeginPaint", "ptr", cpComboHwnd, "ptr", cpDesktopPaint, "ptr")
+            try CPDesktopPaintCombo(cpComboHwnd, cpDesktopDc)
+            finally DllCall("user32\EndPaint", "ptr", cpComboHwnd, "ptr", cpDesktopPaint)
+            return 0
+        }
+        if cpComboMsg = 0x0317 || cpComboMsg = 0x0318 {
+            CPDesktopPaintCombo(cpComboHwnd, cpComboWParam)
+            return 0
+        }
+        if cpComboMsg = 0x0014
+            return 1
+    }
     ; Native controls can finish WM_NCDESTROY after AutoHotkey has started
     ; releasing globals during ExitApp.  Treat a missing map as an already
     ; completed teardown instead of raising a last-moment script error.
@@ -1577,7 +1736,12 @@ CPStudyComboWindowProc(cpComboHwnd, cpComboMsg, cpComboWParam, cpComboLParam) {
             "uint", cpComboMsg, "uptr", cpComboWParam, "ptr", cpComboLParam,
             "ptr")
     try {
-        if (cpComboMsg = 0x000F) { ; WM_PAINT
+        if CPDesktopIsCombo(cpComboHwnd) {
+            if cpComboMsg = 0x0005 || cpComboMsg = 0x0153 ; WM_SIZE / CB_SETITEMHEIGHT
+                CPDesktopLayoutComboEdit(cpComboHwnd)
+            if cpComboMsg = 0x0007 || cpComboMsg = 0x0008 || cpComboMsg = 0x014E || cpComboMsg = 0x014F
+                DllCall("user32\InvalidateRect", "ptr", cpComboHwnd, "ptr", 0, "int", 0)
+        } else if (cpComboMsg = 0x000F) { ; WM_PAINT
             cpComboDc := DllCall("user32\GetDC", "ptr", cpComboHwnd, "ptr")
             if cpComboDc {
                 try CPThemePaintStudyComboArrow(cpComboHwnd, cpComboDc)
@@ -1740,6 +1904,8 @@ CPPrepareTransparentStudyOverlay(cpOverlayHwnd) {
 }
 
 CPEnsureStudyVisualOverlays(cpStudyGui) {
+    if IsObject(StudyDesktopContext(cpStudyGui.Hwnd))
+        return ; The modern desktop uses the native header's dark custom draw.
     global CPStudyVisualOverlays
     cpStudyRoot := 0
     try cpStudyRoot := IsObject(cpStudyGui) ? cpStudyGui.Hwnd : 0
@@ -1951,6 +2117,25 @@ CPUpdateAllStudyVisualOverlays(*) {
 
 CPStudyHeaderWindowProc(cpHeaderHwnd, cpHeaderMsg, cpHeaderWParam, cpHeaderLParam) {
     global CPStudyThemedHeaderHwnds, controlDarkMode
+    if IsObject(StudyDesktopContext(cpHeaderHwnd)) {
+        ; Paint modern headers inside the native paint transaction. Drawing
+        ; with GetDC after the default WM_PAINT has finished can present a
+        ; second, incomplete frame when the parent is being composed.
+        if cpHeaderMsg = 0xF {
+            paint := Buffer(A_PtrSize = 8 ? 72 : 64, 0)
+            dc := DllCall("user32\BeginPaint", "ptr", cpHeaderHwnd, "ptr", paint, "ptr")
+            try CPThemePaintAllHeaders(cpHeaderHwnd, dc)
+            finally DllCall("user32\EndPaint", "ptr", cpHeaderHwnd, "ptr", paint)
+            return 0
+        }
+        if cpHeaderMsg = 0x317 || cpHeaderMsg = 0x318 {
+            if cpHeaderWParam
+                CPThemePaintAllHeaders(cpHeaderHwnd, cpHeaderWParam)
+            return 0
+        }
+        if cpHeaderMsg = 0x14
+            return 1
+    }
     cpHeaderMapReady := IsSet(CPStudyThemedHeaderHwnds)
         && IsObject(CPStudyThemedHeaderHwnds)
     cpHeaderOriginalProc := cpHeaderMapReady && CPStudyThemedHeaderHwnds.Has(cpHeaderHwnd)
@@ -1981,6 +2166,11 @@ CPStudyHeaderWindowProc(cpHeaderHwnd, cpHeaderMsg, cpHeaderWParam, cpHeaderLPara
 }
 
 CPThemePaintAllHeaders(cpHeaderHwnd, cpHeaderDc) {
+    if IsObject(StudyDesktopContext(cpHeaderHwnd)) {
+        rect := Buffer(16)
+        DllCall("user32\GetClientRect", "ptr", cpHeaderHwnd, "ptr", rect)
+        DllCall("user32\FillRect", "ptr", cpHeaderDc, "ptr", rect, "ptr", CPDesktopBrush(CPDesktopPalette()["field"]))
+    }
     cpHeaderCount := SendMessage(0x1200, 0, 0, cpHeaderHwnd)
     cpHeaderSemiboldFont := CPCreateSemiboldStudyHeaderFont(cpHeaderHwnd)
     try {
@@ -2039,6 +2229,11 @@ CPApplyThemeToControl(cpThemeHwnd, darkMode := -1) {
             cpFieldTheme := "DarkMode_CFD"
             if (cpThemeClass = "ComboBox" && CPStudyThemedComboHwnds.Has(cpThemeHwnd))
                 cpFieldTheme := "DarkMode_Explorer"
+            if cpThemeClass = "ListBox" {
+                cpCatalogOwner := GuiFromHwnd(DllCall("user32\GetAncestor", "ptr", cpThemeHwnd, "uint", 2, "ptr"))
+                if cpCatalogOwner && cpCatalogOwner.HasOwnProp("CPModelDialog")
+                    cpFieldTheme := "DarkMode_Explorer"
+            }
             if (cpThemeClass = "Edit") {
                 cpFieldStyle := DllCall(
                     "user32\GetWindowLongPtr", "ptr", cpThemeHwnd, "int", -16, "ptr"
@@ -2128,6 +2323,11 @@ CPSetPreferredAppDarkMode(darkMode, cpThemeGuiHwnd := 0) {
 CPThemeCtlColor(wParam, lParam, msg, parentHwnd) {
     global ui, controlDarkMode, CPThemeBrushWindow, CPThemeBrushSurface
         , CPThemedDialogHwnds
+    if CPDesktopActive() {
+        desktopBrush := CPDesktopControlColor(wParam, lParam)
+        if desktopBrush
+            return desktopBrush
+    }
     if (msg = 0x0138) { ; Static control
         ; Choice/context popup rows are ordinary Text controls.  Their explicit
         ; row backgrounds would otherwise be replaced by the generic dialog
@@ -2252,6 +2452,8 @@ CPThemeDrawItem(wParam, lParam, msg, parentHwnd) {
         , CPThemedPopupButtons
     if !lParam
         return
+    if CPDesktopActive() && CPDesktopDrawItem(lParam)
+        return true
     cpDrawType := NumGet(lParam, 0, "uint")
     if (cpDrawType = 100) ; ODT_HEADER
         return CPThemeDrawHeaderItem(lParam)
@@ -2416,6 +2618,11 @@ CPThemeDrawHeaderItem(cpHeaderDraw) {
         return
 
     cpHeaderColors := CPPalette(controlDarkMode)
+    if IsObject(StudyDesktopContext(cpHeaderHwnd)) {
+        modern := CPDesktopPalette()
+        cpHeaderColors := Map("focus", modern["selected"], "surfaceAlt", modern["field"],
+            "text", modern["muted"], "border", modern["border"])
+    }
     cpHeaderBackHex := (cpHeaderState & 0x0040)
         ? cpHeaderColors["focus"] : cpHeaderColors["surfaceAlt"]
     cpHeaderBrush := DllCall(
@@ -2512,6 +2719,11 @@ CPThemePaintHeader(cpHeaderHwnd, cpHeaderIndex, cpHeaderDc, cpHeaderRect,
     if !cpHeaderDc
         return
     cpHeaderColors := CPPalette(controlDarkMode)
+    if IsObject(StudyDesktopContext(cpHeaderHwnd)) {
+        modern := CPDesktopPalette()
+        cpHeaderColors := Map("headerFocus", modern["selected"], "headerSurface", modern["field"],
+            "headerText", modern["muted"], "headerBorder", modern["border"])
+    }
     cpHeaderBackHex := (cpHeaderState & 0x0040)
         ? cpHeaderColors["headerFocus"] : cpHeaderColors["headerSurface"]
     cpHeaderBrush := DllCall(
@@ -2633,8 +2845,15 @@ CPUnsubclassStudyControls() {
         }
         CPStudyTransparentHwnds.Clear()
     }
-    if IsSet(CPStudyThemedHeaderHwnds) && IsObject(CPStudyThemedHeaderHwnds)
+    if IsSet(CPStudyThemedHeaderHwnds) && IsObject(CPStudyThemedHeaderHwnds) {
+        for cpHeaderHwnd, cpHeaderOriginalProc in CPStudyThemedHeaderHwnds {
+            if cpHeaderHwnd && cpHeaderOriginalProc
+                && DllCall("user32\IsWindow", "ptr", cpHeaderHwnd, "int")
+                try DllCall("user32\SetWindowLongPtr", "ptr", cpHeaderHwnd,
+                    "int", -4, "ptr", cpHeaderOriginalProc, "ptr")
+        }
         CPStudyThemedHeaderHwnds.Clear()
+    }
     if IsSet(CPStudyVisualOverlays) && IsObject(CPStudyVisualOverlays)
         CPStudyVisualOverlays.Clear()
 }
@@ -2672,8 +2891,10 @@ CPApplyControlPanelTheme(forceRedraw := true) {
 
     CPTabRenderedState := ""
     CPRenderCustomTabBar(true)
+    CPDesktopTheme()
     CPUpdateComboArrowOverlays()
     CPMaintainFooterZOrder()
+    CPDesktopRaiseChrome()
     if forceRedraw
         try DllCall("user32\RedrawWindow", "ptr", ui.Hwnd, "ptr", 0, "ptr", 0, "uint", 0x0001 | 0x0004 | 0x0080 | 0x0100 | 0x0400)
 }
@@ -2989,6 +3210,7 @@ CPBigBoxPageDefinitions() {
         "quickOverlays", ["Overlay Windows", "Quick adjustments: color, size, position and opacity", "Stage 3E"],
         "quickTranslatorWindow", ["Translator", "Quick overlay adjustments", "Stage 3E"],
         "quickExplainerWindow", ["Explainer", "Quick overlay adjustments", "Stage 3E"],
+        "quickMainWindow", ["Main window", "Control center appearance and window behavior", "Appearance"],
         "overlayEdit", ["Adjust overlay", "Preview a value, then Save or Cancel", "Stage 3E"],
         "quickControls", ["Button Configuration", "Quick access to controller bindings", "Stage 3F"],
         "controlDetail", ["Button Configuration", "Change one keyboard or controller binding", "Stage 3F"],
@@ -3013,12 +3235,12 @@ CPBigBoxHomeTiles() {
     static tiles := [
         ["translation", "Translation AI", "quickTranslation"],
         ["explanation", "Explanation AI", "quickExplanation"],
-        ["audioAI", "Audio Translation AI", "quickAudio"],
+        ["audioAI", "Audio AI", "quickAudio"],
         ["audioToggle", "Audio Translation On/Off", "quickAudioToggle"],
         ["capture", "Capture…", "quickCapture"],
         ["overlays", "Overlay Windows", "quickOverlays"],
         ["study", "Study Library", "study"],
-        ["controls", "Button Configuration", "quickControls"]
+        ["controls", "Controller Settings", "quickControls"]
     ]
     return tiles
 }
@@ -3031,11 +3253,163 @@ CPBigBoxMainPageIndex(page) {
     return 0
 }
 
+CPBigBoxClampBackgroundOpacity(value) {
+    return Max(50, Min(100, Round(value / 5) * 5))
+}
+
+CPBigBoxEffectiveAlwaysOnTop() {
+    global CPBigBoxAlwaysOnTop, CPBigBoxModalDepth
+    return CPBigBoxAlwaysOnTop && !CPBigBoxModalDepth
+}
+
+CPBigBoxApplyTopmost() {
+    global CPBigBoxGui, CPBigBoxBackdrop
+    local hwnd
+    if !CPBigBoxDashboardAlive()
+        return
+    wanted := CPBigBoxEffectiveAlwaysOnTop()
+    windows := CPBigBoxBackdrop.Has("gui")
+        ? [CPBigBoxBackdrop["gui"].Hwnd, CPBigBoxGui.Hwnd] : [CPBigBoxGui.Hwnd]
+    for hwnd in windows {
+        current := (DllCall("user32\GetWindowLongPtr", "ptr", hwnd, "int", -20, "ptr") & 0x8) != 0
+        ; Never raise or activate an unchanged menu during background refresh.
+        ; Otherwise a normal window could still fight Alt+Tab or the snipper.
+        if current != wanted
+            DllCall("user32\SetWindowPos", "ptr", hwnd, "ptr", wanted ? -1 : -2,
+                "int", 0, "int", 0, "int", 0, "int", 0,
+                "uint", 0x0001 | 0x0002 | 0x0010 | 0x0200)
+    }
+}
+
+CPBigBoxEffectiveBackgroundOpacity() {
+    global CPBigBoxBackgroundOpacity, CPBigBoxBackgroundPreview, CPBigBoxBackdrop
+    if CPBigBoxBackdrop.Get("failed", false)
+        return 100
+    return CPBigBoxClampBackgroundOpacity(CPBigBoxBackgroundPreview >= 0
+        ? CPBigBoxBackgroundPreview : CPBigBoxBackgroundOpacity)
+}
+
+CPBigBoxBackgroundColor(role := "window") {
+    global controlDarkMode
+    ; A near-black key avoids bright antialiasing fringes. Only the backdrop is
+    ; alpha-blended: native controls and text retain full foreground opacity.
+    return CPBigBoxEffectiveBackgroundOpacity() < 100 ? "010203" : CPPalette(controlDarkMode)[role]
+}
+
+CPBigBoxBackgroundHide(*) {
+    global CPBigBoxBackdrop
+    if CPBigBoxBackdrop.Has("gui")
+        try CPBigBoxBackdrop["gui"].Hide()
+}
+
+CPBigBoxBackgroundDispose(*) {
+    global CPBigBoxBackdrop
+    if !IsSet(CPBigBoxBackdrop)
+        return 0
+    oldBackdrop := CPBigBoxBackdrop.Get("gui", 0)
+    CPBigBoxBackdrop := Map()
+    if oldBackdrop
+        try oldBackdrop.Destroy()
+    return 0
+}
+
+CPBigBoxBackgroundShutdown(*) {
+    ; Remove callbacks before ExitApp releases the GUI globals they inspect.
+    for message in [0x0018, 0x0002, 0x0006, 0x0021, 0x0201]
+        try OnMessage(message, CPBigBoxBackgroundWindowEvent, 0)
+    CPBigBoxBackgroundDispose()
+    return 0
+}
+
+CPBigBoxBackgroundWindowEvent(wParam, lParam, msg, hwnd) {
+    global CPBigBoxGui, CPBigBoxBackdrop
+    if !IsSet(CPBigBoxBackdrop)
+        return
+    if CPBigBoxDashboardAlive() && hwnd = CPBigBoxGui.Hwnd {
+        if msg = 0x0018 && !wParam ; WM_SHOWWINDOW: all hide/capture/Study routes
+            CPBigBoxBackgroundHide()
+        else if msg = 0x0002
+            CPBigBoxBackgroundDispose()
+        else if msg = 0x0006 && (wParam & 0xFFFF) ; WM_ACTIVATE
+            CPBigBoxBackgroundSync() ; Rejoin the background when Alt+Tab returns.
+    }
+    if CPBigBoxBackdrop.Has("gui") && hwnd = CPBigBoxBackdrop["gui"].Hwnd {
+        if msg = 0x0021
+            return 3 ; MA_NOACTIVATE: clicking the dimmer must not steal focus.
+        if msg = 0x0201 && CPBigBoxDashboardVisible()
+            try WinActivate(CPBigBoxGui.Hwnd)
+    }
+}
+
+CPBigBoxBackgroundSync(reveal := false) {
+    global CPBigBoxGui, CPBigBoxControls, CPBigBoxBackdrop, controlDarkMode
+    static registered := false
+    if !CPBigBoxDashboardAlive()
+        return
+    CPBigBoxApplyTopmost()
+    opacity := CPBigBoxEffectiveBackgroundOpacity()
+    if opacity >= 100 {
+        ; Remove the color key before taking away its opaque/alpha backing.
+        try WinSetTransColor("Off", CPBigBoxGui.Hwnd)
+        CPBigBoxBackgroundHide()
+        return
+    }
+    try {
+        if !CPBigBoxBackdrop.Has("gui") {
+            ; Deliberately NOT WS_EX_TRANSPARENT: this non-activating layer
+            ; consumes clicks in the keyed areas instead of passing to a game.
+            backdropGui := Gui((CPBigBoxEffectiveAlwaysOnTop() ? "+AlwaysOnTop " : "")
+                . "-Caption +ToolWindow -DPIScale +E0x08000000", "JRPG Translator - Menu background")
+            backdropGui.MarginX := 0, backdropGui.MarginY := 0
+            CPSetWindowCloaked(backdropGui.Hwnd, true)
+            CPBigBoxBackdrop["gui"] := backdropGui
+            CPBigBoxBackdrop["panel"] := backdropGui.AddText("x0 y0 w1 h1 Disabled", "")
+            if !registered {
+                for message in [0x0018, 0x0002, 0x0006, 0x0021, 0x0201]
+                    OnMessage(message, CPBigBoxBackgroundWindowEvent)
+                OnExit(CPBigBoxBackgroundShutdown)
+                registered := true
+            }
+        }
+        backdropGui := CPBigBoxBackdrop["gui"]
+        colors := CPPalette(controlDarkMode)
+        backdropGui.BackColor := colors["window"]
+        CPBigBoxBackdrop["panel"].Opt("+Background" colors["surface"])
+        CPBigBoxControls["panel"].GetPos(&px, &py, &pw, &ph)
+        CPBigBoxBackdrop["panel"].Move(px, py, pw, ph)
+        CPBigBoxGui.GetClientPos(&x, &y, &w, &h)
+        WinSetTransparent(Round(opacity * 255 / 100), backdropGui.Hwnd)
+        if DllCall("user32\IsWindowVisible", "ptr", CPBigBoxGui.Hwnd) {
+            if !DllCall("user32\IsWindowVisible", "ptr", backdropGui.Hwnd) {
+                CPSetWindowCloaked(backdropGui.Hwnd, true)
+                backdropGui.Show("NA x" x " y" y " w" w " h" h)
+            }
+            ; Immediately below the real dashboard, not above its controls or
+            ; dialogs. No activation and no changes to the game's window.
+            DllCall("user32\SetWindowPos", "ptr", backdropGui.Hwnd, "ptr", CPBigBoxGui.Hwnd,
+                "int", x, "int", y, "int", w, "int", h, "uint", 0x0010 | 0x0200)
+            cloaked := Buffer(4, 0)
+            DllCall("dwmapi\DwmGetWindowAttribute", "ptr", CPBigBoxGui.Hwnd,
+                "uint", 14, "ptr", cloaked, "uint", 4)
+            CPSetWindowCloaked(backdropGui.Hwnd, reveal ? false : NumGet(cloaked, 0, "uint") != 0)
+        } else
+            backdropGui.Hide()
+        WinSetTransColor(CPBigBoxBackgroundColor(), CPBigBoxGui.Hwnd)
+    } catch {
+        CPBigBoxBackdrop["failed"] := true
+        try WinSetTransColor("Off", CPBigBoxGui.Hwnd)
+        CPBigBoxBackgroundHide()
+        ; Fall back to a readable solid menu if composition is unavailable.
+        CPBigBoxDashboardApplyTheme()
+    }
+}
+
 CPBigBoxOverlayTarget(page := "") {
     global CPBigBoxCurrentPage
     switch page = "" ? CPBigBoxCurrentPage : page {
         case "translationWindow", "quickTranslatorWindow": return "Translator"
         case "explanationWindow", "quickExplainerWindow": return "Explainer"
+        case "quickMainWindow": return "Main window"
     }
     return ""
 }
@@ -3043,10 +3417,11 @@ CPBigBoxOverlayTarget(page := "") {
 CPBigBoxOverlayQuick() {
     global CPBigBoxCurrentPage
     return CPBigBoxCurrentPage = "quickTranslatorWindow" || CPBigBoxCurrentPage = "quickExplainerWindow"
+        || CPBigBoxCurrentPage = "quickMainWindow"
 }
 
 CPBigBoxOverlayKeys() {
-    return ["ov_bg", "ov_txt", "ov_name", "ov_font", "ov_size", "ov_bold", "ov_opacity", "ov_position"]
+    return ["ov_bg", "ov_txt", "ov_name", "ov_font", "ov_size", "ov_bold", "ov_opacity", "ov_position", "ov_topmost"]
 }
 
 CPBigBoxOverlaySliderKeys() => ["ov_slider1", "ov_slider2", "ov_slider3"]
@@ -3054,10 +3429,18 @@ CPBigBoxOverlaySliderKeys() => ["ov_slider1", "ov_slider2", "ov_slider3"]
 ; Single-setting persistence uses the same globals, native controls and INI
 ; sections as the desktop tabs. It never rewrites unrelated settings.
 CPOverlayPreference(title, field) {
+    global CPBigBoxBackgroundOpacity, CPBigBoxAlwaysOnTop
     global overlayTrans, boxBgHex, txtHex, nameHex, fontName, fontSize, fontBold
     global overlayTrans_EW, boxBgHex_EW, txtHex_EW, fontName_EW, fontSize_EW, fontBold_EW
     global slTrans, rectBg, rectTxt, rectName, ddlFont, edFSize, chkFontBold
     global slTrans_EW, rectBg_EW, rectTxt_EW, ddlFont_EW, edFSize_EW, chkFontBold_EW
+    if title = "Main window" && field = "opacity"
+        return Map("title", "Control center background opacity", "key", "bigBoxBackgroundOpacity",
+            "value", CPBigBoxBackgroundOpacity, "control", 0, "type", "number",
+            "section", "cfg_control", "min", 50, "max", 100)
+    if title = "Main window" && field = "topmost"
+        return Map("title", "Always on top", "key", "bigBoxAlwaysOnTop",
+            "value", CPBigBoxAlwaysOnTop, "control", 0, "type", "bool", "section", "cfg_control")
     if title != "Translator" && title != "Explainer"
         throw ValueError("Unknown overlay.")
     ew := title = "Explainer"
@@ -3080,10 +3463,21 @@ CPOverlayPreference(title, field) {
 }
 
 CPSetOverlayPreference(title, field, value) {
+    global CPBigBoxBackgroundOpacity, CPBigBoxAlwaysOnTop
     global iniPath, overlayTrans, boxBgHex, txtHex, nameHex, fontName, fontSize, fontBold
     global overlayTrans_EW, boxBgHex_EW, txtHex_EW, fontName_EW, fontSize_EW, fontBold_EW
     global udFSize, udFSize_EW, lblTransPct, lblTransPct_EW, CPFontSizeAdjustSyncing
     pref := CPOverlayPreference(title, field)
+    if title = "Main window" {
+        value := field = "topmost" ? (value ? 1 : 0) : CPBigBoxClampBackgroundOpacity(value)
+        IniWrite(value, iniPath, pref["section"], pref["key"])
+        if field = "topmost" {
+            CPBigBoxAlwaysOnTop := value
+            CPBigBoxBackgroundSync()
+        } else
+            CPBigBoxBackgroundOpacity := value
+        return true
+    }
     if pref["type"] = "color" {
         value := StrUpper(value)
         if !RegExMatch(value, "^[0-9A-F]{6}$")
@@ -3163,7 +3557,10 @@ CPBigBoxOverlayAction(field, *) {
     global CPBigBoxCurrentPage, CPBigBoxAICommitting, CPBigBoxOverlayNotice
     if !CPBigBoxPageNavigationAllowed() || CPBigBoxAIChoiceActive() || CPBigBoxOverlayTarget() = ""
         return
-    if CPBigBoxOverlayQuick() && field != "bg" && field != "opacity" && field != "position"
+    if CPBigBoxOverlayTarget() = "Main window" {
+        if field != "opacity" && field != "topmost"
+            return
+    } else if field = "topmost" || (CPBigBoxOverlayQuick() && field != "bg" && field != "opacity" && field != "position")
         return
     if field = "position" {
         CPBigBoxBeginOverlayPosition()
@@ -3173,7 +3570,7 @@ CPBigBoxOverlayAction(field, *) {
         CPBigBoxOpenOverlayFont()
         return
     }
-    if field != "bold" {
+    if field != "bold" && field != "topmost" {
         CPBigBoxOpenOverlayEditor(field)
         return
     }
@@ -3181,7 +3578,7 @@ CPBigBoxOverlayAction(field, *) {
     try {
         pref := CPOverlayPreference(CPBigBoxOverlayTarget(), field)
         applied := CPSetOverlayPreference(CPBigBoxOverlayTarget(), field, !pref["value"])
-        CPBigBoxOverlayNotice := applied ? "Saved · Bold text " (!pref["value"] ? "On" : "Off")
+        CPBigBoxOverlayNotice := applied ? "Saved · " pref["title"] " " (!pref["value"] ? "On" : "Off")
             : "Saved. The overlay did not respond; reopen it to apply the appearance."
     } catch {
         CPBigBoxOverlayNotice := "Could not save this setting. Check the settings folder and try again."
@@ -3237,9 +3634,14 @@ CPBigBoxCommitOverlayFont(index) {
 }
 
 CPBigBoxOpenOverlayEditor(field) {
+    global CPBigBoxBackgroundPreview, CPBigBoxBackdrop
     global CPBigBoxOverlayEdit, CPBigBoxCurrentPage, CPBigBoxControls, iniPath
     title := CPBigBoxOverlayTarget()
     pref := CPOverlayPreference(title, field)
+    if title = "Main window" {
+        CPBigBoxBackdrop["failed"] := false
+        CPBigBoxBackgroundPreview := pref["value"]
+    }
     CPBigBoxOverlayEdit := Map("active", true, "target", title, "field", field, "kind", pref["type"],
         "original", pref["value"], "value", pref["value"], "parent", CPBigBoxCurrentPage, "key", "ov_" field,
         "path", iniPath, "profile", IniRead(iniPath, "game_profiles", "active", ""),
@@ -3260,12 +3662,23 @@ CPBigBoxOpenOverlayEditor(field) {
 }
 
 CPBigBoxOverlaySliderChanged(*) {
+    global CPBigBoxBackgroundPreview
     global CPBigBoxOverlayEdit, CPBigBoxControls, CPBigBoxCurrentPage
     if !CPBigBoxOverlayEdit["active"] || CPBigBoxCurrentPage != "overlayEdit"
         return
     CPBigBoxOverlayEdit["value"] := CPBigBoxOverlayEdit["kind"] = "color"
         ? CPColorHSVToHex(CPBigBoxControls["ov_slider1"].Value, CPBigBoxControls["ov_slider2"].Value, CPBigBoxControls["ov_slider3"].Value)
         : CPBigBoxControls["ov_slider1"].Value
+    if CPBigBoxOverlayEdit["target"] = "Main window" {
+        wasTransparent := CPBigBoxEffectiveBackgroundOpacity() < 100
+        CPBigBoxBackgroundPreview := CPBigBoxClampBackgroundOpacity(CPBigBoxOverlayEdit["value"])
+        CPBigBoxOverlayEdit["value"] := CPBigBoxBackgroundPreview
+        CPBigBoxControls["ov_slider1"].Value := CPBigBoxBackgroundPreview
+        if wasTransparent != (CPBigBoxBackgroundPreview < 100)
+            CPBigBoxDashboardApplyTheme()
+        else
+            CPBigBoxBackgroundSync()
+    }
     CPBigBoxUpdateOverlayContent()
     if CPBigBoxOverlayEdit["kind"] = "color"
         SetTimer(CPControllerColorDeferredGradientRedraw.Bind(CPBigBoxControls["ov_slider1"].Hwnd,
@@ -3292,7 +3705,8 @@ CPBigBoxOverlaySliderMove(direction) {
     pref := CPOverlayPreference(CPBigBoxOverlayEdit["target"], CPBigBoxOverlayEdit["field"])
     minimum := CPBigBoxOverlayEdit["kind"] = "color" ? 0 : pref["min"]
     maximum := CPBigBoxOverlayEdit["kind"] = "color" ? (key = "ov_slider1" ? 359 : 100) : pref["max"]
-    CPBigBoxControls[key].Value := Max(minimum, Min(maximum, CPBigBoxControls[key].Value + (direction = "Right" ? 1 : -1)))
+    step := CPBigBoxOverlayEdit["target"] = "Main window" ? 5 : 1
+    CPBigBoxControls[key].Value := Max(minimum, Min(maximum, CPBigBoxControls[key].Value + (direction = "Right" ? step : -step)))
     CPBigBoxOverlaySliderChanged()
     return true
 }
@@ -3344,6 +3758,7 @@ CPBigBoxSaveOverlayEditor(*) {
 }
 
 CPBigBoxCloseOverlayEditor(*) {
+    global CPBigBoxBackgroundPreview
     global CPBigBoxOverlayEdit, CPBigBoxControls, CPBigBoxCurrentPage, CPBigBoxPageChanging, CPBigBoxPageFocus
     if !CPBigBoxOverlayEdit["active"]
         return
@@ -3353,6 +3768,10 @@ CPBigBoxCloseOverlayEditor(*) {
     CPBigBoxPageChanging := true
     try {
         CPBigBoxOverlayEdit := Map("active", false)
+        if state["target"] = "Main window" {
+            CPBigBoxBackgroundPreview := -1
+            CPBigBoxDashboardApplyTheme()
+        }
         CPBigBoxCurrentPage := state["parent"]
         CPBigBoxDashboardRelayoutAndUpdate()
         CPBigBoxApplyPageVisibility()
@@ -3399,18 +3818,23 @@ CPBigBoxRestoreAfterOverlayAdjustment(title, returnHwnd, saved) {
 }
 
 CPBigBoxUpdateOverlayContent() {
+    global CPBigBoxBackgroundOpacity, CPBigBoxBackdrop
     global CPBigBoxCurrentPage, CPBigBoxControls, CPBigBoxOverlayNotice, CPBigBoxOverlayEdit
     global CPBigBoxAIChoice, controlDarkMode
     if !CPBigBoxDashboardAlive() || !CPBigBoxControls.Has("ov_bg")
         return
     if CPBigBoxCurrentPage = "quickOverlays" {
-        CPBigBoxControls["modeBody"].Text := "Choose the overlay to adjust. Full font and text-color settings are on the L/R window pages."
+        CPBigBoxControls["modeBody"].Text := "Choose a window to adjust. Main window controls the fullscreen menu background and Always on top."
         CPBigBoxControls["ov_translator"].Text := "Translator`n" CPBigBoxOverlayState("Translator")
         CPBigBoxControls["ov_explainer"].Text := "Explainer`n" CPBigBoxOverlayState("Explainer")
+        CPBigBoxControls["ov_main"].Text := "Main window`nBackground " CPBigBoxBackgroundOpacity "%"
     }
     title := CPBigBoxOverlayTarget()
     if title != "" && !CPBigBoxAIChoiceActive() {
         for key in CPBigBoxOverlayKeys() {
+            if (title = "Main window" && key != "ov_opacity" && key != "ov_topmost")
+                || (title != "Main window" && key = "ov_topmost")
+                continue
             field := SubStr(key, 4)
             if field = "position" {
                 if CPBigBoxControls[key].Text != "Move / Resize…"
@@ -3420,8 +3844,8 @@ CPBigBoxUpdateOverlayContent() {
             if title = "Explainer" && field = "name"
                 continue
             pref := CPOverlayPreference(title, field)
-            value := field = "bold" ? (pref["value"] ? "On" : "Off")
-                : field = "opacity" ? Round(pref["value"] / 255 * 100) "%"
+            value := pref["type"] = "bool" ? (pref["value"] ? "On" : "Off")
+                : field = "opacity" ? (title = "Main window" ? pref["value"] : Round(pref["value"] / 255 * 100)) "%"
                 : pref["type"] = "color" ? "#" pref["value"] : pref["value"]
             buttonText := pref["title"] "`n" StrReplace(CPBigBoxShortText(value, 50), "&", "&&")
             if CPBigBoxControls[key].Text != buttonText
@@ -3433,6 +3857,11 @@ CPBigBoxUpdateOverlayContent() {
             CPBigBoxControls["modeBody"].Text := helpText
         CPBigBoxControls["ov_note"].Text := "Window color and opacity use Save/Cancel. Move/resize returns here when finished.`nMore appearance settings: "
             . (title = "Translator" ? "Translation Window" : "Explanation Window") " in the L/R pages."
+        if title = "Main window" {
+            CPBigBoxControls["modeBody"].Text := CPBigBoxOverlayNotice != "" ? CPBigBoxOverlayNotice
+                : "Adjust the menu background or choose whether the control center stays above other windows."
+            CPBigBoxControls["ov_note"].Text := "Always on top: Off lets Alt+Tab bring other windows forward. The toggle saves immediately.`nThese settings apply to the control center and its submenus; desktop and Study windows are unchanged."
+        }
         if CPBigBoxOverlayQuick() {
             CPBigBoxControls["pageHint"].Text := "Home › Overlay Windows › " title
             CPBigBoxControls["backHome"].Text := "Back to Overlays"
@@ -3458,9 +3887,16 @@ CPBigBoxUpdateOverlayContent() {
             palette := CPPalette(controlDarkMode)
             CPBigBoxControls["ov_preview"].Opt("+Background" palette["surfaceAlt"])
             CPBigBoxControls["ov_preview"].SetFont("c" palette["text"])
-            CPBigBoxControls["ov_preview"].Text := state["field"] = "opacity" ? Round(state["value"] / 255 * 100) "%"
+            CPBigBoxControls["ov_preview"].Text := state["field"] = "opacity" ? (state["target"] = "Main window" ? state["value"] : Round(state["value"] / 255 * 100)) "%"
                 : state["value"] " pt"
             CPBigBoxControls["ov_label1"].Text := pref["title"] "  ·  " (state["field"] = "opacity" ? "0–100%" : pref["min"] "–" pref["max"] " pt")
+        }
+        if state["target"] = "Main window" {
+            CPBigBoxControls["ov_label1"].Text := "Background opacity  ·  50–100%"
+            CPBigBoxControls["modeBody"].Text := CPBigBoxBackdrop.Get("failed", false)
+                ? "Transparency is unavailable on this display. The menu is using a solid background."
+                : "Live preview — only the background fades. 100% is solid; try 85% for a subtle view of the game.`nSave keeps this value. B / Cancel restores your previous setting."
+            CPBigBoxControls["footer"].Text := "D-pad Up / Down  Navigate     Left / Right  Adjust by 5%     A / Enter  Select     B / Esc  Cancel"
         }
     }
 }
@@ -3980,7 +4416,7 @@ CPBigBoxSetupSubpage(page := "") {
 }
 
 CPBigBoxSetupEnter(page) {
-    global CPBigBoxCurrentPage, CPBigBoxPageChanging
+    global CPBigBoxCurrentPage, CPBigBoxPageChanging, CPBigBoxSetupState
     previousChanging := CPBigBoxPageChanging
     CPBigBoxPageChanging := true
     try {
@@ -3991,6 +4427,37 @@ CPBigBoxSetupEnter(page) {
         CPBigBoxPageChanging := previousChanging
     }
     CPBigBoxRestorePageFocus()
+    if page = "setupEdit" && CPBigBoxSetupState.Get("flow", "") = "promptText"
+        CPBigBoxPreparePromptEditor()
+}
+
+CPBigBoxPromptEditorActive(*) {
+    global CPBigBoxCurrentPage, CPBigBoxSetupState, CPBigBoxGui, CPBigBoxControls
+    if !CPBigBoxDashboardAlive() || CPBigBoxCurrentPage != "setupEdit"
+        || CPBigBoxSetupState.Get("flow", "") != "promptText"
+        return false
+    focused := 0
+    try focused := CPBigBoxGui.FocusedCtrl
+    return IsObject(focused) && CPBigBoxControls.Has("setup_raw")
+        && focused.Hwnd = CPBigBoxControls["setup_raw"].Hwnd
+}
+
+CPBigBoxPreparePromptEditor(*) {
+    global CPBigBoxCurrentPage, CPBigBoxSetupState, CPBigBoxControls
+    if !CPBigBoxDashboardAlive() || CPBigBoxCurrentPage != "setupEdit"
+        || CPBigBoxSetupState.Get("flow", "") != "promptText"
+        return
+    editor := CPBigBoxControls["setup_raw"]
+    index := CPBigBoxDashboardControlIndex(editor)
+    if index
+        CPBigBoxDashboardSetFocus(index)
+    else
+        try editor.Focus()
+    ; Native multiline Edit controls select their complete contents when they
+    ; first receive focus. Keep the prompt visible from the top and ready for
+    ; normal keyboard editing with a simple, unselected caret instead.
+    try SendMessage(0x00B1, 0, 0, editor.Hwnd) ; EM_SETSEL
+    try SendMessage(0x00B7, 0, 0, editor.Hwnd) ; EM_SCROLLCARET
 }
 
 CPBigBoxResetSetup(*) {
@@ -4169,13 +4636,13 @@ CPBigBoxBrowsePath(*) {
     start := Trim(CPBigBoxControls["setup_edit"].Value)
     CPBigBoxModalDepth += 1
     try {
-        try CPBigBoxGui.Opt("-AlwaysOnTop")
+        CPBigBoxBackgroundSync()
         selected := FileSelect(3, start, "Select " StrLower(spec["title"]), spec["filter"])
         if selected != ""
             CPBigBoxControls["setup_edit"].Value := selected
     } finally {
-        try CPBigBoxGui.Opt("+AlwaysOnTop")
         CPBigBoxModalDepth := Max(0, CPBigBoxModalDepth - 1)
+        CPBigBoxBackgroundSync()
         try WinActivate("ahk_id " CPBigBoxGui.Hwnd)
     }
 }
@@ -4763,6 +5230,33 @@ CPBigBoxOpenProfileChoice(*) {
         selected ? selected : 1, current, "prof_select")
 }
 
+CPBigBoxOpenStartupOverlayChoice(*) {
+    global CPBigBoxCurrentPage, CPBigBoxAIChoice, iniPath
+    if CPBigBoxCurrentPage != "profiles"
+        return
+    options := CPStartupOverlayOptions()
+    index := CPStartupOverlayIndex()
+    if CPBigBoxOpenCustomChoice("startupOverlays", "profiles", options,
+        index, options[index], "prof_startup")
+        CPBigBoxAIChoice["profile"] := IniRead(iniPath, "game_profiles", "active", "")
+}
+
+CPBigBoxCommitStartupOverlayChoice(index) {
+    global CPBigBoxAIChoice, CPBigBoxManageNotice, iniPath
+    try {
+        state := CPBigBoxAIChoice
+        if (state["profile"] != IniRead(iniPath, "game_profiles", "active", "")
+            || state["value"] != CPStartupOverlayOptions()[CPStartupOverlayIndex()])
+            throw ValueError("Settings changed while choosing. Please select again.")
+        CPSetStartupOverlays(index)
+        CPBigBoxManageNotice := "Startup overlays: " CPStartupOverlayOptions()[index]
+            . ". Use Save current settings to store this in the selected profile."
+    } catch as ex {
+        CPBigBoxManageNotice := "Could not change startup overlays: " ex.Message
+    }
+    CPBigBoxCloseAIChoice()
+}
+
 CPBigBoxGlossaryEntryDisplay(entry) {
     return entry["source"] "  →  " entry["target"]
 }
@@ -5237,12 +5731,13 @@ CPBigBoxUpdateProfilesContent() {
     CPBigBoxControls["prof_apply"].Text := "Apply selected`n" (selected != "" && selected = active ? "Currently active" : "Load its settings")
     CPBigBoxControls["prof_save"].Text := "Save current settings`n" (selected != "" ? "to " CPBigBoxShortText(selected, 28) : "Create a profile first")
     CPBigBoxControls["prof_new"].Text := "New profile…"
+    CPBigBoxControls["prof_startup"].Text := "Startup overlays`n" CPStartupOverlayOptions()[CPStartupOverlayIndex()]
     CPBigBoxControls["prof_delete"].Text := "Delete selected…"
     CPBigBoxControls["prof_apply"].Enabled := selected != ""
     CPBigBoxControls["prof_save"].Enabled := selected != ""
     CPBigBoxControls["prof_delete"].Enabled := selected != ""
     CPBigBoxControls["modeBody"].Text := CPBigBoxManageNotice != "" ? CPBigBoxManageNotice
-        : "Select does not apply a profile. Apply loads it; Save Current updates it and creates a backup automatically."
+        : "Apply loads the selected profile. Startup overlays changes the current setup; Save current settings stores it in that profile."
 }
 
 CPBigBoxUpdateManageContent() {
@@ -5423,7 +5918,7 @@ CPBigBoxSettingsGroups(page := "") {
             return [
                 ["AI SETTINGS", ["ai_provider", "ai_model", "ai_detail"]],
                 ["AUDIO INPUT", ["audio_device", "audio_refresh", "audio_test"]],
-                ["AUDIO SESSION", ["audio_power", "audio_status"]]
+                ["AUDIO SESSION", ["audio_power"]]
             ]
         case "translationWindow", "explanationWindow":
             return [
@@ -5447,7 +5942,7 @@ CPBigBoxSettingsGroups(page := "") {
         case "profiles":
             return [
                 ["PROFILE", ["prof_select", "prof_apply"]],
-                ["CURRENT SETTINGS", ["prof_save"]],
+                ["CURRENT SETTINGS", ["prof_startup", "prof_save"]],
                 ["MANAGE", ["prof_new", "prof_delete"]]
             ]
         case "apiKeys":
@@ -5525,9 +6020,71 @@ CPBigBoxToggleScreenshotOption(option, *) {
     CPBigBoxRestorePageFocus()
 }
 
+CPBigBoxScreenshotHintDetail(key) {
+    switch key {
+        case "ai_provider":
+            return "This selects the screenshot translation service; Explanation and Audio have their own providers."
+        case "ai_model":
+            return "Choose a saved model, or use Manage models in the picker to add or remove models."
+        case "ai_detail":
+            return "Choose a prompt, or use Manage prompts in the picker to create, edit, or remove one."
+        case "shot_highlight":
+            return "Turn this off to display inferred subjects and pronouns without italics."
+        case "shot_speakerColor":
+            return "Adjust the speaker name color on the Translation Window page."
+        case "capture_settings":
+            return "The capture menu supports both a screen region and a specific game window."
+        case "shot_openOnStartup":
+            return "Save this choice in a Profile to choose which overlays open for each game."
+        case "shot_alwaysOnTop":
+            return "This controls the Translator overlay, not the fullscreen dashboard."
+        case "shot_clearOnStartup":
+            return "Leave this off to keep captured files available between sessions."
+        case "backHome":
+            return "Return to the Home tiles without changing your saved screenshot settings."
+        case "advanced":
+            return "Open the desktop control center for the same settings in its classic layout."
+        case "return":
+            return "Close the dashboard and return to your game; saved settings are kept."
+        default:
+            return "Use LB / RB to browse the full control-center pages, or B to return to Home."
+    }
+}
+
+CPBigBoxAudioHintDetail(key) {
+    switch key {
+        case "ai_provider":
+            return "This selects the live audio service; Screenshot Translation and Explanation have their own providers."
+        case "ai_model":
+            return "Choose a saved audio model, or open Manage models from the picker."
+        case "ai_detail":
+            return "Choose the language for translated dialogue. A running session keeps its current language."
+        case "audio_device":
+            return "Select the Windows output playing your game, such as speakers or headphones, not a microphone."
+        case "audio_refresh":
+            return "Re-scan connected outputs without changing your saved selection. Unavailable devices stay listed."
+        case "audio_test":
+            return "Checks the selected input locally, without using AI or starting a translation session."
+        case "audio_power":
+            return "Input checks are separate from live translation. Stop the session before running a test."
+        case "backHome":
+            return "Return to the Home tiles without stopping a running audio translation session."
+        case "advanced":
+            return "Open the desktop control center for the same audio settings in its classic layout."
+        case "return":
+            return "Close the dashboard and return to your game; a running audio session continues."
+        default:
+            return "Use LB / RB to browse the full control-center pages, or B to return to Home."
+    }
+}
+
 CPBigBoxUpdateSettingsHint(key := "") {
     global CPBigBoxControls, CPBigBoxCurrentPage, CPBigBoxAINotice, CPBigBoxPageFocus, CPBigBoxControlNotice
     global CPBigBoxSetupNotice
+    if CPBigBoxCurrentPage = "home" {
+        CPBigBoxUpdateHomeHint(key)
+        return
+    }
     if !CPBigBoxGroupedSettingsActive()
         return
     if CPBigBoxOverlayTarget() != "" {
@@ -5604,8 +6161,8 @@ CPBigBoxUpdateSettingsHint(key := "") {
         : CPBigBoxCurrentPage = "explanation"
             ? "Model/prompt editing and study actions remain available in Advanced Settings during migration."
             : CPBigBoxCurrentPage = "audio"
-                ? "Device refresh and audio tests have a 30-second limit. Results appear below."
-            : "Model management and screenshot actions remain in Advanced Settings for now.")
+                ? CPBigBoxAudioHintDetail(key)
+            : CPBigBoxScreenshotHintDetail(key))
     ; Queued native Focus events can repeat the synchronous navigation update.
     ; Do not repaint even the help label when its contents have not changed.
     if CPBigBoxControls["modeBody"].Text != text
@@ -5677,9 +6234,12 @@ CPBigBoxUpdateAudioInput() {
         . StrReplace(CPBigBoxShortText(device != "" ? device : "Refresh devices first", 56), "&", "&&")
     CPBigBoxControls["audio_refresh"].Text := busy && gAudioInputJob["mode"] = "devices" ? "Refreshing devices…" : "Refresh devices"
     CPBigBoxControls["audio_test"].Text := busy && gAudioInputJob["mode"] = "test" ? "Listening, please wait…" : "Test audio"
-    CPBigBoxControls["audio_status"].Text := gAudioInputStatus
+    CPBigBoxControls["audio_status"].Text := gAudioInputStatus = "Not tested."
+        ? "Not tested yet. Play game audio, then select Test audio." : gAudioInputStatus
     CPBigBoxControls["audio_status"].Visible := active
     CPBigBoxControls["audio_status"].Enabled := active
+    CPBigBoxControls["audio_status_label"].Visible := active
+    CPBigBoxControls["audio_status_label"].Enabled := active
     for key in ["audio_device", "audio_refresh", "audio_test"] {
         if active && busy && IsObject(focused) && focused.Hwnd = CPBigBoxControls[key].Hwnd
             restoreFocus := true
@@ -5718,7 +6278,8 @@ CPBigBoxUpdateAudioPower(*) {
     CPBigBoxAudioLastState := running
     for key in ["audioToggle", "audio_power"] {
         powerLabel := CPBigBoxAudioSwitching ? "Audio Translation`nPlease wait…"
-            : "Audio Translation`n" (running ? "On · Select to stop" : "Off · Select to start")
+            : "Audio Translation`n" (running ? "On" : "Off")
+                . (key = "audio_power" ? (running ? " · Select to stop" : " · Select to start") : "")
         if CPBigBoxControls[key].Text != powerLabel
             CPBigBoxControls[key].Text := powerLabel
         active := key = "audioToggle" ? CPBigBoxCurrentPage = "home"
@@ -5967,6 +6528,7 @@ CPBigBoxAIFieldLabel(domain, field) {
         : field = "glossaryProfile" ? GlossaryKindLabel(domain) " profile"
         : field = "glossaryEntry" ? GlossaryKindLabel(domain) " entry"
         : field = "gameProfile" ? "game profile"
+        : field = "startupOverlays" ? "Startup overlays"
         : field = "device" ? "Listen device" : field = "provider" ? "Provider" : field = "model" ? "Model"
         : domain = "audio" ? "Output language" : "Prompt"
 }
@@ -6494,6 +7056,10 @@ CPBigBoxCommitAIChoiceIndex(index) {
         CPBigBoxCommitGameProfile(index)
         return
     }
+    if state["field"] = "startupOverlays" {
+        CPBigBoxCommitStartupOverlayChoice(index)
+        return
+    }
     CPBigBoxAICommitting := true
     try {
         ctrl := CPBigBoxAIControl(state["domain"], state["field"])
@@ -6636,7 +7202,7 @@ CPBigBoxUpdateAIContent() {
     }
     domain := CPBigBoxAIDomain()
     if domain = "" && !(CPBigBoxAIChoiceActive()
-        && ArrHas(["overlayFont", "controlAction", "glossaryProfile", "glossaryEntry", "gameProfile"], CPBigBoxAIChoice["field"]))
+        && ArrHas(["overlayFont", "controlAction", "glossaryProfile", "glossaryEntry", "gameProfile", "startupOverlays"], CPBigBoxAIChoice["field"]))
         return
     if domain != "" {
     for field in ["provider", "model", "detail"] {
@@ -6741,6 +7307,7 @@ CPBigBoxRestorePageFocus() {
         : CPBigBoxCurrentPage = "captureLimit" ? "cap_save"
         : CPBigBoxCurrentPage = "overlayEdit" ? "ov_slider1"
         : CPBigBoxCurrentPage = "quickOverlays" ? "ov_translator"
+        : CPBigBoxCurrentPage = "quickMainWindow" ? "ov_opacity"
         : CPBigBoxCurrentPage = "quickControls" ? "ctrl_controller"
         : CPBigBoxCurrentPage = "controlDetail" ? "ctrl_primary"
         : CPBigBoxCurrentPage = "controlHotkey" ? "ctrl_hotkey"
@@ -6843,7 +7410,9 @@ CPBigBoxBuildPageNavigation() {
             CPBigBoxControls["cap_plus100"], CPBigBoxControls["cap_plus500"]],
             [CPBigBoxControls["cap_save"], CPBigBoxControls["cap_cancel"]])
     } else if CPBigBoxCurrentPage = "quickOverlays" {
-        CPBigBoxNavigationRows.Push([CPBigBoxControls["ov_translator"], CPBigBoxControls["ov_explainer"]])
+        CPBigBoxNavigationRows.Push([CPBigBoxControls["ov_translator"], CPBigBoxControls["ov_explainer"], CPBigBoxControls["ov_main"]])
+    } else if CPBigBoxCurrentPage = "quickMainWindow" {
+        CPBigBoxNavigationRows.Push([CPBigBoxControls["ov_opacity"], CPBigBoxControls["ov_topmost"]])
     } else if CPBigBoxOverlayQuick() {
         CPBigBoxNavigationRows.Push([CPBigBoxControls["ov_bg"], CPBigBoxControls["ov_opacity"], CPBigBoxControls["ov_position"]])
     } else if CPBigBoxCurrentPage = "overlayEdit" {
@@ -6968,13 +7537,14 @@ CPBigBoxApplyPageVisibility() {
         CPBigBoxControls[key].Enabled := isLimit
     }
     CPBigBoxControls["cap_value"].Visible := isLimit
-    for key in ["ov_translator", "ov_explainer"] {
+    for key in ["ov_translator", "ov_explainer", "ov_main"] {
         CPBigBoxControls[key].Visible := CPBigBoxCurrentPage = "quickOverlays"
         CPBigBoxControls[key].Enabled := CPBigBoxCurrentPage = "quickOverlays"
     }
     for key in CPBigBoxOverlayKeys() {
         active := overlayTarget != "" && !choosing && !(key = "ov_name" && overlayTarget = "Explainer")
-            && (!CPBigBoxOverlayQuick() || key = "ov_bg" || key = "ov_opacity" || key = "ov_position")
+            && (overlayTarget = "Main window" ? (key = "ov_opacity" || key = "ov_topmost")
+                : (key != "ov_topmost" && (!CPBigBoxOverlayQuick() || key = "ov_bg" || key = "ov_opacity" || key = "ov_position")))
         CPBigBoxControls[key].Visible := active
         CPBigBoxControls[key].Enabled := active
     }
@@ -7021,10 +7591,10 @@ CPBigBoxApplyPageVisibility() {
         CPBigBoxControls[key].Visible := active
         CPBigBoxControls[key].Enabled := active
     }
-    for key in ["prof_select", "prof_apply", "prof_save", "prof_new", "prof_delete"] {
+    for key in ["prof_select", "prof_apply", "prof_startup", "prof_save", "prof_new", "prof_delete"] {
         active := CPBigBoxCurrentPage = "profiles" && !choosing
         CPBigBoxControls[key].Visible := active
-        CPBigBoxControls[key].Enabled := active && (key = "prof_select" || key = "prof_new"
+        CPBigBoxControls[key].Enabled := active && (key = "prof_select" || key = "prof_new" || key = "prof_startup"
             || CPBigBoxProfileSelected() != "")
     }
     for key in ["mg_name", "mg_source", "mg_target", "mg_raw", "mg_save",
@@ -7104,10 +7674,10 @@ CPBigBoxApplyPageVisibility() {
         CPBigBoxControls["shot_" option].Visible := active
         CPBigBoxControls["shot_" option].Enabled := active
     }
-    for key in ["audio_device", "audio_refresh", "audio_test", "audio_status"] {
+    for key in ["audio_device", "audio_refresh", "audio_test", "audio_status", "audio_status_label"] {
         active := CPBigBoxCurrentPage = "audio" && !choosing
         CPBigBoxControls[key].Visible := active
-        CPBigBoxControls[key].Enabled := active && (key = "audio_status" || !AudioInputJobBusy())
+        CPBigBoxControls[key].Enabled := active && (SubStr(key, 1, 12) = "audio_status" || !AudioInputJobBusy())
     }
     Loop 3 {
         CPBigBoxControls["settingsGroup" A_Index].Visible := CPBigBoxGroupedSettingsActive()
@@ -7519,10 +8089,32 @@ CPBigBoxDashboardRenderPicture(
     }
 }
 
+CPBigBoxBrandLogoPath() {
+    static bundledPath := ""
+    assetPath := A_ScriptDir "\assets\bigbox-logo.png"
+    if FileExist(assetPath)
+        return assetPath
+    ; Embed the supplied asset in compiled builds too. A read-only installation
+    ; can use a temporary copy without depending on the user's original file.
+    if A_IsCompiled {
+        if bundledPath != "" && FileExist(bundledPath)
+            return bundledPath
+        try {
+            assetDir := A_Temp "\JRPG_Translator_Assets"
+            DirCreate(assetDir)
+            bundledPath := assetDir "\bigbox-logo.png"
+            FileInstall("assets\bigbox-logo.png", bundledPath, true)
+            return bundledPath
+        }
+    }
+    return ""
+}
+
 CPBigBoxDashboardRenderArtwork(*) {
     global CP_GAME_BOX_ART, CP_GAME_CLEAR_LOGO
     global CPBigBoxArtworkArea, CPBigBoxLogoArea
     global CPBigBoxArtworkRenderKey, CPBigBoxLogoRenderKey
+    global CPBigBoxBrandArea, CPBigBoxBrandRenderKey
     if !CPBigBoxDashboardAlive()
         return
     cpDashArtwork := CPBigBoxDashboardArtworkChoice()
@@ -7536,10 +8128,13 @@ CPBigBoxDashboardRenderArtwork(*) {
         "gameLogo", cpDashSeparateLogo ? CP_GAME_CLEAR_LOGO : "",
         CPBigBoxLogoArea, &CPBigBoxLogoRenderKey
     )
+    CPBigBoxDashboardRenderPicture("brandLogo", CPBigBoxBrandLogoPath(),
+        CPBigBoxBrandArea, &CPBigBoxBrandRenderKey)
 }
 
 CPBigBoxDashboardResize(bigBoxGui, minMax, width, height) {
     global CPBigBoxControls, CPBigBoxArtworkArea, CPBigBoxLogoArea
+    global CPBigBoxBrandArea
     global CP_GAME_BOX_ART, CP_GAME_CLEAR_LOGO, CPBigBoxPageIndicator
     global CPBigBoxCurrentPage, CPBigBoxFocusFrame, CPBigBoxControlState, CPBigBoxSetupState
     if (minMax = -1 || width <= 0 || height <= 0)
@@ -7578,10 +8173,16 @@ CPBigBoxDashboardResize(bigBoxGui, minMax, width, height) {
     )
     cpEyebrowH := Max(24, Ceil(24 * cpDashDpiScale))
     cpTitleH := Max(58, Ceil(58 * cpDashDpiScale))
-    cpSubtitleH := Max(50, Ceil(50 * cpDashDpiScale))
+    cpStatusRowH := Max(23, Ceil(28 * cpDashDpiScale))
+    cpSubtitleH := cpStatusRowH * 3
     cpTitleY := cpTop + cpEyebrowH + cpHeaderGap
     cpSubtitleY := cpTitleY + cpTitleH + cpHeaderGap
     cpHeaderBottom := cpSubtitleY + cpSubtitleH
+    cpBrandH := cpEyebrowH + cpHeaderGap + cpTitleH
+    cpBrandW := Round(cpBrandH * 434 / 500)
+    cpBrandGap := CPBigBoxBrandLogoPath() != "" ? cpBrandW + cpSectionGap : 0
+    CPBigBoxBrandArea := Map("x", cpMargin, "y", cpTop,
+        "w", cpBrandW, "h", cpBrandH)
 
     cpArtworkSize := Min(
         Max(104, Round(170 * cpDashDpiScale)),
@@ -7655,14 +8256,27 @@ CPBigBoxDashboardResize(bigBoxGui, minMax, width, height) {
 
     CPBigBoxControls["accent"].Move(0, 0, width, Max(6, Round(height * 0.008)))
     CPBigBoxControls["eyebrow"].Move(
-        cpMargin, cpTop, cpHeaderLeftW, cpEyebrowH
+        cpMargin + cpBrandGap, cpTop, cpHeaderLeftW - cpBrandGap, cpEyebrowH
     )
     CPBigBoxControls["title"].Move(
-        cpMargin, cpTitleY, cpHeaderLeftW, cpTitleH
+        cpMargin + cpBrandGap, cpTitleY, cpHeaderLeftW - cpBrandGap, cpTitleH
     )
     CPBigBoxControls["subtitle"].Move(
         cpMargin, cpSubtitleY, cpHeaderLeftW, cpSubtitleH
     )
+    cpStatusLabelW := Max(88, Round(100 * cpDashDpiScale))
+    cpStatusGap := Max(10, Round(16 * cpDashDpiScale))
+    cpStatusValueW := Max(100, Floor((cpHeaderLeftW - cpStatusLabelW - cpStatusGap * 2) / 2))
+    for cpStatusIndex, cpStatusKey in ["translation", "explanation", "audio"] {
+        cpStatusY := cpSubtitleY + (cpStatusIndex - 1) * cpStatusRowH
+        CPBigBoxControls["status_" cpStatusKey "_label"].Move(
+            cpMargin, cpStatusY, cpStatusLabelW, cpStatusRowH)
+        CPBigBoxControls["status_" cpStatusKey "_model"].Move(
+            cpMargin + cpStatusLabelW + cpStatusGap, cpStatusY, cpStatusValueW, cpStatusRowH)
+        CPBigBoxControls["status_" cpStatusKey "_detail"].Move(
+            cpMargin + cpStatusLabelW + cpStatusGap * 2 + cpStatusValueW,
+            cpStatusY, cpStatusValueW, cpStatusRowH)
+    }
     CPBigBoxControls["panel"].Move(
         cpMargin, cpDashPanelY, cpContentW, cpDashPanelH
     )
@@ -7772,11 +8386,24 @@ CPBigBoxDashboardResize(bigBoxGui, minMax, width, height) {
                 cpGroupY + Floor((cpGroupH - cpGroupLabelH) / 2), cpGroupLabelW, cpGroupLabelH)
             for index, key in group[2]
                 CPBigBoxControls[key].Move(cpGroupButtonX + (index - 1) * (cpGroupButtonW + cpTileGapX),
-                    cpGroupY, key = "ctrl_status" ? 3 * cpGroupButtonW + 2 * cpTileGapX
-                        : key = "audio_status" ? 2 * cpGroupButtonW + cpTileGapX : cpGroupButtonW, cpGroupH)
+                    cpGroupY, key = "ctrl_status" ? 3 * cpGroupButtonW + 2 * cpTileGapX : cpGroupButtonW, cpGroupH)
             if groupIndex < 3
                 CPBigBoxControls["settingsDivider" groupIndex].Move(cpPanelInnerX,
                     cpGroupY + cpGroupH + Floor(cpGroupGap / 2), cpPanelInnerW, Max(1, Round(cpDashDpiScale)))
+        }
+        if CPBigBoxCurrentPage = "audio" {
+            ; Group the diagnostic readout beneath Refresh/Test, independently
+            ; of the live-session switch. Plain text adds no controller stop.
+            cpInputStatusX := cpGroupButtonX + cpGroupButtonW + cpTileGapX
+            cpInputStatusY := cpActionTop + 2 * (cpGroupH + cpGroupGap)
+            cpInputStatusW := 2 * cpGroupButtonW + cpTileGapX
+            cpInputStatusTitleH := Max(16, Ceil(20 * cpDashDpiScale))
+            cpInputStatusGap := Max(2, Round(3 * cpDashDpiScale))
+            CPBigBoxControls["audio_status_label"].Move(cpInputStatusX, cpInputStatusY,
+                cpInputStatusW, cpInputStatusTitleH)
+            CPBigBoxControls["audio_status"].Move(cpInputStatusX,
+                cpInputStatusY + cpInputStatusTitleH + cpInputStatusGap,
+                cpInputStatusW, Max(20, cpGroupH - cpInputStatusTitleH - cpInputStatusGap))
         }
     }
     for index, key in ["cap_region", "cap_window", "cap_max"]
@@ -7789,11 +8416,15 @@ CPBigBoxDashboardResize(bigBoxGui, minMax, width, height) {
             cpActionTop + cpTileH + cpTileGapY, cpTileW, cpTileH)
     for index, key in ["cap_save", "cap_cancel"]
         CPBigBoxControls[key].Move(cpPanelInnerX + (index - 1) * (cpBottomW + cpTileGapX), cpBottomY, cpBottomW, cpBottomButtonH)
-    for index, key in ["ov_translator", "ov_explainer"]
-        CPBigBoxControls[key].Move(cpPanelInnerX + (index - 1) * (cpBottomW + cpTileGapX), cpActionTop, cpBottomW, cpTileH)
+    for index, key in ["ov_translator", "ov_explainer", "ov_main"]
+        CPBigBoxControls[key].Move(cpPanelInnerX + (index - 1) * (cpAIWidth + cpTileGapX), cpActionTop, cpAIWidth, cpTileH)
     if CPBigBoxOverlayQuick() {
         for index, key in ["ov_bg", "ov_opacity", "ov_position"]
             CPBigBoxControls[key].Move(cpPanelInnerX + (index - 1) * (cpAIWidth + cpTileGapX), cpActionTop, cpAIWidth, cpTileH)
+    }
+    if CPBigBoxCurrentPage = "quickMainWindow" {
+        for index, key in ["ov_opacity", "ov_topmost"]
+            CPBigBoxControls[key].Move(cpPanelInnerX + (index - 1) * (cpBottomW + cpTileGapX), cpActionTop, cpBottomW, cpTileH)
     }
     CPBigBoxControls["ov_note"].Move(cpPanelInnerX, cpActionTop + cpTileH + cpTileGapY,
         cpPanelInnerW, Max(40, cpGridBottom - cpActionTop - cpTileH - cpTileGapY))
@@ -7945,6 +8576,7 @@ CPBigBoxDashboardResize(bigBoxGui, minMax, width, height) {
     )
     CPBigBoxDashboardRenderArtwork()
     CPBigBoxUpdateFocusFrame()
+    CPBigBoxBackgroundSync()
 }
 
 CPBigBoxUpdateApiContent() {
@@ -8073,6 +8705,64 @@ CPBigBoxUpdateSetupContent() {
             : "Pending edits do not change the saved configuration until you confirm them.")
 }
 
+CPBigBoxHeaderStatus() {
+    global imgProvider, imgModel, geminiImgModel, promptProfile
+    global explainProvider, explainOpenAIModel, explainGeminiModel, explainPromptProfile
+    global audioProvider, trModel, geminiAudioModel, audioTargetLang
+    return Map(
+        "translation", Map("label", "Translation", "model", CPBigBoxProviderLabel(imgProvider)
+            " · " (StrLower(imgProvider) = "gemini" ? geminiImgModel : imgModel),
+            "detail", "Prompt: " (promptProfile != "" ? promptProfile : "Not selected")),
+        "explanation", Map("label", "Explanation", "model", CPBigBoxProviderLabel(explainProvider)
+            " · " (StrLower(explainProvider) = "gemini" ? explainGeminiModel : explainOpenAIModel),
+            "detail", "Prompt: " (explainPromptProfile != "" ? explainPromptProfile : "Not selected")),
+        "audio", Map("label", "Audio", "model", CPBigBoxProviderLabel(audioProvider)
+            " · " (StrLower(audioProvider) = "gemini" ? geminiAudioModel : trModel),
+            "detail", "Language: " (audioTargetLang != "" ? audioTargetLang : "Not selected"))
+    )
+}
+
+CPBigBoxUpdateHomeHint(key := "") {
+    global CPBigBoxCurrentPage, CPBigBoxControls, CPBigBoxPageFocus, CPBigBoxActionNotice, iniPath
+    if CPBigBoxCurrentPage != "home" || !CPBigBoxControls.Has("modeBody")
+        return
+    if key = ""
+        key := CPBigBoxPageFocus.Get("home", "")
+    ; Audio feedback remains available on its tile, without hiding the full
+    ; model/prompt information when the user navigates to a different action.
+    if CPBigBoxActionNotice != "" && key = "audioToggle" {
+        CPBigBoxControls["modeBody"].Text := CPBigBoxActionNotice
+        return
+    }
+    statusKey := key = "audioAI" ? "audio" : key
+    rows := CPBigBoxHeaderStatus()
+    if rows.Has(statusKey) {
+        row := rows[statusKey]
+        help := row["label"] " model: " row["model"] "`n" row["detail"]
+    } else {
+        switch key {
+            case "audioToggle":
+                help := "Audio translation is " (AudioIsRunning() ? "on. Select to stop." : "off. Select to start.")
+                    . "`n" rows["audio"]["detail"]
+            case "capture":
+                help := "Capture mode: " (StrLower(IniRead(iniPath, "capture", "mode", "region")) = "window" ? "Window" : "Region")
+                    . ". Select a region, choose a game window, or adjust image size."
+            case "overlays":
+                help := "Translator: " CPBigBoxOverlayState("Translator")
+                    . "     Explainer: " CPBigBoxOverlayState("Explainer")
+                    . "`nAdjust overlay colors, text, position, and opacity."
+            case "study":
+                help := "Active library: " StudyLibraryConfiguredName()
+                    . "`nBrowse saved explanations, read, and prepare material for Anki."
+            case "controls": help := "Configure controller bindings and keyboard shortcuts."
+            case "advanced": help := "Open the desktop control center for advanced settings."
+            case "return": help := "Close the dashboard and return to your game."
+            default: help := "Choose a quick action, or use LB / RB to browse the full control-center pages."
+        }
+    }
+    CPBigBoxControls["modeBody"].Text := help
+}
+
 CPBigBoxDashboardUpdateContent(*) {
     global CPBigBoxControls, iniPath
     global CPBigBoxActionNotice
@@ -8099,6 +8789,10 @@ CPBigBoxDashboardUpdateContent(*) {
     CPBigBoxControls["gamePlatform"].Text := Trim(CP_GAME_PLATFORM)
     CPBigBoxControls["profileValue"].Text := cpProfile != ""
         ? cpProfile : "No Profile selected"
+    for cpStatusKey, cpStatus in CPBigBoxHeaderStatus() {
+        for cpField in ["label", "model", "detail"]
+            CPBigBoxControls["status_" cpStatusKey "_" cpField].Text := cpStatus[cpField]
+    }
 
     cpShotProvider := CPBigBoxProviderLabel(imgProvider)
     cpShotModel := StrLower(imgProvider) = "gemini"
@@ -8136,6 +8830,7 @@ CPBigBoxDashboardUpdateContent(*) {
         "quickOverlays", "Translator: " cpTranslatorState "     Explainer: " cpExplainerState,
         "quickTranslatorWindow", "Translator: " cpTranslatorState,
         "quickExplainerWindow", "Explainer: " cpExplainerState,
+        "quickMainWindow", "Control center background opacity and Always on top.",
         "overlayEdit", "Save applies this value; Cancel leaves your setting unchanged.",
         "quickControls", "Direct actions: " (CPControllerInputsEnabled ? "On" : "Off")
             "     D-pad navigation: " (CPControllerDpadNavigationEnabled ? "On" : "Off"),
@@ -8156,8 +8851,7 @@ CPBigBoxDashboardUpdateContent(*) {
     cpPage := CPBigBoxPageDefinitions()[CPBigBoxCurrentPage]
     CPBigBoxControls["modeTitle"].Text := cpPage[1]
     CPBigBoxControls["modeBody"].Text := CPBigBoxCurrentPage = "home"
-        ? (CPBigBoxActionNotice != "" ? CPBigBoxActionNotice
-            : "Home tiles: quick in-game controls. L/R: the complete control center.`nAI settings, audio On/Off and capture controls are ready.")
+        ? ""
         : (CPBigBoxAIDomain() != "" && CPBigBoxMainPageIndex(CPBigBoxCurrentPage)
             ? "AI selections · More controls from this tab will follow in the next stages."
             : cpPage[2]) "`n" cpSummaries[CPBigBoxCurrentPage]
@@ -8190,17 +8884,13 @@ CPBigBoxDashboardUpdateContent(*) {
         . (cpPageIndex
             ? "LB / RB · L1 / R1 · PgUp / PgDn  Full control-center pages"
             : "Return to Home to browse the full control-center pages with L/R.")
-    CPBigBoxControls["translation"].Text := "Translation AI`n" cpShotProvider
-        . " · " CPBigBoxShortText(cpShotModel, 18)
-    CPBigBoxControls["explanation"].Text := "Explanation AI`n" cpExplainProvider
-        . " · " CPBigBoxShortText(cpExplainModel, 18)
-    CPBigBoxControls["audioAI"].Text := "Audio Translation AI`n" cpAudioProvider
-        . " · " CPBigBoxShortText(cpAudioModel, 18)
+    CPBigBoxControls["translation"].Text := "Translation AI"
+    CPBigBoxControls["explanation"].Text := "Explanation AI"
+    CPBigBoxControls["audioAI"].Text := "Audio AI"
     CPBigBoxControls["capture"].Text := "Capture…`n" cpCaptureSummary
-    CPBigBoxControls["overlays"].Text := "Overlay Windows`nTranslator / Explainer"
-    CPBigBoxControls["study"].Text := "Study Library`n"
-        . CPBigBoxShortText(cpStudyLibraryName, 24)
-    CPBigBoxControls["controls"].Text := "Button Configuration`nController bindings"
+    CPBigBoxControls["overlays"].Text := "Overlay Windows"
+    CPBigBoxControls["study"].Text := "Study Library"
+    CPBigBoxControls["controls"].Text := "Controller Settings"
     CPBigBoxUpdateAIContent()
     CPBigBoxUpdateExplanationOptions()
     CPBigBoxUpdateScreenshotOptions()
@@ -8215,6 +8905,7 @@ CPBigBoxDashboardUpdateContent(*) {
     CPBigBoxUpdateApiContent()
     CPBigBoxUpdatePathsContent()
     CPBigBoxUpdateSetupContent()
+    CPBigBoxUpdateHomeHint()
     for index, group in CPBigBoxSettingsGroups()
         CPBigBoxControls["settingsGroup" index].Text := group[1]
     CPBigBoxDashboardRenderArtwork()
@@ -8285,7 +8976,7 @@ CPBigBoxButtonKeys() {
         keys.Push(key)
     for key in CPBigBoxOverlayKeys()
         keys.Push(key)
-    for key in ["ov_translator", "ov_explainer", "ov_save", "ov_cancel"]
+    for key in ["ov_translator", "ov_explainer", "ov_main", "ov_save", "ov_cancel"]
         keys.Push(key)
     for key in ["ctrl_keyboard", "ctrl_controller", "ctrl_enabled", "ctrl_dpad",
         "ctrl_primary", "ctrl_disable", "ctrl_default", "ctrl_back",
@@ -8293,7 +8984,7 @@ CPBigBoxButtonKeys() {
         keys.Push(key)
     for key in ["term_enabled", "term_en_profile", "term_en_manage", "term_en_tools",
         "term_jp_profile", "term_jp_manage", "term_jp_tools",
-        "prof_select", "prof_apply", "prof_save", "prof_new", "prof_delete",
+        "prof_select", "prof_apply", "prof_startup", "prof_save", "prof_new", "prof_delete",
         "mg_save", "mg_delete", "mg_new", "mg_confirm", "mg_cancel"]
         keys.Push(key)
     for key in ["api_gemini", "api_openai", "api_windows", "api_delete", "api_about",
@@ -8404,12 +9095,19 @@ CPBigBoxDashboardApplyFonts(ratio, force := false) {
         CPBigBoxControls[spec[1]].SetFont(
             "s" Round(spec[2] * ratio, 2) (spec[3] ? " Bold" : " Norm"))
     }
+    for statusKey in ["translation", "explanation", "audio"] {
+        CPBigBoxControls["status_" statusKey "_label"].SetFont("s" Round(11 * ratio, 2) " Bold")
+        for field in ["model", "detail"]
+            CPBigBoxControls["status_" statusKey "_" field].SetFont("s" Round(11 * ratio, 2) " Norm")
+    }
     for key in CPBigBoxButtonKeys()
         CPBigBoxControls[key].SetFont("s" Round(14 * ratio, 2) " Bold")
     CPBigBoxControls["cap_value"].SetFont("s" Round(30 * ratio, 2) " Bold")
     CPBigBoxControls["cap_note"].SetFont("s" Round(11 * ratio, 2) " Norm")
     CPBigBoxControls["ov_note"].SetFont("s" Round(11 * ratio, 2) " Norm")
     CPBigBoxControls["ctrl_status"].SetFont("s" Round(12 * ratio, 2) " Norm")
+    CPBigBoxControls["audio_status_label"].SetFont("s" Round(10 * ratio, 2) " Bold")
+    CPBigBoxControls["audio_status"].SetFont("s" Round(11 * ratio, 2) " Norm")
     CPBigBoxControls["ctrl_hotkey"].SetFont("s" Round(20 * ratio, 2) " Norm")
     for key in ["mg_name", "mg_source", "mg_target", "mg_raw", "setup_edit", "setup_secret", "setup_raw"]
         CPBigBoxControls[key].SetFont("s" Round(15 * ratio, 2) " Norm")
@@ -8421,8 +9119,8 @@ CPBigBoxDashboardApplyFonts(ratio, force := false) {
         CPBigBoxControls["ov_label" A_Index].SetFont("s" Round(11 * ratio, 2) " Norm")
     if layout != "standard" {
         for key in CPBigBoxSettingsKeys()
-            CPBigBoxControls[key].SetFont("s" Round((key = "audio_status" || key = "ctrl_status" ? 11 : 12) * ratio, 2)
-                . (key = "audio_status" || key = "ctrl_status" ? " Norm" : " Bold"))
+            CPBigBoxControls[key].SetFont("s" Round((key = "ctrl_status" ? 11 : 12) * ratio, 2)
+                . (key = "ctrl_status" ? " Norm" : " Bold"))
     }
     for row, listPointSize in [11, 14, 18, 14, 11]
         CPBigBoxControls["listChoice" row].SetFont("s" Round(listPointSize * ratio, 2) (row = 3 ? " Bold" : " Norm"))
@@ -8436,31 +9134,38 @@ CPBigBoxDashboardApplyTheme(*) {
     if !CPBigBoxDashboardAlive()
         return
     cpColors := CPPalette(controlDarkMode)
-    CPBigBoxGui.BackColor := cpColors["window"]
+    CPBigBoxGui.BackColor := CPBigBoxBackgroundColor()
     CPBigBoxControls["accent"].Opt("+Background" cpColors["accent"])
-    CPBigBoxControls["panel"].Opt("+Background" cpColors["surface"])
+    CPBigBoxControls["panel"].Opt("+Background" CPBigBoxBackgroundColor("surface"))
     CPBigBoxControls["artFrame"].Opt(
         "+Background" cpColors["surfaceAlt"]
     )
-    for cpKey in ["modeTitle", "modeBody", "pageHint", "previewTitle", "previewBody", "aiNote", "audio_status", "cap_note", "cap_value", "ov_note", "ov_label1", "ov_label2", "ov_label3", "ctrl_status", "mg_label1", "mg_label2", "setup_label", "setup_info"]
-        CPBigBoxControls[cpKey].Opt("+Background" cpColors["surface"])
+    for cpKey in ["modeTitle", "modeBody", "pageHint", "previewTitle", "previewBody", "aiNote", "audio_status", "audio_status_label", "cap_note", "cap_value", "ov_note", "ov_label1", "ov_label2", "ov_label3", "ctrl_status", "mg_label1", "mg_label2", "setup_label", "setup_info"]
+        CPBigBoxControls[cpKey].Opt("+Background" CPBigBoxBackgroundColor("surface"))
     CPBigBoxControls["pageTrack"].Opt("+Background" cpColors["surfaceAlt"])
     CPBigBoxControls["pageHighlight"].Opt("+Background" cpColors["accent"])
     Loop 3 {
-        CPBigBoxControls["settingsGroup" A_Index].Opt("+Background" cpColors["surface"])
+        CPBigBoxControls["settingsGroup" A_Index].Opt("+Background" CPBigBoxBackgroundColor("surface"))
         CPBigBoxControls["settingsGroup" A_Index].SetFont("c" cpColors["muted"])
         if A_Index < 3
             CPBigBoxControls["settingsDivider" A_Index].Opt("+Background" cpColors["border"])
     }
     for key in CPBigBoxFocusFrameKeys()
         CPBigBoxControls[key].Opt("+Background" CPBigBoxFocusColor())
-    for cpKey in ["title", "gameTitle", "profileValue", "modeTitle", "previewTitle", "cap_value"]
+    for cpKey in ["title", "gameTitle", "profileValue", "modeTitle", "previewTitle", "cap_value", "audio_status"]
         CPBigBoxControls[cpKey].SetFont("c" cpColors["text"])
-    for cpKey in ["subtitle", "gameLabel", "gamePlatform", "profileLabel", "modeBody", "footer", "pageHint", "previewBody", "aiNote", "audio_status", "cap_note", "ov_note", "ov_label1", "ov_label2", "ov_label3", "ctrl_status", "mg_label1", "mg_label2", "setup_label", "setup_info"]
+    for cpKey in ["subtitle", "gameLabel", "gamePlatform", "profileLabel", "modeBody", "footer", "pageHint", "previewBody", "aiNote", "audio_status_label", "cap_note", "ov_note", "ov_label1", "ov_label2", "ov_label3", "ctrl_status", "mg_label1", "mg_label2", "setup_label", "setup_info"]
         CPBigBoxControls[cpKey].SetFont("c" cpColors["muted"])
     CPBigBoxControls["eyebrow"].SetFont("c" cpColors["accent"])
+    for statusKey in ["translation", "explanation", "audio"] {
+        for field in ["label", "model", "detail"] {
+            CPBigBoxControls["status_" statusKey "_" field].Opt("+Background" CPBigBoxBackgroundColor())
+            CPBigBoxControls["status_" statusKey "_" field].SetFont("c"
+                (field = "label" ? cpColors["text"] : cpColors["muted"]))
+        }
+    }
     for row in [1, 2, 4, 5] {
-        CPBigBoxControls["listChoice" row].Opt("+Background" cpColors["surface"])
+        CPBigBoxControls["listChoice" row].Opt("+Background" CPBigBoxBackgroundColor("surface"))
         CPBigBoxControls["listChoice" row].SetFont("c" ((row = 1 || row = 5) ? cpColors["muted"] : cpColors["text"]))
     }
     CPBigBoxDashboardApplyFonts(CPBigBoxFontRatio > 0 ? CPBigBoxFontRatio : 1, true)
@@ -8478,6 +9183,11 @@ CPBigBoxDashboardApplyTheme(*) {
     CPAllowDarkModeForWindow(CPBigBoxGui.Hwnd, controlDarkMode)
     for key in CPBigBoxButtonKeys()
         CPApplyThemeToControl(CPBigBoxControls[key].Hwnd, controlDarkMode)
+    ; Header/footer controls without an explicit original background must be
+    ; updated too when switching between opaque and keyed composition.
+    for key in ["eyebrow", "title", "subtitle", "gameLabel", "gameTitle", "gamePlatform", "profileLabel", "profileValue", "footer", "brandLogo", "gameLogo"]
+        CPBigBoxControls[key].Opt("+Background" CPBigBoxBackgroundColor())
+    CPBigBoxBackgroundSync()
     try DllCall(
         "user32\RedrawWindow", "ptr", CPBigBoxGui.Hwnd,
         "ptr", 0, "ptr", 0,
@@ -8489,17 +9199,19 @@ CPBigBoxDashboardCreate() {
     global CPBigBoxGui, CPBigBoxControls, CPBigBoxNavigationControls
     global CPBigBoxNavigationRows, CPBigBoxAIChoice, CPBigBoxFocusFrame
     global CPBigBoxCurrentPage, CPBigBoxSetupState
+    global CPBigBoxBrandRenderKey
     if CPBigBoxDashboardAlive()
         return CPBigBoxGui
 
     cpColors := CPPalette()
     cpGui := Gui(
-        "+AlwaysOnTop -Caption +ToolWindow -DPIScale",
+        (CPBigBoxEffectiveAlwaysOnTop() ? "+AlwaysOnTop " : "") "-Caption +ToolWindow -DPIScale",
         "JRPG Translator - Big Box"
     )
     CPBigBoxGui := cpGui
     CPBigBoxAIChoice := Map("active", false)
     CPBigBoxSetupState := Map("active", false)
+    CPBigBoxBrandRenderKey := ""
     CPBigBoxFocusFrame := Map("key", "", "rect", "", "thickness", 3, "gap", 1)
     CPSetWindowCloaked(cpGui.Hwnd, true)
     cpGui.MarginX := 0
@@ -8518,9 +9230,14 @@ CPBigBoxDashboardCreate() {
         "Text", "x40 y70 w800 h58", "Big Box dashboard"
     )
     CPBigBoxControls["subtitle"] := cpGui.Add(
-        "Text", "x40 y132 w800 h50",
-        "A controller-first home for translation and study controls."
+        "Text", "x40 y132 w800 h50 Hidden", ""
     )
+    CPBigBoxControls["brandLogo"] := cpGui.Add("Picture", "x40 y40 w1 h1 Hidden", "")
+    for statusKey in ["translation", "explanation", "audio"] {
+        for field in ["label", "model", "detail"]
+            CPBigBoxControls["status_" statusKey "_" field] := cpGui.Add(
+                "Text", "x40 y132 w100 h28 +0x4200", "") ; centered, ellipsized, no tab stop
+    }
     CPBigBoxControls["artFrame"] := cpGui.Add(
         "Text", "x900 y40 w170 h170 Background" cpColors["surfaceAlt"], ""
     )
@@ -8584,7 +9301,8 @@ CPBigBoxDashboardCreate() {
         CPBigBoxControls["audio_" action] := cpGui.Add("Button", "x80 y440 w250 h80 Hidden", "")
         CPBigBoxControls["audio_" action].OnEvent("Click", CPBigBoxAudioInputAction.Bind(action))
     }
-    CPBigBoxControls["audio_status"] := cpGui.Add("Text", "x80 y440 w1000 h60 Hidden", "Not tested.")
+    CPBigBoxControls["audio_status_label"] := cpGui.Add("Text", "x80 y440 w1000 h20 Hidden +0x80", "AUDIO INPUT CHECK")
+    CPBigBoxControls["audio_status"] := cpGui.Add("Text", "x80 y464 w1000 h36 Hidden +0x80", "Not tested.")
     CPBigBoxControls["audio_power"] := cpGui.Add("Button", "x80 y440 w250 h80 Hidden", "Audio Translation")
     CPBigBoxControls["audio_power"].OnEvent("Click", CPBigBoxToggleAudio)
     CPBigBoxControls["capture_settings"] := cpGui.Add("Button", "x80 y440 w250 h80 Hidden", "Capture…")
@@ -8622,8 +9340,10 @@ CPBigBoxDashboardCreate() {
     }
     CPBigBoxControls["ov_translator"] := cpGui.Add("Button", "x80 y350 w510 h80 Hidden", "Translator")
     CPBigBoxControls["ov_explainer"] := cpGui.Add("Button", "x600 y350 w510 h80 Hidden", "Explainer")
+    CPBigBoxControls["ov_main"] := cpGui.Add("Button", "x600 y350 w510 h80 Hidden", "Main window")
     CPBigBoxControls["ov_translator"].OnEvent("Click", CPBigBoxSetPage.Bind("quickTranslatorWindow", false))
     CPBigBoxControls["ov_explainer"].OnEvent("Click", CPBigBoxSetPage.Bind("quickExplainerWindow", false))
+    CPBigBoxControls["ov_main"].OnEvent("Click", CPBigBoxSetPage.Bind("quickMainWindow", false))
     CPBigBoxControls["ov_note"] := cpGui.Add("Text", "x80 y450 w1000 h70 Hidden Center", "")
     CPBigBoxControls["ov_preview"] := CPRegisterColorSwatch(cpGui.Add("Text", "x80 y350 w300 h170 Hidden Center +0x200", ""), "", false)
     Loop 3 {
@@ -8670,9 +9390,10 @@ CPBigBoxDashboardCreate() {
         CPBigBoxControls[prefix "manage"].OnEvent("Click", CPBigBoxOpenGlossaryEntries.Bind(kind))
         CPBigBoxControls[prefix "tools"].OnEvent("Click", CPBigBoxOpenGlossaryTools.Bind(kind))
     }
-    for key in ["select", "apply", "save", "new", "delete"]
+    for key in ["select", "apply", "startup", "save", "new", "delete"]
         CPBigBoxControls["prof_" key] := cpGui.Add("Button", "x80 y350 w350 h80 Hidden", "")
     CPBigBoxControls["prof_select"].OnEvent("Click", CPBigBoxOpenProfileChoice)
+    CPBigBoxControls["prof_startup"].OnEvent("Click", CPBigBoxOpenStartupOverlayChoice)
     CPBigBoxControls["prof_apply"].OnEvent("Click", CPBigBoxProfileAction.Bind("apply"))
     CPBigBoxControls["prof_save"].OnEvent("Click", CPBigBoxProfileAction.Bind("save"))
     CPBigBoxControls["prof_new"].OnEvent("Click", CPBigBoxProfileAction.Bind("new"))
@@ -8907,12 +9628,21 @@ CPBigBoxDashboardActivate(*) {
 CPBigBoxKeyboardMove(direction, *) {
     if CPControllerKeyboardMirrorActive(direction)
         return
+    if CPBigBoxPromptEditorActive() {
+        SendEvent("{" direction "}")
+        return
+    }
     CPBigBoxDashboardMoveFocus(direction)
 }
 
 CPBigBoxKeyboardActivate(keyName, *) {
     if CPControllerKeyboardMirrorActive("Activate")
         return
+    if CPBigBoxPromptEditorActive() {
+        SendEvent("{" keyName "}")
+        KeyWait(keyName)
+        return
+    }
     CPBigBoxDashboardActivate()
     KeyWait(keyName)
 }
@@ -8927,7 +9657,9 @@ CPBigBoxKeyboardCancel(*) {
 CPBigBoxKeyboardPage(direction, keyName, *) {
     if CPControllerKeyboardMirrorActive(direction < 0 ? "PreviousTab" : "NextTab")
         return
-    if CPBigBoxAIListActive()
+    if CPBigBoxPromptEditorActive()
+        SendEvent("{" keyName "}")
+    else if CPBigBoxAIListActive()
         CPBigBoxAIListScroll(direction * 5)
     else
         CPBigBoxSwitchPage(direction)
@@ -8936,6 +9668,10 @@ CPBigBoxKeyboardPage(direction, keyName, *) {
 
 CPBigBoxKeyboardTraverse(direction, *) {
     global CPBigBoxFocusIndex
+    if CPBigBoxPromptEditorActive() {
+        SendEvent(direction < 0 ? "+{Tab}" : "{Tab}")
+        return
+    }
     if CPBigBoxPageNavigationAllowed()
         CPBigBoxDashboardSetFocus(CPBigBoxFocusIndex + direction)
 }
@@ -8993,6 +9729,7 @@ CPBigBoxDashboardShowReady() {
     )
     CPBigBoxDashboardApplyTheme()
     CPBigBoxGui.Show("NA " cpDashShowOptions)
+    CPBigBoxBackgroundSync()
     try DllCall(
         "user32\RedrawWindow", "ptr", CPBigBoxGui.Hwnd,
         "ptr", 0, "ptr", 0,
@@ -9002,6 +9739,7 @@ CPBigBoxDashboardShowReady() {
         try DllCall("dwmapi\DwmFlush")
         CPSetWindowCloaked(CPBigBoxGui.Hwnd, false)
     }
+    CPBigBoxBackgroundSync(true)
     try WinActivate("ahk_id " CPBigBoxGui.Hwnd)
     CPBigBoxRestorePageFocus()
     CPControllerResetNavigation()
@@ -9034,6 +9772,7 @@ CPBigBoxDashboardHide(restoreGame := true) {
     CPBigBoxHideFocusFrame()
     if CPBigBoxDashboardVisible()
         try CPBigBoxGui.Hide()
+    CPBigBoxBackgroundHide()
     CPControllerResetNavigation()
     if restoreGame
         SetTimer(RestoreControlPanelReturnWindow, -1)
@@ -9277,6 +10016,12 @@ CPRenderCustomTabBar(force := false) {
     global tab, tabNames, CPTabVisiblePages, CPTabButtons, CPTabBarFill, CPTabBarHasNavFocus, CPTabRenderedState, controlDarkMode
     if !(IsSet(tab) && tab && tab.Hwnd && IsSet(CPTabButtons) && IsObject(CPTabButtons))
         return
+    if CPDesktopActive() {
+        for desktopOldTab in CPTabButtons
+            desktopOldTab.Visible := false
+        CPDesktopUpdateNavigation(force)
+        return
+    }
 
     cpTabActive := 1
     try cpTabActive := tab.Value
@@ -9350,6 +10095,8 @@ CPMaintainFooterZOrder() {
 }
 
 CPLayoutCustomTabBar(cpViewportW := 0) {
+    if CPDesktopActive()
+        return
     global tab, CPTabButtons, CPTabNaturalWidths, CPTabBarFill
     if !(IsSet(tab) && tab && tab.Hwnd && IsSet(CPTabButtons) && IsObject(CPTabButtons))
         return
@@ -9543,7 +10290,10 @@ CPChangeTabPageAtomically(cpTabIndex, cpShowNavFocus := unset) {
         try tab.Value := cpTabIndex
         try cpChanged := tab.Value = cpTabIndex
         if cpChanged {
+            CPCanvasCancelQueuedScroll()
             CPCanvasScrollTo(0, 0, false, false, false)
+            CPDesktopRelayout()
+            CPDesktopFocusSelectedPage(cpTabIndex)
             CPRedrawActiveTabPage()
             CPUpdateComboArrowOverlays()
             CPRenderCustomTabBar(true)
@@ -10738,13 +11488,8 @@ try Hotkey("$Left", CPNavLeft, "On")
     try Hotkey("$Esc", CPNavEscape, "On")
     HotIfWinActive()
 
-    ; Child controls such as combo boxes can consume WM_MOUSEWHEEL before the
-    ; parent GUI sees it. A cursor-scoped hotkey keeps canvas scrolling available
-    ; immediately, while leaving open dropdowns and the opacity slider alone.
-    HotIf(CPMouseWheelOverCanvas)
-    try Hotkey("$WheelUp", CPMouseWheelHotkey.Bind(-1), "On")
-    try Hotkey("$WheelDown", CPMouseWheelHotkey.Bind(1), "On")
-    HotIf()
+    ; Native wheel messages are handled on the GUI and its children. Do not
+    ; register scrolling as hotkeys: fast wheels exceed AHK's hotkey flood limit.
 
     __CP_ARROW_NAV_BOUND := true
 }
@@ -10918,21 +11663,22 @@ defDirectModelOutput := 0
 
 ; AUDIO live translation target language default
 defAudioTargetLang := "English (en)"
+; Alphabetical display-name order, shared by the desktop and Big Box pickers.
 audioTargetLangs := [
-    "English (en)"
-  , "German (de)"
-  , "French (fr)"
-  , "Spanish (es)"
-  , "Italian (it)"
-  , "Portuguese (pt)"
-  , "Dutch (nl)"
-  , "Polish (pl)"
-  , "Russian (ru)"
-  , "Ukrainian (uk)"
-  , "Korean (ko)"
-  , "Chinese Simplified (zh-CN)"
+    "Chinese Simplified (zh-CN)"
   , "Chinese Traditional (zh-TW)"
+  , "Dutch (nl)"
+  , "English (en)"
+  , "French (fr)"
+  , "German (de)"
+  , "Italian (it)"
   , "Japanese (ja)"
+  , "Korean (ko)"
+  , "Polish (pl)"
+  , "Portuguese (pt)"
+  , "Russian (ru)"
+  , "Spanish (es)"
+  , "Ukrainian (uk)"
 ]
 
 ; -------- state --------
@@ -11014,10 +11760,12 @@ showPathsTab := Integer(Load("showPathsTab", defShowPathsTab, "cfg")) ? 1 : 0
 debugMode := Integer(Load("debugMode", defDebugMode, "cfg"))
 directModelOutput := Integer(Load("directModelOutput", defDirectModelOutput, "cfg")) ? 1 : 0
 SetDebugMode(debugMode)
-controlDarkMode := Integer(Load("darkMode", 0, "cfg_control")) ? 1 : 0
+controlDarkMode := Integer(Load("darkMode", 1, "cfg_control")) ? 1 : 0
 controlPanelOpacity := 100
 try controlPanelOpacity := Integer(Load("opacity", 100, "cfg_control"))
 controlPanelOpacity := CPClampControlPanelOpacity(controlPanelOpacity)
+try CPBigBoxBackgroundOpacity := CPBigBoxClampBackgroundOpacity(Integer(Load("bigBoxBackgroundOpacity", 100, "cfg_control")))
+try CPBigBoxAlwaysOnTop := Integer(Load("bigBoxAlwaysOnTop", 1, "cfg_control")) ? 1 : 0
 CPSetPreferredAppDarkMode(controlDarkMode)
 
 ; overlay colors
@@ -11633,6 +12381,7 @@ UpdateStatus(allowRecoveryScan := false){
     if (IsSet(btnAudio) && IsObject(btnAudio))
         btnAudio.Text := running ? "Audio Translation On" : "Audio Translation Off"
     CPBigBoxUpdateAudioPower()
+    CPDesktopRefreshAudio()
 }
 
 _UpdateStatus(){
@@ -11843,6 +12592,7 @@ CPSuspendBigBoxForCapture() {
     CPBigBoxStopPageAnimation()
     CPBigBoxHideFocusFrame()
     CPBigBoxGui.Hide()
+    CPBigBoxBackgroundHide()
     if CPPreviousForegroundHwnd && DllCall("user32\IsWindow", "ptr", CPPreviousForegroundHwnd)
         try WinActivate("ahk_id " CPPreviousForegroundHwnd)
 }
@@ -12591,10 +13341,62 @@ StudyLibraryRefreshCurrentChapterDisplay(slState) {
 }
 
 StudyLibraryCloseCurrentChapterDialog(slState, slDialog, *) {
-    try slDialog.Destroy()
+    slDialogHwnd := 0
+    try slDialogHwnd := slDialog.Hwnd
+    if !slDialogHwnd || !DllCall("user32\IsWindow", "ptr", slDialogHwnd, "int")
+        return
+    if slState.Has("currentChapterDialog") && slState["currentChapterDialog"] = slDialog
+        slState.Delete("currentChapterDialog")
+    if slDialog.HasOwnProp("StudyChapterForm") {
+        slDialog.StudyChapterForm["closed"] := true
+        if slDialog.StudyChapterForm.Has("actionTimer")
+            SetTimer(slDialog.StudyChapterForm["actionTimer"], 0)
+        StudyBigBoxFocusFrameStop(slDialog.StudyChapterForm)
+        slDialog.DeleteProp("StudyChapterForm")
+    }
+    ; Prepare the Library's focus while the outgoing page still covers it.
+    ; The launch button stays enabled throughout, so there is no dimming or
+    ; transient focus transfer to the Library selector on either handoff.
     if StudyLibraryStateAlive(slState)
-        slState["currentChapterButton"].Enabled := true
+        StudyControllerSetFocus(slState["gui"].Hwnd, slState["currentChapterButton"].Hwnd)
+    try slDialog.Destroy()
+    if StudyLibraryStateAlive(slState) {
+        try WinActivate("ahk_id " slState["gui"].Hwnd)
+        StudyControllerSetFocus(slState["gui"].Hwnd, slState["currentChapterButton"].Hwnd)
+        StudyLibraryClearButtonHover(slState)
+    }
     CPControllerResetNavigation()
+}
+
+StudyLibraryQueueChapterAction(slDialog, slAction, *) {
+    if !slDialog.HasOwnProp("StudyChapterForm")
+        return
+    slForm := slDialog.StudyChapterForm
+    if slForm.Get("closed", false) || slForm.Get("actionRunning", false) || slForm.Has("actionTimer")
+        return
+    ; Release controller polling before a fullscreen confirmation waits for
+    ; another D-pad/A/B press. Cancelling the chapter page cancels this job.
+    slForm["actionTimer"] := StudyLibraryRunChapterAction.Bind(slForm, slAction)
+    SetTimer(slForm["actionTimer"], -1)
+}
+
+StudyLibraryRunChapterAction(slForm, slAction) {
+    if slForm.Has("actionTimer")
+        slForm.Delete("actionTimer")
+    if !StudyLibraryStateAlive(slForm) || slForm.Get("actionRunning", false)
+        return
+    slForm["actionRunning"] := true
+    try slAction.Call()
+    finally slForm["actionRunning"] := false
+}
+
+StudyLibraryChapterMessage(slState, slDialog, slText, slTitle := "Current chapter",
+    slButtons := "ok", slIcon := "info", slConfirmLabel := "Yes") {
+    slOwner := Map("gui", slDialog,
+        "bigBoxPresentation", StudyLibraryBigBoxPresentation(slState),
+        "libraryName", slState.Get("libraryName", "Default"))
+    return StudyLibraryOwnedMessage(slOwner, slText, slTitle, slButtons, slIcon, 560,
+        "Manage chapter assignment and remembered chapters.", slConfirmLabel, "Cancel")
 }
 
 StudyLibrarySaveCurrentChapter(
@@ -12611,8 +13413,8 @@ StudyLibrarySaveCurrentChapter(
             slProfileName, slChapter, slDirectory
         )
     } catch as ex {
-        CPThemedOwnedMessage(
-            slDialog.Hwnd,
+        StudyLibraryChapterMessage(
+            slState, slDialog,
             "The current chapter could not be saved.`n`n" ex.Message,
             "Current chapter", "ok", "error"
         )
@@ -12636,8 +13438,8 @@ StudyLibraryRemoveSavedChapter(
             slRemaining.Push(slChapter)
     }
     if !slFound {
-        CPThemedOwnedMessage(
-            slDialog.Hwnd,
+        StudyLibraryChapterMessage(
+            slState, slDialog,
             "Select a remembered chapter from the list first.",
             "Current chapter", "ok", "info"
         )
@@ -12650,9 +13452,9 @@ StudyLibraryRemoveSavedChapter(
     if slRemovesCurrent
         slMessage .= " Because it is currently active, automatic chapter "
             . "assignment will also be cleared."
-    if (CPThemedOwnedMessage(
-        slDialog.Hwnd, slMessage, "Remove saved chapter",
-        "yesno", "warning"
+    if (StudyLibraryChapterMessage(
+        slState, slDialog, slMessage, "Remove saved chapter",
+        "yesno", "warning", "Remove chapter"
     ) != "Yes")
         return
     try {
@@ -12664,8 +13466,8 @@ StudyLibraryRemoveSavedChapter(
             slCurrent := ""
         }
     } catch as ex {
-        CPThemedOwnedMessage(
-            slDialog.Hwnd,
+        StudyLibraryChapterMessage(
+            slState, slDialog,
             "The saved chapter could not be removed.`n`n" ex.Message,
             "Current chapter", "ok", "error"
         )
@@ -12682,24 +13484,24 @@ StudyLibraryClearChapterHistory(
 ) {
     slHistory := StudyLibraryReadChapterHistory(slProfileName, slDirectory)
     if !slHistory.Length {
-        CPThemedOwnedMessage(
-            slDialog.Hwnd, "There are no remembered chapters to clear.",
+        StudyLibraryChapterMessage(
+            slState, slDialog, "There are no remembered chapters to clear.",
             "Current chapter", "ok", "info"
         )
         return
     }
-    if (CPThemedOwnedMessage(
-        slDialog.Hwnd,
+    if (StudyLibraryChapterMessage(
+        slState, slDialog,
         "Clear all remembered chapters for this Library and Profile?"
             . "`n`nExisting explanations are not changed. The current chapter "
             . "remains active until you use Clear current.",
-        "Clear chapter history", "yesno", "warning"
+        "Clear chapter history", "yesno", "warning", "Clear history"
     ) != "Yes")
         return
     try StudyLibraryWriteChapterHistory(slProfileName, [], slDirectory)
     catch as ex {
-        CPThemedOwnedMessage(
-            slDialog.Hwnd,
+        StudyLibraryChapterMessage(
+            slState, slDialog,
             "The chapter history could not be cleared.`n`n" ex.Message,
             "Current chapter", "ok", "error"
         )
@@ -12715,6 +13517,20 @@ StudyLibraryClearChapterHistory(
 StudyLibraryOpenCurrentChapter(slState, *) {
     if !StudyLibraryStateAlive(slState)
         return
+    ; Track the owned page instead of disabling its launch button. Disabling a
+    ; focused native Button makes Windows select the first enabled control.
+    if slState.Has("currentChapterDialog") {
+        slExisting := slState["currentChapterDialog"]
+        slExistingHwnd := 0
+        try slExistingHwnd := slExisting.Hwnd
+        if slExistingHwnd && DllCall("user32\IsWindow", "ptr", slExistingHwnd, "int") {
+            if DllCall("user32\IsWindowVisible", "ptr", slExistingHwnd, "int")
+                try WinActivate("ahk_id " slExistingHwnd)
+            return slExisting
+        }
+        slState.Delete("currentChapterDialog")
+    }
+    StudyControllerSetFocus(slState["gui"].Hwnd, slState["currentChapterButton"].Hwnd)
     slProfileName := StudyLibraryActiveProfileName()
     slProfileLabel := slProfileName != "" ? slProfileName : "Unsorted"
     SplitPath(slState["database"],, &slDirectory)
@@ -12725,12 +13541,13 @@ StudyLibraryOpenCurrentChapter(slState, *) {
         slProfileName, slDirectory
     )
 
-    slState["currentChapterButton"].Enabled := false
+    ; @DESKTOP_CHAPTER_CONTROLS_BEGIN@
     slBigBox := StudyLibraryBigBoxPresentation(slState)
     slDialogOptions := "+Owner" slState["gui"].Hwnd
         . " +AlwaysOnTop +OwnDialogs"
         . (slBigBox ? " -Caption +ToolWindow -DPIScale" : "")
     slDialog := Gui(slDialogOptions, "Current chapter")
+    slState["currentChapterDialog"] := slDialog
     slDialog.MarginX := slBigBox ? 0 : 18
     slDialog.MarginY := slBigBox ? 0 : 16
     slDialog.SetFont(slBigBox ? "s12" : "s10", "Segoe UI")
@@ -12775,32 +13592,30 @@ StudyLibraryOpenCurrentChapter(slState, *) {
         "Button", "x+8 yp w116", "Clear history..."
     )
     slCancelButton := slDialog.Add("Button", "x+8 yp w92", "Cancel")
-    slSaveButton.OnEvent(
-        "Click", StudyLibrarySaveCurrentChapter.Bind(
-            slState, slDialog, slChapterCombo, slProfileName, slDirectory, false
-        )
-    )
-    slClearButton.OnEvent(
-        "Click", StudyLibrarySaveCurrentChapter.Bind(
-            slState, slDialog, slChapterCombo, slProfileName, slDirectory, true
-        )
-    )
-    slRemoveButton.OnEvent(
-        "Click", StudyLibraryRemoveSavedChapter.Bind(
-            slState, slDialog, slChapterCombo, slProfileName, slDirectory
-        )
-    )
-    slClearHistoryButton.OnEvent(
-        "Click", StudyLibraryClearChapterHistory.Bind(
-            slState, slDialog, slChapterCombo, slProfileName, slDirectory
-        )
-    )
+    for slActionSpec in [
+        [slSaveButton, StudyLibrarySaveCurrentChapter.Bind(
+            slState, slDialog, slChapterCombo, slProfileName, slDirectory, false)],
+        [slClearButton, StudyLibrarySaveCurrentChapter.Bind(
+            slState, slDialog, slChapterCombo, slProfileName, slDirectory, true)],
+        [slRemoveButton, StudyLibraryRemoveSavedChapter.Bind(
+            slState, slDialog, slChapterCombo, slProfileName, slDirectory)],
+        [slClearHistoryButton, StudyLibraryClearChapterHistory.Bind(
+            slState, slDialog, slChapterCombo, slProfileName, slDirectory)]
+    ]
+        slActionSpec[1].OnEvent("Click", slBigBox
+            ? StudyLibraryQueueChapterAction.Bind(slDialog, slActionSpec[2]) : slActionSpec[2])
     slCloseCallback := StudyLibraryCloseCurrentChapterDialog.Bind(
         slState, slDialog
     )
     slCancelButton.OnEvent("Click", slCloseCallback)
     slDialog.OnEvent("Escape", slCloseCallback)
     slDialog.OnEvent("Close", slCloseCallback)
+    slDesktop := StudyDesktopMetadataCreate(Map("gui", slDialog, "bigBoxPresentation", slBigBox,
+        "libraryState", slState), "chapter", Map("library", slLibraryText, "profile", slProfileText,
+        "chapterLabel", slChapterLabel, "chapter", slChapterCombo, "hint", slHint,
+        "save", slSaveButton, "clear", slClearButton, "remove", slRemoveButton,
+        "history", slClearHistoryButton, "cancel", slCancelButton))
+    ; @DESKTOP_CHAPTER_CONTROLS_END@
     if slBigBox {
         slHeading := slDialog.Add(
             "Text", "x0 y0 w10 h10", "Automatic chapter assignment"
@@ -12835,12 +13650,16 @@ StudyLibraryOpenCurrentChapter(slState, *) {
                 slButtonSpec[3], slButtonSpec[4], slButtonSpec[5], 120,
                 "button"
             )
+        slDialog.StudyChapterForm := slForm
         StudyLibraryBigBoxFormShow(slForm, slChapterCombo)
+    } else if IsObject(slDesktop) {
+        StudyDesktopDialogShow(slDesktop, 820, 600, slChapterCombo)
     } else {
         slDialog.Show("AutoSize Center")
         CPApplyOwnedDialogTheme(slDialog)
         slChapterCombo.Focus()
     }
+    return slDialog
 }
 
 StudyLibraryConfiguredName() {
@@ -13016,7 +13835,7 @@ StudyLibraryCreateNew(slState, slDialog, slNameEdit, slManager := 0, *) {
     slName := Trim(slNameEdit.Value)
     slSafeName := StudyLibrarySafeName(slName)
     if (slSafeName = "") {
-        GlossaryOwnedMessage(
+        StudyLibraryManagementMessage(
             slDialog.Hwnd,
             "Enter a name up to 80 characters without any of these characters:"
                 . "`n`n\ / : * ? `" < > |`n`nThe name Default is reserved.",
@@ -13027,7 +13846,7 @@ StudyLibraryCreateNew(slState, slDialog, slNameEdit, slManager := 0, *) {
     }
     slDirectory := StudyLibraryDirectoryForName(slSafeName)
     if DirExist(slDirectory) {
-        GlossaryOwnedMessage(
+        StudyLibraryManagementMessage(
             slDialog.Hwnd,
             "A Study Library named '" slSafeName "' already exists.",
             "New Study Library"
@@ -13039,7 +13858,7 @@ StudyLibraryCreateNew(slState, slDialog, slNameEdit, slManager := 0, *) {
         DirCreate(studyLibrariesRoot)
         DirCreate(slDirectory)
     } catch as slCreateError {
-        GlossaryOwnedMessage(
+        StudyLibraryManagementMessage(
             slDialog.Hwnd,
             "The Study Library folder could not be created:`n`n"
                 . slCreateError.Message,
@@ -13047,15 +13866,19 @@ StudyLibraryCreateNew(slState, slDialog, slNameEdit, slManager := 0, *) {
         )
         return
     }
-    try slDialog.Destroy()
     StudyLibrarySwitchTo(slState, slSafeName)
     if IsObject(slManager)
         StudyLibraryRefreshManager(slManager, slSafeName)
+    StudyLibraryManagementClose(slDialog)
 }
 
 StudyLibraryOpenNew(slState, slManager := 0, *) {
+    if StudyLibraryBigBoxPresentation(slState)
+        return StudyLibraryOpenManagementName(IsObject(slManager) ? slManager : slState, "new")
     if !StudyLibraryStateAlive(slState)
         return
+    if CPDesktopActive()
+        return StudyDesktopOpenLibraryName(IsObject(slManager) ? slManager : slState, "new")
     slOwnerHwnd := slState["gui"].Hwnd
     if IsObject(slManager) {
         try slOwnerHwnd := slManager["gui"].Hwnd
@@ -13157,8 +13980,14 @@ StudyLibraryRefreshManager(slManager, slPrefer := "") {
         if (StrLower(slName) = StrLower(slPrefer))
             slSelectedRow := slIndex
     }
-    Loop 5
-        slManager["list"].ModifyCol(A_Index, "AutoHdr")
+    if slManager.Has("desktop")
+        StudyDesktopManagementColumns(slManager)
+    else if StudyLibraryBigBoxPresentation(slManager)
+        StudyLibraryManagementColumns(slManager)
+    else {
+        Loop 5
+            slManager["list"].ModifyCol(A_Index, "AutoHdr")
+    }
     if slNames.Length {
         if !slSelectedRow
             slSelectedRow := 1
@@ -13193,7 +14022,7 @@ StudyLibraryManagerRenameApply(
     global CPStudyReaderState
     slNewName := StudyLibrarySafeName(Trim(slNameEdit.Value))
     if (slNewName = "") {
-        GlossaryOwnedMessage(
+        StudyLibraryManagementMessage(
             slDialog.Hwnd,
             "Enter a name up to 80 characters without any of these characters:"
                 . "`n`n\ / : * ? `" < > |`n`nThe name Default is reserved.",
@@ -13203,13 +14032,13 @@ StudyLibraryManagerRenameApply(
         return
     }
     if (StrLower(slNewName) = StrLower(slOldName)) {
-        try slDialog.Destroy()
+        StudyLibraryManagementClose(slDialog)
         return
     }
     slOldDirectory := StudyLibraryDirectoryForName(slOldName)
     slNewDirectory := StudyLibraryDirectoryForName(slNewName)
     if DirExist(slNewDirectory) {
-        GlossaryOwnedMessage(
+        StudyLibraryManagementMessage(
             slDialog.Hwnd,
             "A Study Library named '" slNewName "' already exists.",
             "Rename Study Library"
@@ -13226,7 +14055,7 @@ StudyLibraryManagerRenameApply(
     } catch as slRenameError {
         if slWasActive
             StudyLibrarySwitchTo(slState, slOldName, false)
-        GlossaryOwnedMessage(
+        StudyLibraryManagementMessage(
             slDialog.Hwnd,
             "The Study Library could not be renamed:`n`n"
                 . slRenameError.Message,
@@ -13238,8 +14067,8 @@ StudyLibraryManagerRenameApply(
         StudyLibrarySwitchTo(slState, slNewName, false)
     else
         StudyLibraryRefreshLibrarySelector(slState)
-    try slDialog.Destroy()
     StudyLibraryRefreshManager(slManager, slNewName)
+    StudyLibraryManagementClose(slDialog)
     Toast("Renamed Study Library to " slNewName)
 }
 
@@ -13247,6 +14076,10 @@ StudyLibraryManagerRename(slManager, *) {
     slOldName := StudyLibraryManagerSelectedName(slManager)
     if (slOldName = "" || StrLower(slOldName) = "default")
         return
+    if StudyLibraryBigBoxPresentation(slManager)
+        return StudyLibraryOpenManagementName(slManager, "rename", slOldName)
+    if CPDesktopActive()
+        return StudyDesktopOpenLibraryName(slManager, "rename", slOldName)
     slDialog := Gui(
         "+Owner" slManager["gui"].Hwnd " +OwnDialogs",
         "Rename Study Library"
@@ -13282,7 +14115,7 @@ StudyLibraryManagerArchive(slManager, *) {
         . "It will disappear from the library selector, but its database, "
         . "screenshots, backups, and Trash will be moved intact to:`n`n"
         . studyLibrariesArchiveRoot
-    if (GlossaryOwnedMessage(
+    if (StudyLibraryManagementMessage(
         slManager["gui"].Hwnd, slArchiveMessage,
         "Archive Study Library", "yesno", "warning"
     ) != 6)
@@ -13300,7 +14133,7 @@ StudyLibraryManagerArchive(slManager, *) {
     } catch as slArchiveError {
         if slWasActive
             StudyLibrarySwitchTo(slState, slName, false)
-        GlossaryOwnedMessage(
+        StudyLibraryManagementMessage(
             slManager["gui"].Hwnd,
             "The Study Library could not be archived:`n`n"
                 . slArchiveError.Message,
@@ -13396,8 +14229,14 @@ StudyLibraryRefreshArchives(slArchive, slPreferPath := "") {
         if (StrLower(slEntry["path"]) = StrLower(slPreferPath))
             slSelectedRow := slIndex
     }
-    Loop 5
-        slArchive["list"].ModifyCol(A_Index, "AutoHdr")
+    if slArchive.Has("desktop")
+        StudyDesktopManagementColumns(slArchive)
+    else if StudyLibraryBigBoxPresentation(slArchive)
+        StudyLibraryManagementColumns(slArchive)
+    else {
+        Loop 5
+            slArchive["list"].ModifyCol(A_Index, "AutoHdr")
+    }
     if slEntries.Length {
         if !slSelectedRow
             slSelectedRow := 1
@@ -13420,7 +14259,7 @@ StudyLibraryArchiveRestoreApply(
 ) {
     slName := StudyLibrarySafeName(Trim(slNameEdit.Value))
     if (slName = "") {
-        GlossaryOwnedMessage(
+        StudyLibraryManagementMessage(
             slDialog.Hwnd,
             "Enter a name up to 80 characters without any of these characters:"
                 . "`n`n\ / : * ? `" < > |`n`nThe name Default is reserved.",
@@ -13431,7 +14270,7 @@ StudyLibraryArchiveRestoreApply(
     }
     slDestination := StudyLibraryDirectoryForName(slName)
     if (slDestination = "" || DirExist(slDestination)) {
-        GlossaryOwnedMessage(
+        StudyLibraryManagementMessage(
             slDialog.Hwnd,
             "A current Study Library named '" slName "' already exists."
                 . "`n`nChoose a different name before restoring this archive.",
@@ -13444,7 +14283,7 @@ StudyLibraryArchiveRestoreApply(
         DirCreate(RegExReplace(slDestination, "\\[^\\]+$"))
         DirMove(slEntry["path"], slDestination)
     } catch as slRestoreError {
-        GlossaryOwnedMessage(
+        StudyLibraryManagementMessage(
             slDialog.Hwnd,
             "The Study Library could not be restored:`n`n"
                 . slRestoreError.Message,
@@ -13456,8 +14295,8 @@ StudyLibraryArchiveRestoreApply(
     slState := slArchive["ownerState"]
     StudyLibraryRefreshLibrarySelector(slState)
     StudyLibraryRefreshManager(slManager, slName)
-    try slDialog.Destroy()
     StudyLibraryRefreshArchives(slArchive)
+    StudyLibraryManagementClose(slDialog)
     Toast("Restored Study Library: " slName)
 }
 
@@ -13465,6 +14304,10 @@ StudyLibraryArchiveRestore(slArchive, *) {
     slEntry := StudyLibraryArchiveSelectedEntry(slArchive)
     if !IsObject(slEntry)
         return
+    if StudyLibraryBigBoxPresentation(slArchive)
+        return StudyLibraryOpenManagementName(slArchive, "restore", slEntry)
+    if CPDesktopActive()
+        return StudyDesktopOpenLibraryName(slArchive, "restore", slEntry)
     slSuggestedName := slEntry["name"]
     if DirExist(StudyLibraryDirectoryForName(slSuggestedName))
         slSuggestedName .= " Restored"
@@ -13504,16 +14347,19 @@ StudyLibraryOpenArchives(slManager, *) {
     slState := slManager["ownerState"]
     if !StudyLibraryStateAlive(slState)
         return
+    if StudyLibraryBigBoxPresentation(slManager)
+        return StudyLibraryOpenBigBoxManagement(slManager, true)
     slOutputDir := slManager["outputDir"] "\archives"
     DirCreate(slOutputDir)
+    ; @DESKTOP_ARCHIVES_CONTROLS_BEGIN@
     slGui := Gui(
         "+Owner" slManager["gui"].Hwnd " +OwnDialogs",
         "Archived Study Libraries"
     )
     slGui.MarginX := 16, slGui.MarginY := 14
     slGui.SetFont("s10", "Segoe UI")
-    slGui.Add("Text", "xm ym w690", "Archived Study Libraries")
-        .SetFont("s11 Bold")
+    slTitle := slGui.Add("Text", "xm ym w690", "Archived Study Libraries")
+    slTitle.SetFont("s11 Bold")
     slHint := slGui.Add(
         "Text", "xm y+5 w690 h42 cGray",
         "Archives retain their complete database and media. Restore returns "
@@ -13537,6 +14383,9 @@ StudyLibraryOpenArchives(slManager, *) {
         "outputDir", slOutputDir,
         "list", slList,
         "entries", [],
+        "title", slTitle,
+        "hint", slHint,
+        "closeButton", slClose,
         "emptyText", slEmpty,
         "restoreButton", slRestore,
         "openButton", slOpen
@@ -13549,16 +14398,248 @@ StudyLibraryOpenArchives(slManager, *) {
     slClose.OnEvent("Click", StudyLibraryCloseDialog.Bind(slGui))
     slGui.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slGui))
     slGui.OnEvent("Close", StudyLibraryCloseDialog.Bind(slGui))
+    StudyDesktopManagementCreate(slArchive, true)
+    ; @DESKTOP_ARCHIVES_CONTROLS_END@
     StudyLibraryRefreshArchives(slArchive)
-    slGui.Show("AutoSize Center")
-    CPApplyOwnedDialogTheme(slGui)
+    if slArchive.Has("desktop")
+        StudyDesktopDialogShow(slArchive, 1000, 700, slList.GetCount() ? slList : slClose)
+    else {
+        slGui.Show("AutoSize Center")
+        CPApplyOwnedDialogTheme(slGui)
+    }
+}
+
+; Management pages retain their immediate owner until the next page is fully
+; composed. Returning restores focus before uncovering it, without disabling
+; the launch button or briefly exposing the Reader/game beneath the Library.
+StudyLibraryManagementForm(slParent, slTitle, slSubtitle) {
+    slGui := Gui("+Owner" slParent["gui"].Hwnd
+        " +OwnDialogs +AlwaysOnTop -Caption +ToolWindow -DPIScale", slTitle)
+    slGui.SetFont("s11", "Segoe UI")
+    slRoot := slParent.Get("ownerState", slParent)
+    slForm := StudyLibraryBigBoxFormState(slGui, slParent, slTitle, slSubtitle,
+        slRoot.Get("libraryName", "Default"))
+    slForm["ownerState"] := slRoot
+    slForm["parentState"] := slParent
+    slForm["libraryName"] := slRoot.Get("libraryName", "Default")
+    slForm["returnFocus"] := StudyControllerFocusedHwnd(slParent["gui"].Hwnd)
+    slGui.StudyLibraryManagementForm := slForm
+    slParent["managementChild"] := slForm
+    slGui.OnEvent("Escape", StudyLibraryManagementClose.Bind(slGui))
+    slGui.OnEvent("Close", StudyLibraryManagementClose.Bind(slGui))
+    return slForm
+}
+
+StudyLibraryManagementChildAlive(slParent) {
+    if slParent.Has("managementChild") && StudyLibraryStateAlive(slParent["managementChild"]) {
+        try WinActivate("ahk_id " slParent["managementChild"]["gui"].Hwnd)
+        return true
+    }
+    return false
+}
+
+StudyLibraryManagementClose(slGui, *) {
+    if !slGui.HasOwnProp("StudyLibraryManagementForm") {
+        StudyLibraryCloseDialog(slGui)
+        return
+    }
+    slForm := slGui.StudyLibraryManagementForm
+    if slForm.Get("closed", false)
+        return
+    slForm["closed"] := true
+    if slForm.Has("actionTimer")
+        SetTimer(slForm["actionTimer"], 0)
+    if slForm.Has("managementChild") && StudyLibraryStateAlive(slForm["managementChild"])
+        StudyLibraryManagementClose(slForm["managementChild"]["gui"])
+    StudyBigBoxFocusFrameStop(slForm)
+    slParent := slForm["parentState"]
+    if slParent.Has("managementChild") && slParent["managementChild"] = slForm
+        slParent.Delete("managementChild")
+    slFocus := slForm.Get("returnFocus", 0)
+    ; Restoring the final archive disables its Restore button. Choose the
+    ; fallback before uncovering the parent, not after a transient table focus.
+    if StudyLibraryStateAlive(slParent) && (!slFocus || !CPHwndIsFocusable(slFocus))
+        && slParent.Has("closeButton")
+        slFocus := slParent["closeButton"].Hwnd
+    if StudyLibraryStateAlive(slParent) && slFocus
+        StudyControllerSetFocus(slParent["gui"].Hwnd, slFocus)
+    slGui.DeleteProp("StudyLibraryManagementForm")
+    try slGui.Destroy()
+    if StudyLibraryStateAlive(slParent) {
+        try WinActivate("ahk_id " slParent["gui"].Hwnd)
+        if slFocus && CPHwndIsFocusable(slFocus)
+            StudyControllerSetFocus(slParent["gui"].Hwnd, slFocus)
+        else
+            StudyControllerMoveFocus(slParent["gui"].Hwnd, "Down")
+        StudyLibraryClearButtonHover(slParent)
+    }
+    CPControllerResetNavigation()
+}
+
+StudyLibraryQueueManagementAction(slForm, slAction, *) {
+    if slForm.Get("closed", false) || slForm.Get("actionRunning", false) || slForm.Has("actionTimer")
+        return
+    slForm["actionTimer"] := StudyLibraryRunManagementAction.Bind(slForm, slAction)
+    SetTimer(slForm["actionTimer"], -1)
+}
+
+StudyLibraryRunManagementAction(slForm, slAction) {
+    if slForm.Has("actionTimer")
+        slForm.Delete("actionTimer")
+    if !StudyLibraryStateAlive(slForm) || slForm.Get("closed", false) || slForm.Get("actionRunning", false)
+        return
+    slForm["actionRunning"] := true
+    try slAction.Call()
+    finally slForm["actionRunning"] := false
+}
+
+StudyLibraryManagementMessage(slHwnd, slText, slTitle, slButtons := "ok", slIcon := "warning") {
+    slGui := GuiFromHwnd(slHwnd)
+    if slGui.HasOwnProp("StudyLibraryManagementForm") {
+        slResult := StudyLibraryOwnedMessage(slGui.StudyLibraryManagementForm, slText, slTitle,
+            slButtons, slIcon, 560, "Manage your Study Libraries. Files are preserved when archived.",
+            "Archive library", "Cancel")
+        ; Preserve the native MessageBox return contract used by these actions.
+        return slResult = "Yes" ? 6 : slResult = "No" ? 7 : 1
+    }
+    if IsObject(StudyDesktopContext(slHwnd)) {
+        slResult := StudyDesktopMessage(slHwnd, slText, slTitle, slButtons,
+            "Manage your Study Libraries. Files are preserved when archived.", "Archive library", "Cancel")
+        return slResult = "Yes" ? 6 : slResult = "No" ? 7 : 1
+    }
+    return GlossaryOwnedMessage(slHwnd, slText, slTitle, slButtons, slIcon)
+}
+
+StudyLibraryManagementColumns(slForm, *) {
+    if !slForm.Has("list") || !StudyLibraryBigBoxPresentation(slForm)
+        return
+    slForm["list"].GetPos(,, &slWidth)
+    ; Allocate useful widths even for empty tables and long library names.
+    slRatios := slForm.Get("archived", false) ? [0.29, 0.29, 0.12, 0.16, 0.14]
+        : [0.36, 0.17, 0.13, 0.18, 0.16]
+    slAvailable := Max(100, slWidth - 24)
+    for slIndex, slRatio in slRatios
+        slForm["list"].ModifyCol(slIndex, Floor(slAvailable * slRatio))
+    slForm["libraryName"] := slForm["ownerState"]["libraryName"]
+    slForm["shell"]["activeValue"].Text := slForm["libraryName"]
+}
+
+StudyLibraryManagementListActions(slForm, *) {
+    ; A moves directly to the first available row action, retaining selection.
+    for slKey in (slForm.Get("archived", false) ? ["restoreButton", "openButton"]
+        : ["switchButton", "renameButton", "openButton"]) {
+        if slForm[slKey].Enabled {
+            StudyControllerSetFocus(slForm["gui"].Hwnd, slForm[slKey].Hwnd)
+            return
+        }
+    }
+    StudyControllerSetFocus(slForm["gui"].Hwnd, slForm["closeButton"].Hwnd)
+}
+
+StudyLibraryOpenBigBoxManagement(slParent, slArchived := false) {
+    if StudyLibraryManagementChildAlive(slParent)
+        return slParent["managementChild"]
+    slForm := StudyLibraryManagementForm(slParent,
+        slArchived ? "Archived libraries" : "Manage Study Libraries",
+        slArchived ? "Restore archived libraries with all their explanations and screenshots."
+            : "Create, switch, rename, or archive your Study Libraries.")
+    slGui := slForm["gui"]
+    slForm["archived"] := slArchived
+    slForm["outputDir"] := slParent["outputDir"] (slArchived ? "\archives" : "\manager")
+    DirCreate(slForm["outputDir"])
+    if slArchived {
+        slForm["manager"] := slParent
+        slForm["entries"] := []
+    }
+    slHint := slGui.Add("Text", "x0 y0 w400 h60", slArchived
+        ? "Archived libraries keep their complete database and media. Nothing is deleted automatically."
+        : "Each library keeps its own database, screenshots, backups, and Trash. Default cannot be renamed or archived.")
+    StudyLibraryBigBoxFormAdd(slForm, "hint", slHint, 0, 0, 1000, 95)
+    slList := slGui.Add("ListView", "x0 y0 w500 h300 Grid -Multi NoSortHdr",
+        ["Library", slArchived ? "Archived" : "Status", "Sources", "Explanations", "Storage"])
+    slForm["list"] := slList
+    StudyLibraryBigBoxFormAdd(slForm, "list", slList, 0, 120, 700, 690, "editor")
+    slEmpty := slGui.Add("Text", "x0 y0 w400 h40", "")
+    slForm["emptyText"] := slEmpty
+    StudyLibraryBigBoxFormAdd(slForm, "empty", slEmpty, 0, 825, 700, 55)
+    slSpecs := slArchived ? [
+        ["restoreButton", "Restore...", StudyLibraryArchiveRestore.Bind(slForm)],
+        ["openButton", "Open Folder", StudyLibraryArchiveOpenFolder.Bind(slForm)]
+    ] : [
+        ["switchButton", "Switch library", StudyLibraryManagerSwitch.Bind(slForm)],
+        ["renameButton", "Rename...", StudyLibraryManagerRename.Bind(slForm)],
+        ["archiveButton", "Archive...", StudyLibraryManagerArchive.Bind(slForm)],
+        ["openButton", "Open Folder", StudyLibraryManagerOpenFolder.Bind(slForm)],
+        ["newButton", "New library...", StudyLibraryManagerNew.Bind(slForm)],
+        ["archivedButton", "Archived libraries...", StudyLibraryOpenArchives.Bind(slForm)]
+    ]
+    for slIndex, slSpec in slSpecs {
+        slButton := slGui.Add("Button", "x0 y0 w200 h50", slSpec[2])
+        slForm[slSpec[1]] := slButton
+        StudyLibraryBigBoxFormAdd(slForm, slSpec[1], slButton,
+            735, 120 + (slIndex - 1) * 116, 265, 94, "button")
+        slButton.OnEvent("Click", StudyLibraryQueueManagementAction.Bind(slForm, slSpec[3]))
+    }
+    slBack := slGui.Add("Button", "x0 y0 w200 h50", slArchived ? "Back to libraries" : "Back to Study Library")
+    slForm["closeButton"] := slBack
+    StudyLibraryBigBoxFormAdd(slForm, "back", slBack, 735, 900, 265, 95, "button")
+    slBack.OnEvent("Click", StudyLibraryManagementClose.Bind(slGui))
+    slList.OnEvent("DoubleClick", StudyLibraryManagementListActions.Bind(slForm))
+    slUpdate := slArchived ? StudyLibraryArchiveUpdateActions : StudyLibraryManagerUpdateActions
+    slList.OnEvent("ItemFocus", slUpdate.Bind(slForm))
+    slList.OnEvent("ItemSelect", slUpdate.Bind(slForm))
+    if slArchived
+        StudyLibraryRefreshArchives(slForm)
+    else
+        StudyLibraryRefreshManager(slForm, slForm["ownerState"]["libraryName"])
+    slForm["shell"]["footer"].Text := "D-pad / arrows  Browse    A / Cross / Enter  Library actions    B / Circle / Esc  Back"
+    StudyLibraryBigBoxFormShow(slForm, slList.GetCount() ? slList : slBack)
+    return slForm
+}
+
+StudyLibraryOpenManagementName(slParent, slMode, slValue := "") {
+    if StudyLibraryManagementChildAlive(slParent)
+        return slParent["managementChild"]
+    slTitle := slMode = "new" ? "New Study Library" : slMode = "rename" ? "Rename Study Library" : "Restore Study Library"
+    slHint := slMode = "new"
+        ? "New explanations will be saved in this library. Existing explanations stay in their current library."
+        : slMode = "rename" ? "Choose a new name. All explanations, screenshots, backups, and Trash are kept."
+        : "The complete archived folder returns to the library list. No existing library will be overwritten."
+    slName := slMode = "new" ? "" : slMode = "rename" ? slValue : slValue["name"]
+    if slMode = "restore" && DirExist(StudyLibraryDirectoryForName(slName))
+        slName .= " Restored"
+    slForm := StudyLibraryManagementForm(slParent, slTitle, slHint)
+    slGui := slForm["gui"]
+    StudyLibraryBigBoxFormAdd(slForm, "label", slGui.Add("Text", "x0 y0 w500 h40",
+        "Library name"), 0, 160, 1000, 75, "title")
+    slEdit := slGui.Add("Edit", "x0 y0 w500 h45", slName)
+    StudyLibraryBigBoxFormAdd(slForm, "name", slEdit, 0, 275, 1000, 85, "editor")
+    StudyLibraryBigBoxFormAdd(slForm, "help", slGui.Add("Text", "x0 y0 w500 h70",
+        "Use a keyboard to enter a name (up to 80 characters). The name Default is reserved."), 0, 420, 1000, 110)
+    slApply := slGui.Add("Button", "x0 y0 w200 h50 Default", slMode = "new" ? "Create library" : slMode = "rename" ? "Rename library" : "Restore library")
+    slCancel := slGui.Add("Button", "x0 y0 w200 h50", "Cancel")
+    StudyLibraryBigBoxFormAdd(slForm, "apply", slApply, 0, 850, 350, 110, "button")
+    StudyLibraryBigBoxFormAdd(slForm, "cancel", slCancel, 650, 850, 350, 110, "button")
+    slAction := slMode = "new" ? StudyLibraryCreateNew.Bind(slForm["ownerState"], slGui, slEdit,
+        slParent.Has("ownerState") ? slParent : 0)
+        : slMode = "rename" ? StudyLibraryManagerRenameApply.Bind(slParent, slGui, slEdit, slValue)
+        : StudyLibraryArchiveRestoreApply.Bind(slParent, slGui, slEdit, slValue)
+    slApply.OnEvent("Click", StudyLibraryQueueManagementAction.Bind(slForm, slAction))
+    slCancel.OnEvent("Click", StudyLibraryManagementClose.Bind(slGui))
+    slForm["shell"]["footer"].Text := "D-pad  Navigate    A / Cross  Select    B / Circle / Esc  Cancel    Keyboard  Edit name"
+    StudyLibraryBigBoxFormShow(slForm, slEdit)
+    try SendMessage(0x00B1, -1, -1, slEdit.Hwnd) ; EM_SETSEL: caret, not select-all.
+    return slForm
 }
 
 StudyLibraryOpenManager(slState, *) {
     if !StudyLibraryStateAlive(slState)
         return
+    if StudyLibraryBigBoxPresentation(slState)
+        return StudyLibraryOpenBigBoxManagement(slState)
     slOutputDir := slState["outputDir"] "\manager"
     DirCreate(slOutputDir)
+    ; @DESKTOP_MANAGER_CONTROLS_BEGIN@
     slGui := Gui(
         "+Owner" slState["gui"].Hwnd " +OwnDialogs",
         "Study Libraries"
@@ -13612,9 +14693,15 @@ StudyLibraryOpenManager(slState, *) {
     slClose.OnEvent("Click", StudyLibraryCloseDialog.Bind(slGui))
     slGui.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slGui))
     slGui.OnEvent("Close", StudyLibraryCloseDialog.Bind(slGui))
+    StudyDesktopManagementCreate(slManager)
+    ; @DESKTOP_MANAGER_CONTROLS_END@
     StudyLibraryRefreshManager(slManager, slState["libraryName"])
-    slGui.Show("AutoSize Center")
-    CPApplyOwnedDialogTheme(slGui)
+    if slManager.Has("desktop")
+        StudyDesktopDialogShow(slManager, 1000, 700, slList)
+    else {
+        slGui.Show("AutoSize Center")
+        CPApplyOwnedDialogTheme(slGui)
+    }
 }
 
 StudyLibrarySaveToggleChanged(*) {
@@ -13662,6 +14749,8 @@ CPSetExplanationPreference(option, enabled) {
     pref["control"].Value := enabled
     if option = "library"
         saveLibraryScreenshotsChk.Enabled := enabled
+    if option = "openOnStartup"
+        CPStartupOverlaysSync()
 }
 
 CPExplanationPreferenceChanged(option, *) {
@@ -13709,6 +14798,8 @@ CPSetScreenshotPreference(option, enabled) {
     pref["control"].Value := enabled
     if option = "highlight" || option = "speakerColor"
         ApplyShotSettings()
+    if option = "openOnStartup"
+        CPStartupOverlaysSync()
 }
 
 CPScreenshotPreferenceChanged(option, *) {
@@ -14272,6 +15363,7 @@ StudyLibraryOpenAnki(slState, *) {
         )
         return
     }
+    ; @DESKTOP_ANKI_CONNECTION_CONTROLS_BEGIN@
     saBigBox := StudyLibraryBigBoxPresentation(slState)
     saGuiOptions := "+Owner" slState["gui"].Hwnd " +OwnDialogs"
         . (saBigBox ? " +AlwaysOnTop -Caption +ToolWindow -DPIScale" : "")
@@ -14383,8 +15475,17 @@ StudyLibraryOpenAnki(slState, *) {
     saClose.OnEvent("Click", StudyAnkiCloseDialog.Bind(saState))
     saGui.OnEvent("Escape", StudyAnkiCloseDialog.Bind(saState))
     saGui.OnEvent("Close", StudyAnkiCloseDialog.Bind(saState))
+    StudyDesktopStudyToolCreate(saState, "ankiConnection", Map("heading", saHeading, "intro", saIntro,
+        "status", saStatusText, "test", saTest, "profileLabel", saProfileLabel, "profile", saProfileDdl,
+        "deckLabel", saDeckLabel, "deck", saDeckDdl, "modelLabel", saModelLabel, "model", saModelDdl,
+        "japaneseLabel", saJapaneseLabel, "japanese", saJapaneseDdl,
+        "explanationLabel", saExplanationLabel, "explanation", saExplanationDdl,
+        "refresh", saRefresh, "save", saSave, "cancel", saClose))
+    ; @DESKTOP_ANKI_CONNECTION_CONTROLS_END@
     if saBigBox
         StudyLibraryBigBoxFormShow(saForm, saTest)
+    else if saState.Has("desktop")
+        StudyDesktopDialogShow(saState, 900, 760, saProfileDdl)
     else {
         saGui.Show("AutoSize Center")
         CPApplyOwnedDialogTheme(saGui)
@@ -14466,7 +15567,7 @@ StudyAnkiReadAddResult(saState) {
     )
 }
 
-StudyReaderWriteAnkiReviewFile(saPath, saText, saOwnerHwnd) {
+StudyReaderWriteAnkiReviewFile(saPath, saText, saOwnerState) {
     saFile := 0
     try {
         try FileDelete(saPath)
@@ -14478,8 +15579,8 @@ StudyReaderWriteAnkiReviewFile(saPath, saText, saOwnerHwnd) {
         return true
     } catch as saWriteError {
         try saFile.Close()
-        CPThemedOwnedMessage(
-            saOwnerHwnd,
+        StudyReaderAnkiMessage(
+            saOwnerState,
             "The reviewed Anki entry could not be prepared.`n`n"
                 . saWriteError.Message,
             "Add to Anki", "ok", "error"
@@ -14489,15 +15590,69 @@ StudyReaderWriteAnkiReviewFile(saPath, saText, saOwnerHwnd) {
 }
 
 StudyReaderCloseAnkiAddDialog(saAddState, *) {
-    if saAddState["closed"]
+    if saAddState["closed"] || saAddState.Get("busy", false)
         return
     saAddState["closed"] := true
-    try saAddState["gui"].Destroy()
-    saOwnerHwnd := saAddState["readerState"]["gui"].Hwnd
+    if saAddState.Has("actionTimer") {
+        SetTimer(saAddState["actionTimer"], 0)
+        saAddState.Delete("actionTimer")
+    }
+    saOwnerHwnd := 0
+    try saOwnerHwnd := saAddState["readerState"]["gui"].Hwnd
     if saOwnerHwnd && DllCall("user32\IsWindow", "ptr", saOwnerHwnd, "int") {
         try DllCall("user32\EnableWindow", "ptr", saOwnerHwnd, "int", 1)
-        try WinActivate("ahk_id " saOwnerHwnd)
     }
+    ; Cancel returns to the screen which opened this review, not its data owner.
+    ; Successful adds retain their existing completion/refresh path.
+    saReturned := false
+    saCancelReturn := saAddState.Get("cancelReturn", 0)
+    if saAddState.Has("cancelReturn")
+        saAddState.Delete("cancelReturn")
+    saSeamlessReturn := saAddState.Get("seamlessCancelReturn", false)
+        && !saAddState.Get("completed", false) && IsObject(saCancelReturn)
+    if saSeamlessReturn
+        CPControllerBeginSurfaceTransition()
+    try {
+        ; Keep the outgoing review painted until the returning list is ready.
+        if !saAddState.Get("completed", false) && IsObject(saCancelReturn)
+            try saReturned := saCancelReturn.Call()
+    } finally {
+        if IsObject(saAddState.Get("bigBoxForm", 0)) {
+            saAddState["bigBoxForm"]["closed"] := true
+            StudyBigBoxFocusFrameStop(saAddState["bigBoxForm"])
+            saAddState["bigBoxForm"].Delete("ankiAddState")
+        }
+        try saAddState["gui"].DeleteProp("StudyAnkiPreview")
+        try saAddState["gui"].Destroy()
+        if saSeamlessReturn
+            CPControllerFinishSurfaceTransition()
+    }
+    if !saReturned && saOwnerHwnd && DllCall("user32\IsWindow", "ptr", saOwnerHwnd, "int")
+        try WinActivate("ahk_id " saOwnerHwnd)
+    CPControllerResetNavigation()
+}
+
+StudyReaderQueueAnkiAction(saAddState, saAction, *) {
+    if saAddState["closed"] || saAddState.Get("busy", false)
+        || saAddState.Get("actionRunning", false) || saAddState.Has("actionTimer")
+        return
+    ; A fullscreen confirmation must not hold the controller polling callback.
+    saAddState["actionTimer"] := StudyReaderRunAnkiAction.Bind(saAddState, saAction)
+    SetTimer(saAddState["actionTimer"], -1)
+}
+
+StudyReaderRunAnkiAction(saAddState, saAction, *) {
+    if saAddState.Has("actionTimer")
+        saAddState.Delete("actionTimer")
+    if saAddState["closed"] || saAddState.Get("busy", false) || saAddState.Get("actionRunning", false)
+        return
+    saAddState["actionRunning"] := true
+    try {
+        if (saAction = "example")
+            StudyReaderGenerateVocabularyExample(saAddState)
+        else
+            StudyReaderAddReviewedAnkiNote(saAddState)
+    } finally saAddState["actionRunning"] := false
 }
 
 StudyReaderRefreshAfterAnkiAdd(saReaderState) {
@@ -14559,8 +15714,8 @@ StudyReaderGenerateVocabularyExample(saAddState, *) {
     saProvider := CPSyncExplanationSelectionFromControls()
     if !CPApiKeyConfigured(saProvider) {
         saProviderLabel := saProvider = "gemini" ? "Gemini" : "OpenAI"
-        CPThemedOwnedMessage(
-            saAddState["gui"].Hwnd,
+        StudyReaderAnkiMessage(
+            saAddState,
             saProviderLabel " API key missing.`n`nAdd it in the API Keys tab, "
                 . "or set the corresponding Windows environment variable and "
                 . "restart JRPG Translator.",
@@ -14572,8 +15727,8 @@ StudyReaderGenerateVocabularyExample(saAddState, *) {
     saPython := ResolvePath(pythonExe)
     saExampleScript := A_ScriptDir "\scripts\example_sentence.py"
     if !(FileExist(saPython) && FileExist(saExampleScript)) {
-        CPThemedOwnedMessage(
-            saAddState["gui"].Hwnd,
+        StudyReaderAnkiMessage(
+            saAddState,
             "The configured Python runtime or example-sentence helper could not be found.",
             "Generate example sentence", "ok", "error"
         )
@@ -14599,11 +15754,11 @@ StudyReaderGenerateVocabularyExample(saAddState, *) {
     saContext := saReaderState["sections"].Length
         ? saReaderState["sections"][1]["content"] : ""
     if !StudyReaderWriteAnkiReviewFile(
-        saTermFile, saFront, saAddState["gui"].Hwnd
+        saTermFile, saFront, saAddState
     ) || !StudyReaderWriteAnkiReviewFile(
-        saDefinitionFile, saDefinition, saAddState["gui"].Hwnd
+        saDefinitionFile, saDefinition, saAddState
     ) || !StudyReaderWriteAnkiReviewFile(
-        saContextFile, saContext, saAddState["gui"].Hwnd
+        saContextFile, saContext, saAddState
     )
         return
     for saTempFile in [saResultFile, saOutFile, saErrFile]
@@ -14620,6 +15775,7 @@ StudyReaderGenerateVocabularyExample(saAddState, *) {
         saOldEnvironment[saEnvironmentName] := EnvGet(saEnvironmentName)
 
     saExampleButton := saAddState["exampleButton"]
+    saAddState["busy"] := saAddState.Get("bigBoxPresentation", false)
     saExampleButton.Enabled := false
     saAddState["addButton"].Enabled := false
     saAddState["status"].Value := "Generating a learner-friendly example sentence..."
@@ -14655,8 +15811,11 @@ StudyReaderGenerateVocabularyExample(saAddState, *) {
     } finally {
         for saEnvironmentName, saEnvironmentValue in saOldEnvironment
             EnvSet(saEnvironmentName, saEnvironmentValue)
+        saAddState["busy"] := false
     }
 
+    if !StudyLibraryStateAlive(saAddState)
+        return
     saExampleButton.Enabled := true
     saAddState["addButton"].Enabled := true
     saRows := StudyLibraryReadRows(saResultFile)
@@ -14667,8 +15826,8 @@ StudyReaderGenerateVocabularyExample(saAddState, *) {
         saOutput := FileExist(saOutFile)
             ? Trim(FileRead(saOutFile, "UTF-8")) : ""
         saAddState["status"].Value := "Example generation failed."
-        CPThemedOwnedMessage(
-            saAddState["gui"].Hwnd,
+        StudyReaderAnkiMessage(
+            saAddState,
             "The example sentence could not be generated.`n`n"
                 . (saError != "" ? saError : saOutput),
             "Generate example sentence", "ok", "error", 650
@@ -14728,19 +15887,21 @@ StudyReaderAddReviewedAnkiNote(saAddState, *) {
         . saMapping["explanationField"] "`n"
         . "Source screenshot: " (saIncludeScreenshot
             ? "Include compact JPEG on the back" : "Do not include")
-    if (CPThemedOwnedMessage(
-        saAddState["gui"].Hwnd, saConfirm, "Add to Anki",
+    if (StudyReaderAnkiMessage(
+        saAddState, saConfirm, "Add to Anki",
         "yesno", "info", 560
     ) != "Yes")
+        return
+    if !StudyLibraryStateAlive(saAddState)
         return
 
     saReaderState := saAddState["readerState"]
     saFrontPath := saReaderState["outputDir"] "\anki_review_front.txt"
     saBackPath := saReaderState["outputDir"] "\anki_review_back.txt"
     if !StudyReaderWriteAnkiReviewFile(
-        saFrontPath, saFront, saAddState["gui"].Hwnd
+        saFrontPath, saFront, saAddState
     ) || !StudyReaderWriteAnkiReviewFile(
-        saBackPath, saBack, saAddState["gui"].Hwnd
+        saBackPath, saBack, saAddState
     )
         return
 
@@ -14761,6 +15922,7 @@ StudyReaderAddReviewedAnkiNote(saAddState, *) {
             ? saAddState["screenshotPath"] : ""
     )
     saAddState["addButton"].Enabled := false
+    saAddState["busy"] := saAddState.Get("bigBoxPresentation", false)
     saAddState["status"].Value := "Checking for duplicates and adding to Anki..."
     for saName, saValue in saEnvironment
         EnvSet(saName, saValue)
@@ -14768,7 +15930,10 @@ StudyReaderAddReviewedAnkiNote(saAddState, *) {
     finally {
         for saName, saValue in saEnvironment
             EnvSet(saName, "")
+        saAddState["busy"] := false
     }
+    if !StudyLibraryStateAlive(saAddState)
+        return
     if !saRan {
         saAddState["status"].Value := "The Anki bridge could not be started. Nothing was added to Anki."
         saAddState["addButton"].Enabled := true
@@ -14783,12 +15948,13 @@ StudyReaderAddReviewedAnkiNote(saAddState, *) {
         else
             saMapping["addDeck"] := saDeck
         StudyAnkiSaveMapping(saMapping)
+        saAddState["completed"] := true
         StudyReaderCloseAnkiAddDialog(saAddState)
         if !saIsVocabulary
             StudyReaderRefreshAfterAnkiAdd(saReaderState)
         if (saCode = "added") {
-            CPThemedOwnedMessage(
-                saReaderState["gui"].Hwnd,
+            StudyReaderAnkiMessage(
+                saReaderState,
                 saResult["message"] != "" ? saResult["message"]
                     : "The reviewed " (saIsVocabulary
                         ? "vocabulary card" : "explanation")
@@ -14796,14 +15962,14 @@ StudyReaderAddReviewedAnkiNote(saAddState, *) {
                 "Added to Anki", "ok", "info"
             )
         } else if (saCode = "duplicate") {
-            CPThemedOwnedMessage(
-                saReaderState["gui"].Hwnd,
+            StudyReaderAnkiMessage(
+                saReaderState,
                 "Nothing new was added to Anki.`n`n" saResult["message"],
                 "Already in Anki", "ok", "info"
             )
         } else {
-            CPThemedOwnedMessage(
-                saReaderState["gui"].Hwnd, saResult["message"],
+            StudyReaderAnkiMessage(
+                saReaderState, saResult["message"],
                 "Added, but not linked", "ok", "warning"
             )
         }
@@ -14910,11 +16076,13 @@ StudyReaderShowAnkiMenu(srState, *) {
         return
     srChoices := [
         "Add full explanation...",
-        "Add selected vocabulary..."
+        StudyReaderBigBoxPresentation(srState) ? "Choose vocabulary..." : "Add selected vocabulary..."
     ]
     srActions := [
         StudyReaderOpenAnkiAddDialog.Bind(srState),
-        StudyReaderOpenVocabularyAnkiDialog.Bind(srState)
+        StudyReaderBigBoxPresentation(srState)
+            ? StudyReaderOpenVocabularyPicker.Bind(srState)
+            : StudyReaderOpenVocabularyAnkiDialog.Bind(srState)
     ]
     srChoice := CPThemedChoicePopup(
         srState["gui"].Hwnd, srState["addAnkiButton"].Hwnd, srChoices
@@ -14923,17 +16091,209 @@ StudyReaderShowAnkiMenu(srState, *) {
         srActions[srChoice].Call()
 }
 
+StudyReaderVocabularyEntries(srState) {
+    srEntries := []
+    for srRow in StudyLibraryReadRows(srState["outputDir"] "\reader_vocabulary.tsv") {
+        if (srRow.Length < 6)
+            continue
+        if (srRow[1] != srState["currentGroupId"] || srRow[2] != srState["currentVersion"])
+            continue
+        srFront := StudyLibraryHexDecode(srRow[4])
+        srBack := StudyLibraryHexDecode(srRow[5])
+        if (Trim(srFront) = "" || Trim(srBack) = "")
+            continue
+        srEntries.Push(Map("display", StudyLibraryHexDecode(srRow[3]),
+            "front", srFront, "back", srBack, "meaning", StudyLibraryHexDecode(srRow[6])))
+    }
+    return srEntries
+}
+
+StudyReaderVocabularyPickerAlive(srPicker) {
+    return IsObject(srPicker) && !srPicker.Get("closed", true)
+        && StudyLibraryStateAlive(srPicker) && StudyLibraryStateAlive(srPicker["libraryState"])
+}
+
+StudyReaderVocabularyPickerChanged(srPicker, *) {
+    if !StudyReaderVocabularyPickerAlive(srPicker)
+        return
+    srIndex := srPicker["controls"]["list"].GetNext()
+    srValid := srIndex >= 1 && srIndex <= srPicker["entries"].Length
+    if !srValid
+        return
+    srEntry := srPicker["entries"][srIndex]
+    srPicker["controls"]["front"].Value := srEntry["front"]
+    srPicker["controls"]["backText"].Value := srEntry["back"]
+}
+
+StudyReaderVocabularyPickerClose(srPicker, srRestoreReader := true, *) {
+    if !IsObject(srPicker) || srPicker.Get("closed", false)
+        return
+    srPicker["closed"] := true
+    if srPicker.Has("chooseTimer") {
+        SetTimer(srPicker["chooseTimer"], 0)
+        srPicker.Delete("chooseTimer")
+    }
+    srOwner := srPicker["libraryState"]
+    if srOwner.Get("vocabularyPicker", 0) = srPicker
+        srOwner["vocabularyPicker"] := 0
+    StudyBigBoxFocusFrameStop(srPicker)
+    try srPicker["gui"].DeleteProp("StudyVocabularyPicker")
+    try srPicker["gui"].Destroy()
+    if srRestoreReader && StudyLibraryStateAlive(srOwner) {
+        try WinActivate("ahk_id " srOwner["gui"].Hwnd)
+        try srOwner["addAnkiButton"].Focus()
+    }
+    CPControllerResetNavigation()
+}
+
+StudyReaderVocabularyPickerChoose(srPicker, *) {
+    if !StudyReaderVocabularyPickerAlive(srPicker) || srPicker.Get("pending", false)
+        return
+    srIndex := srPicker["controls"]["list"].GetNext()
+    if (srIndex < 1 || srIndex > srPicker["entries"].Length)
+        return
+    srPicker["pending"] := true
+    srPicker["chooseTimer"] := StudyReaderVocabularyPickerOpenReview.Bind(srPicker, srIndex)
+    ; Leave the controller polling callback before opening the Anki workflow.
+    SetTimer(srPicker["chooseTimer"], -1)
+}
+
+StudyReaderVocabularyPickerOpenReview(srPicker, srIndex, *) {
+    if !StudyReaderVocabularyPickerAlive(srPicker)
+        return
+    srOwner := srPicker["libraryState"]
+    if (srOwner.Get("editing", false) || srOwner["currentGroupId"] != srPicker["groupId"]
+        || srOwner["currentVersion"] != srPicker["version"]) {
+        StudyReaderVocabularyPickerClose(srPicker)
+        return
+    }
+    srEntry := srPicker["entries"][srIndex]
+    srReturn := StudyReaderVocabularyPickerReturn.Bind(srOwner, srPicker["groupId"],
+        srPicker["version"], srEntry["front"], srEntry["back"])
+    srPicker["pending"] := true
+    srHint := srPicker["controls"]["previewHint"].Value
+    srPicker["controls"]["previewHint"].Value := "Opening card review…  B / Esc to cancel."
+    srReview := 0
+    try {
+        ; Keep the list covering the Reader during Anki discovery and layout.
+        srReview := StudyReaderOpenReviewedAnkiDialog(srOwner, "vocabulary",
+            srEntry["front"], srEntry["back"], true, srReturn, srPicker)
+        if IsObject(srReview) && !srReview.Get("closed", false)
+            StudyReaderVocabularyPickerClose(srPicker, false)
+    } finally {
+        if StudyReaderVocabularyPickerAlive(srPicker) {
+            srPicker["pending"] := false
+            srPicker["controls"]["previewHint"].Value := srHint
+            if !IsObject(srReview) {
+                try WinActivate("ahk_id " srPicker["gui"].Hwnd)
+                try srPicker["controls"]["list"].Focus()
+            }
+        }
+    }
+}
+
+StudyReaderVocabularyPickerReturn(srOwner, srGroupId, srVersion, srFront, srBack) {
+    if !StudyLibraryStateAlive(srOwner) || srOwner.Get("editing", false)
+        || srOwner["currentGroupId"] != srGroupId || srOwner["currentVersion"] != srVersion
+        return false
+    srPicker := StudyReaderOpenVocabularyPicker(srOwner)
+    if !StudyReaderVocabularyPickerAlive(srPicker)
+        return false
+    for srIndex, srEntry in srPicker["entries"] {
+        if (srEntry["front"] = srFront && srEntry["back"] = srBack) {
+            srPicker["controls"]["list"].Modify(0, "-Select -Focus")
+            srPicker["controls"]["list"].Modify(srIndex, "Select Focus Vis")
+            StudyReaderVocabularyPickerChanged(srPicker)
+            srPicker["controls"]["list"].Focus()
+            break
+        }
+    }
+    return true
+}
+
+StudyReaderOpenVocabularyPicker(srState, *) {
+    if !StudyLibraryStateAlive(srState) || !StudyReaderBigBoxPresentation(srState)
+        || srState.Get("editing", false) || srState["currentGroupId"] <= 0
+        return
+    if StudyReaderVocabularyPickerAlive(srState.Get("vocabularyPicker", 0)) {
+        WinActivate("ahk_id " srState["vocabularyPicker"]["gui"].Hwnd)
+        return srState["vocabularyPicker"]
+    }
+    srEntries := StudyReaderVocabularyEntries(srState)
+    ; An EXE-only update can leave an older bridge which never exports this file.
+    ; That is an installation mismatch, not an explanation without vocabulary.
+    srDataMissing := !srEntries.Length && !FileExist(srState["outputDir"] "\reader_vocabulary.tsv")
+    srGui := Gui("+Owner" srState["gui"].Hwnd
+        . " +AlwaysOnTop +OwnDialogs -Caption +ToolWindow -DPIScale", "Choose vocabulary")
+    srGui.MarginX := 0, srGui.MarginY := 0
+    srGui.SetFont("s12", "Segoe UI")
+    srPicker := StudyLibraryBigBoxFormState(srGui, srState, "Choose vocabulary",
+        "Choose a Key vocabulary entry, then review its Anki card before adding it.")
+    srPicker["kind"] := "vocabularyPicker"
+    srPicker["entries"] := srEntries
+    srPicker["groupId"] := srState["currentGroupId"]
+    srPicker["version"] := srState["currentVersion"]
+    srPicker["closed"] := false
+    srPicker["pending"] := false
+    srControls := srPicker["controls"]
+    srHeading := srDataMissing ? "Vocabulary data unavailable · v"
+        : "Key vocabulary · " srEntries.Length (srEntries.Length = 1 ? " entry · v" : " entries · v")
+    srControls["heading"] := srGui.AddText("x0 y0 w10 h10",
+        srHeading . Format("{:02}", srPicker["version"]))
+    ; Keep the visible order aligned with the entry payloads, even on a header click.
+    srControls["list"] := srGui.AddListView("x0 y0 w10 h10 -Multi -LV0x10 NoSortHdr", ["Word / reading"])
+    srControls["frontLabel"] := srGui.AddText("x0 y0 w10 h10", "Card front · without pronunciation reading")
+    srControls["front"] := srGui.AddText("x0 y0 w10 h10 +0x4200", "—")
+    srControls["backLabel"] := srGui.AddText("x0 y0 w10 h10", "Card back · complete vocabulary entry")
+    srEmptyText := srDataMissing
+        ? "The vocabulary data file is missing. This can happen when the EXE is updated without its Python helper scripts."
+            . "`r`n`r`nUpdate scripts\study_library.py and scripts\study_vocabulary.py in the same app folder as the EXE,"
+            . " then close and reopen the Reader."
+            . "`r`n`r`nThis does not mean your explanation has no Key vocabulary."
+        : "No recognizable Key vocabulary entries were found in this explanation version."
+            . "`r`n`r`nChoose another explanation or version. The desktop Reader still supports manual text selection."
+    srControls["backText"] := srGui.AddEdit("x0 y0 w10 h10 ReadOnly Multi VScroll", srEntries.Length ? "" : srEmptyText)
+    srControls["previewHint"] := srGui.AddText("x0 y0 w10 h10 +0x80", srEntries.Length
+        ? "Highlight a word and press A / Cross / Enter to review its Anki card."
+        : "No vocabulary available to review.")
+    srControls["back"] := srGui.AddButton("x0 y0 w10 h10", "Back to Reader")
+    srPicker["titleControls"].Push(srControls["heading"])
+    srPicker["bodyControls"].Push(srControls["frontLabel"], srControls["backLabel"], srControls["previewHint"])
+    srPicker["emphasisControls"].Push(srControls["front"])
+    srPicker["editorControls"].Push(srControls["list"], srControls["backText"])
+    srPicker["buttonControls"].Push(srControls["back"])
+    for srEntry in srEntries
+        srControls["list"].Add(, srEntry["display"])
+    srControls["list"].OnEvent("ItemSelect", StudyReaderVocabularyPickerChanged.Bind(srPicker))
+    srControls["list"].OnEvent("DoubleClick", StudyReaderVocabularyPickerChoose.Bind(srPicker))
+    srClose := StudyReaderVocabularyPickerClose.Bind(srPicker)
+    srControls["back"].OnEvent("Click", srClose)
+    srGui.OnEvent("Close", srClose)
+    srGui.OnEvent("Escape", srClose)
+    srGui.StudyVocabularyPicker := srPicker
+    srState["vocabularyPicker"] := srPicker
+    srPicker["shell"]["footer"].Value := "D-pad / arrows  Browse     A / Cross / Enter  Review card"
+        . "     B / Circle / Esc  Back to Reader"
+    if srEntries.Length {
+        srControls["list"].Modify(1, "Select Focus Vis")
+        StudyReaderVocabularyPickerChanged(srPicker)
+    }
+    StudyLibraryBigBoxFormShow(srPicker, srControls[srEntries.Length ? "list" : "back"])
+    return srPicker
+}
+
 StudyReaderOpenReviewedAnkiDialog(
     srState, saCardKind, saReviewedFront, saReviewedBack,
-    saInferenceConfident := true
+    saInferenceConfident := true, saCancelReturn := 0, saHandoffSource := 0
 ) {
     saIsVocabulary := saCardKind = "vocabulary"
+    saBigBox := StudyReaderBigBoxPresentation(srState)
     if ((srState.Has("editing") && srState["editing"])
         || srState["currentGroupId"] <= 0)
         return
     if (!saIsVocabulary && srState["currentAnkiStatus"] = "found") {
-        CPThemedOwnedMessage(
-            srState["gui"].Hwnd,
+        StudyReaderAnkiMessage(
+            srState,
             "An exact normalized Japanese match is currently marked as "
                 . "present in Anki.`n`n"
                 . "If you deleted an older card in Anki, return to the Study "
@@ -14946,8 +16306,8 @@ StudyReaderOpenReviewedAnkiDialog(
     }
     saProfile := Trim(srState["currentProfile"])
     if (saProfile = "") {
-        CPThemedOwnedMessage(
-            srState["gui"].Hwnd,
+        StudyReaderAnkiMessage(
+            srState,
             "This explanation has no named Profile. Assign a Profile before "
                 . "adding it to Anki so its deck mapping is unambiguous.",
             "Add to Anki", "ok", "warning"
@@ -14958,8 +16318,8 @@ StudyReaderOpenReviewedAnkiDialog(
     if (saMapping["deck"] = "" || saMapping["model"] = ""
         || saMapping["japaneseField"] = ""
         || saMapping["explanationField"] = "") {
-        CPThemedOwnedMessage(
-            srState["gui"].Hwnd,
+        StudyReaderAnkiMessage(
+            srState,
             "No complete Anki mapping is saved for '" saProfile "'.`n`n"
                 . "Open Study Library > Libraries... > Anki setup first.",
             "Add to Anki", "ok", "warning"
@@ -14969,10 +16329,15 @@ StudyReaderOpenReviewedAnkiDialog(
 
     if !StudyAnkiRunBridge(srState, "discover")
         return
+    if !StudyLibraryStateAlive(srState)
+        return
+    ; B can close the list while discovery is running. Never open a late review.
+    if IsObject(saHandoffSource) && !StudyReaderVocabularyPickerAlive(saHandoffSource)
+        return
     saStatus := StudyAnkiReadStatus(srState)
     if (saStatus["code"] != "connected") {
-        CPThemedOwnedMessage(
-            srState["gui"].Hwnd, saStatus["message"],
+        StudyReaderAnkiMessage(
+            srState, saStatus["message"],
             "Anki unavailable", "ok", "warning"
         )
         return
@@ -14984,8 +16349,8 @@ StudyReaderOpenReviewedAnkiDialog(
     }
     saDecks := StudyAnkiDeckScope(saMapping["deck"], saAllDecks)
     if !saDecks.Length {
-        CPThemedOwnedMessage(
-            srState["gui"].Hwnd,
+        StudyReaderAnkiMessage(
+            srState,
             "The mapped Anki parent deck was not found:`n`n" saMapping["deck"],
             "Add to Anki", "ok", "warning"
         )
@@ -15008,8 +16373,8 @@ StudyReaderOpenReviewedAnkiDialog(
         ) || !StudyAnkiTextInList(
             saModelFields[saMapping["model"]], saMapping["explanationField"]
         )) {
-        CPThemedOwnedMessage(
-            srState["gui"].Hwnd,
+        StudyReaderAnkiMessage(
+            srState,
             "The saved note type or field mapping no longer exists in Anki.`n`n"
                 . "Open the Anki setup and update the mapping first.",
             "Add to Anki", "ok", "warning"
@@ -15022,13 +16387,19 @@ StudyReaderOpenReviewedAnkiDialog(
     saBack := saIsVocabulary ? saReviewedBack
         : (srState["sections"].Length
             ? srState["sections"][1]["content"] : "")
+    ; @DESKTOP_ANKI_CONTROLS_BEGIN@
     saGui := Gui(
-        "+Owner" srState["gui"].Hwnd " +OwnDialogs +AlwaysOnTop",
+        "+Owner" srState["gui"].Hwnd " +OwnDialogs +AlwaysOnTop"
+            . (saBigBox ? " -Caption +ToolWindow -DPIScale" : ""),
         saIsVocabulary ? "Add vocabulary to Anki" : "Add explanation to Anki"
     )
     saGui.MarginX := 16, saGui.MarginY := 14
     saGui.SetFont("s10", "Segoe UI")
-    saGui.Add("Text", "xm ym w560", "Review Anki entry").SetFont("s11 Bold")
+    saForm := saBigBox ? StudyLibraryBigBoxFormState(saGui, srState,
+        saIsVocabulary ? "Review vocabulary card" : "Review explanation card",
+        "Review the destination and card content. Nothing is sent until you confirm.") : 0
+    saHeading := saGui.Add("Text", "xm ym w560", "Review Anki entry")
+    saHeading.SetFont("s11 Bold")
     saHint := saGui.Add(
         "Text", "xm y+4 w560 h34 cGray",
         saIsVocabulary
@@ -15038,13 +16409,13 @@ StudyReaderOpenReviewedAnkiDialog(
                 . "without attached kana readings; both fields remain editable."
     )
     CPRegisterMutedControl(saHint)
-    saGui.Add(
+    saMappingText := saGui.Add(
         "Text", "xm y+6 w560 h36",
         "Profile: " saProfile "    Note type: " saMapping["model"] "`n"
             . "Fields: " saMapping["japaneseField"] " / "
             . saMapping["explanationField"]
     )
-    saGui.Add("Text", "xm y+6 w120", "Destination deck:")
+    saDeckLabel := saGui.Add("Text", "xm y+6 w120", "Destination deck:")
     saDeckDdl := saGui.Add("DropDownList", "x+8 yp-4 w430 0x210", saDecks)
     saPreferredDeck := saIsVocabulary
         && saMapping.Has("vocabularyDeck")
@@ -15053,7 +16424,7 @@ StudyReaderOpenReviewedAnkiDialog(
             : (saMapping["addDeck"] != ""
                 ? saMapping["addDeck"] : saMapping["deck"])
     StudyAnkiChooseText(saDeckDdl, saDecks, saPreferredDeck)
-    saGui.Add("Text", "xm y+8 w560", saMapping["japaneseField"] " (Japanese)")
+    saFrontLabel := saGui.Add("Text", "xm y+8 w560", saMapping["japaneseField"] " (Japanese)")
     saFrontEdit := saGui.Add(
         "Edit", "xm y+3 w560 h58 Multi VScroll", saFront
     )
@@ -15075,7 +16446,7 @@ StudyReaderOpenReviewedAnkiDialog(
     )
     saScreenshotPath := StudyReaderCurrentScreenshot(srState)
     saHasScreenshot := saScreenshotPath != ""
-    saGui.Add("Text", "xm y+7 w560", "Source screenshot")
+    saScreenshotLabel := saGui.Add("Text", "xm y+7 w560", "Source screenshot")
     saPreviewFrame := saGui.Add(
         "Text", "xm y+3 w132 h78 Border Background101010", ""
     )
@@ -15083,7 +16454,7 @@ StudyReaderOpenReviewedAnkiDialog(
     saPreviewPicture := saGui.Add(
         "Picture", "x" (saFrameX + 3) " y" (saFrameY + 3) " w1 h1 Hidden", ""
     )
-    if saHasScreenshot {
+    if (saHasScreenshot && !saBigBox) {
         saNativeW := 0, saNativeH := 0
         StudyLibraryImageDimensions(saScreenshotPath, &saNativeW, &saNativeH)
         if (saNativeW <= 0 || saNativeH <= 0)
@@ -15142,23 +16513,287 @@ StudyReaderOpenReviewedAnkiDialog(
         "addButton", saAddButton,
         "exampleButton", saExampleButton,
         "exampleGenerated", StudyReaderHasGeneratedExample(saBack),
+        "bigBoxPresentation", saBigBox,
+        "libraryName", srState.Get("libraryName", "Default"),
+        "busy", false,
         "closed", false
     )
+    if IsObject(saCancelReturn)
+        saAddState["cancelReturn"] := saCancelReturn
+    saAddState["seamlessCancelReturn"] := saBigBox && IsObject(saHandoffSource)
+    saControls := Map("heading", saHeading, "hint", saHint,
+        "mapping", saMappingText, "deckLabel", saDeckLabel, "deck", saDeckDdl,
+        "frontLabel", saFrontLabel, "front", saFrontEdit,
+        "backLabel", saBackLabel, "back", saBackEdit,
+        "imageLabel", saScreenshotLabel, "imageFrame", saPreviewFrame,
+        "image", saPreviewPicture, "imageHint", saScreenshotHint,
+        "status", saStatusText, "add", saAddButton, "cancel", saCancelButton)
+    if saBigBox {
+        saAddState["bigBoxForm"] := saForm
+        saForm["kind"] := "ankiPreview"
+        saForm["ankiAddState"] := saAddState
+        saForm["controls"] := saControls
+        saHeading.Visible := false
+        saIncludeScreenshot.Visible := false
+        saScreenshotHint.Value := saHasScreenshot
+            ? "Compact JPEG for Anki; the original stays unchanged."
+            : "No screenshot is saved for this version."
+        saToggle := saGui.AddButton("x0 y0 w10 h10", "")
+        saForm["controls"]["screenshotToggle"] := saToggle
+        saForm["toggleControls"] := [saToggle]
+        saForm["bodyControls"] := [saHint, saMappingText, saDeckLabel,
+            saFrontLabel, saBackLabel, saScreenshotLabel, saScreenshotHint, saStatusText]
+        saForm["editorControls"] := [saDeckDdl, saFrontEdit, saBackEdit]
+        saForm["buttonControls"] := [saAddButton, saCancelButton]
+        if IsObject(saExampleButton) {
+            saForm["controls"]["example"] := saExampleButton
+            saForm["buttonControls"].Push(saExampleButton)
+            ; Follow the visible vertical order instead of letting the wide
+            ; editors' centers make navigation skip the right-aligned action.
+            saGui.StudyDirectionalFocus := Map(
+                saFrontEdit.Hwnd "|Down", saExampleButton.Hwnd,
+                saExampleButton.Hwnd "|Up", saFrontEdit.Hwnd,
+                saExampleButton.Hwnd "|Down", saBackEdit.Hwnd,
+                saBackEdit.Hwnd "|Up", saExampleButton.Hwnd
+            )
+        }
+        saToggle.OnEvent("Click", StudyReaderAnkiScreenshotToggle.Bind(saAddState))
+        StudyReaderAnkiScreenshotToggleText(saAddState)
+        saGui.StudyPreserveEditSelection := true
+        saGui.StudyAnkiPreview := saAddState
+        CPPrepareStudyCombo(saDeckDdl.Hwnd)
+        saForm["shell"]["footer"].Value := "D-pad  Navigate / scroll     A / Cross  Select"
+            . "     B / Circle / Esc  Cancel     Keyboard  Edit card text"
+    }
+    StudyDesktopAnkiCreate(saAddState, saControls)
     saIncludeScreenshot.OnEvent(
         "Click", StudyReaderAnkiScreenshotPreferenceChanged.Bind(saAddState)
     )
-    saAddButton.OnEvent("Click", StudyReaderAddReviewedAnkiNote.Bind(saAddState))
+    saAddButton.OnEvent("Click", saBigBox
+        ? StudyReaderQueueAnkiAction.Bind(saAddState, "add")
+        : StudyReaderAddReviewedAnkiNote.Bind(saAddState))
     if saIsVocabulary
         saExampleButton.OnEvent(
-            "Click", StudyReaderGenerateVocabularyExample.Bind(saAddState)
+            "Click", saBigBox ? StudyReaderQueueAnkiAction.Bind(saAddState, "example")
+                : StudyReaderGenerateVocabularyExample.Bind(saAddState)
         )
     saCancelButton.OnEvent("Click", StudyReaderCloseAnkiAddDialog.Bind(saAddState))
     saGui.OnEvent("Escape", StudyReaderCloseAnkiAddDialog.Bind(saAddState))
     saGui.OnEvent("Close", StudyReaderCloseAnkiAddDialog.Bind(saAddState))
+    ; @DESKTOP_ANKI_CONTROLS_END@
+    if IsObject(saHandoffSource) && !StudyReaderVocabularyPickerAlive(saHandoffSource) {
+        saAddState["completed"] := true ; Cleanup only; the user already cancelled the source.
+        StudyReaderCloseAnkiAddDialog(saAddState)
+        return
+    }
     try DllCall("user32\EnableWindow", "ptr", srState["gui"].Hwnd, "int", 0)
-    saGui.Show("AutoSize Center")
-    CPApplyOwnedDialogTheme(saGui)
-    saFrontEdit.Focus()
+    if saBigBox {
+        if IsObject(saHandoffSource)
+            CPControllerBeginSurfaceTransition()
+        try {
+            StudyLibraryBigBoxFormShow(saForm, saDeckDdl)
+            for saEdit in [saFrontEdit, saBackEdit]
+                SendMessage(0x00B1, 0, 0, saEdit.Hwnd) ; caret, not select-all
+        } finally {
+            if IsObject(saHandoffSource)
+                CPControllerFinishSurfaceTransition()
+        }
+    } else if saAddState.Has("desktop") {
+        StudyDesktopDialogShow(saAddState, 1040, 760, saFrontEdit)
+    } else {
+        saGui.Show("AutoSize Center")
+        CPApplyOwnedDialogTheme(saGui)
+        saFrontEdit.Focus()
+    }
+    return saAddState
+}
+
+StudyReaderAnkiScreenshotToggleText(saAddState) {
+    saToggle := saAddState["bigBoxForm"]["controls"]["screenshotToggle"]
+    saCheck := saAddState["includeScreenshot"]
+    saToggle.Enabled := saCheck.Enabled
+    saToggle.Text := "Include screenshot`n"
+        . (!saCheck.Enabled ? "Unavailable" : saCheck.Value ? "On" : "Off")
+}
+
+StudyReaderAnkiScreenshotToggle(saAddState, *) {
+    if saAddState["closed"] || saAddState.Get("busy", false)
+        || !saAddState["includeScreenshot"].Enabled
+        return
+    saAddState["includeScreenshot"].Value := !saAddState["includeScreenshot"].Value
+    StudyReaderAnkiScreenshotPreferenceChanged(saAddState)
+    StudyReaderAnkiScreenshotToggleText(saAddState)
+}
+
+StudyReaderAnkiPreviewBigBoxResize(saForm, saX, saY, saW, saH, saScale) {
+    saControls := saForm["controls"]
+    saState := saForm["ankiAddState"]
+    saGap := Max(9, Round(12 * saScale))
+    saLabelH := Max(24, Round(30 * saScale))
+    saRowH := Max(38, Round(46 * saScale))
+    saButtonH := Max(42, Round(54 * saScale))
+    saStatusH := Max(30, Round(40 * saScale))
+    saLeftW := Floor((saW - saGap * 2) * 0.63)
+    saRightX := saX + saLeftW + saGap * 2
+    saRightW := saW - saLeftW - saGap * 2
+    saControls["heading"].Visible := false
+    saControls["hint"].Visible := false
+    saControls["mapping"].Move(saX, saY, saLeftW, saLabelH + saRowH)
+    saControls["deckLabel"].Move(saRightX, saY, saRightW, saLabelH)
+    saControls["deck"].Move(saRightX, saY + saLabelH, saRightW, saRowH)
+    saTop := saY + saLabelH + saRowH + saGap
+    saActionY := saY + saH - saButtonH
+    saStatusY := saActionY - saGap - saStatusH
+    saPaneBottom := saStatusY - saGap
+    saControls["frontLabel"].Move(saX, saTop, saLeftW, saLabelH)
+    saFrontY := saTop + saLabelH
+    saFrontH := Max(52, Round(78 * saScale))
+    saControls["front"].Move(saX, saFrontY, saLeftW, saFrontH)
+    saBackLabelY := saFrontY + saFrontH + saGap
+    saExampleW := Min(Round(220 * saScale), Floor(saLeftW * 0.47))
+    saControls["backLabel"].Move(saX, saBackLabelY,
+        saControls.Has("example") ? saLeftW - saExampleW - saGap : saLeftW, saRowH)
+    if saControls.Has("example")
+        saControls["example"].Move(saX + saLeftW - saExampleW, saBackLabelY, saExampleW, saRowH)
+    saBackY := saBackLabelY + saRowH + saGap
+    saControls["back"].Move(saX, saBackY, saLeftW, Max(60, saPaneBottom - saBackY))
+    saControls["imageLabel"].Move(saRightX, saTop, saRightW, saLabelH)
+    saToggleH := Max(48, Round(64 * saScale))
+    saToggleY := saPaneBottom - saToggleH
+    saControls["screenshotToggle"].Move(saRightX, saToggleY, saRightW, saToggleH)
+    saHintH := Max(36, Round(48 * saScale))
+    saHintY := saToggleY - saGap - saHintH
+    saControls["imageHint"].Move(saRightX, saHintY, saRightW, saHintH)
+    saImageY := saTop + saLabelH
+    saImageH := Max(40, saHintY - saGap - saImageY)
+    saControls["imageFrame"].Move(saRightX, saImageY, saRightW, saImageH)
+    if saState["screenshotPath"] != "" {
+        saNativeW := 0, saNativeH := 0
+        if !saForm.Has("imageNativeW") {
+            StudyLibraryImageDimensions(saState["screenshotPath"], &saNativeW, &saNativeH)
+            saForm["imageNativeW"] := saNativeW, saForm["imageNativeH"] := saNativeH
+        }
+        saNativeW := saForm["imageNativeW"], saNativeH := saForm["imageNativeH"]
+        if (saNativeW > 0 && saNativeH > 0) {
+            saRatio := Min((saRightW - 6) / saNativeW, (saImageH - 6) / saNativeH)
+            saDisplayW := Max(1, Round(saNativeW * saRatio))
+            saDisplayH := Max(1, Round(saNativeH * saRatio))
+            saSizeKey := saDisplayW "x" saDisplayH
+            try {
+                if saForm.Get("imageSize", "") != saSizeKey {
+                    saControls["image"].Value := "*w" saDisplayW " *h" saDisplayH " " saState["screenshotPath"]
+                    saForm["imageSize"] := saSizeKey
+                }
+                saControls["image"].Move(saRightX + Floor((saRightW - saDisplayW) / 2),
+                    saImageY + Floor((saImageH - saDisplayH) / 2), saDisplayW, saDisplayH)
+                saControls["image"].Visible := true
+            }
+        }
+    }
+    saControls["status"].Move(saX, saStatusY, saW, saStatusH)
+    saAddW := Min(Round(250 * saScale), Floor(saW * 0.4))
+    saCancelW := Min(Round(180 * saScale), Floor(saW * 0.3))
+    saControls["add"].Move(saX, saActionY, saAddW, saButtonH)
+    saControls["cancel"].Move(saX + saW - saCancelW, saActionY, saCancelW, saButtonH)
+}
+
+StudyLibraryOwnedMessageClose(saMessage, saResult, *) {
+    if saMessage.Get("closed", false)
+        return
+    saMessage["result"] := saResult
+    saMessage["closed"] := true
+    StudyBigBoxFocusFrameStop(saMessage)
+    try saMessage["gui"].DeleteProp("StudyOwnedMessage")
+    try saMessage["gui"].Destroy()
+}
+
+StudyLibraryOwnedMessageBigBoxResize(saForm) {
+    saBody := saForm["controls"]["message"]
+    saOverflow := saForm["controls"]["messageOverflow"]
+    saBody.GetPos(&saX, &saY, &saW, &saH)
+    saTextH := CPMeasureWrappedTextHeight(saBody, saW) + 8
+    saNeedsScroll := saTextH > saH
+    saWasFocused := StudyControllerFocusedHwnd(saForm["gui"].Hwnd) = saOverflow.Hwnd
+    ; Short messages are plain, non-focusable text. Keep unusually long error
+    ; details readable with a borderless scrolling fallback at the same size.
+    saOverflow.Move(saX, saY, saW, saH)
+    saOverflow.Visible := saNeedsScroll
+    saBody.Visible := !saNeedsScroll
+    if !saNeedsScroll {
+        saBody.Move(saX, saY + Floor((saH - saTextH) / 2), saW, saTextH)
+        if saWasFocused {
+            saAction := saForm["controls"].Has("no") ? "no" : "ok"
+            StudyControllerSetFocus(saForm["gui"].Hwnd, saForm["controls"][saAction].Hwnd)
+        }
+    }
+}
+
+StudyReaderAnkiMessage(saOwnerState, saText, saTitle := "Add to Anki",
+    saButtons := "ok", saIcon := "info", saWidth := 560) {
+    return StudyLibraryOwnedMessage(saOwnerState, saText, saTitle, saButtons, saIcon, saWidth,
+        saButtons = "yesno" ? "Check the destination before sending this card." : "Anki card workflow",
+        "Add to Anki", "Back to review")
+}
+
+StudyLibraryOwnedMessage(saOwnerState, saText, saTitle, saButtons := "ok",
+    saIcon := "info", saWidth := 560, saSubtitle := "Study Library",
+    saYesLabel := "Yes", saNoLabel := "Cancel") {
+    if !StudyLibraryBigBoxPresentation(saOwnerState) {
+        if CPDesktopActive() && IsObject(StudyDesktopContext(saOwnerState["gui"].Hwnd))
+            return StudyDesktopMessage(saOwnerState["gui"].Hwnd, saText, saTitle,
+                saButtons, saSubtitle, saYesLabel, saNoLabel)
+        return CPThemedOwnedMessage(saOwnerState["gui"].Hwnd, saText, saTitle, saButtons, saIcon, saWidth)
+    }
+    saDefault := saButtons = "yesno" ? "No" : "OK"
+    if !StudyLibraryStateAlive(saOwnerState)
+        return saDefault
+    saOwner := saOwnerState["gui"].Hwnd
+    saPreviousFocus := StudyControllerFocusedHwnd(saOwner)
+    saGui := Gui("+Owner" saOwner " +OwnDialogs +AlwaysOnTop -Caption +ToolWindow -DPIScale", saTitle)
+    saGui.SetFont("s12", "Segoe UI")
+    saForm := StudyLibraryBigBoxFormState(saGui, saOwnerState, saTitle, saSubtitle)
+    saForm["closed"] := false, saForm["result"] := saDefault
+    saForm["kind"] := "studyMessage"
+    saGui.StudyOwnedMessage := saForm
+    saBody := saGui.AddText("x0 y0 w10 h10 +0x80", saText) ; SS_NOPREFIX
+    StudyLibraryBigBoxFormAdd(saForm, "message", saBody, 0, 50, 1000, 680)
+    saOverflow := saGui.AddEdit("x0 y0 w10 h10 ReadOnly Multi VScroll -Border -E0x200 Hidden", saText)
+    saForm["controls"]["messageOverflow"] := saOverflow
+    saForm["bodyControls"] := []
+    saForm["messageControls"] := [saBody, saOverflow]
+    if (saButtons = "yesno") {
+        saYes := saGui.AddButton("x0 y0 w10 h10", saYesLabel)
+        saNo := saGui.AddButton("x0 y0 w10 h10 Default", saNoLabel)
+        StudyLibraryBigBoxFormAdd(saForm, "yes", saYes, 0, 850, 350, 110, "button")
+        StudyLibraryBigBoxFormAdd(saForm, "no", saNo, 650, 850, 350, 110, "button")
+        saYes.OnEvent("Click", StudyLibraryOwnedMessageClose.Bind(saForm, "Yes"))
+        saNo.OnEvent("Click", StudyLibraryOwnedMessageClose.Bind(saForm, "No"))
+        saInitial := saNo
+    } else {
+        saInitial := saGui.AddButton("x0 y0 w10 h10 Default", "OK")
+        StudyLibraryBigBoxFormAdd(saForm, "ok", saInitial, 650, 850, 350, 110, "button")
+        saInitial.OnEvent("Click", StudyLibraryOwnedMessageClose.Bind(saForm, "OK"))
+    }
+    saGui.OnEvent("Close", StudyLibraryOwnedMessageClose.Bind(saForm, saDefault))
+    saGui.OnEvent("Escape", StudyLibraryOwnedMessageClose.Bind(saForm, saDefault))
+    saOwnerEnabled := DllCall("user32\IsWindowEnabled", "ptr", saOwner, "int")
+    try {
+        DllCall("user32\EnableWindow", "ptr", saOwner, "int", 0)
+        StudyLibraryBigBoxFormShow(saForm, saInitial)
+        saForm["ready"] := true
+        while !saForm["closed"] && StudyLibraryStateAlive(saOwnerState)
+            Sleep(25)
+    } finally {
+        StudyLibraryOwnedMessageClose(saForm, saForm["result"])
+        if DllCall("user32\IsWindow", "ptr", saOwner, "int") {
+            DllCall("user32\EnableWindow", "ptr", saOwner, "int", saOwnerEnabled)
+            try WinActivate("ahk_id " saOwner)
+            if saPreviousFocus
+                try StudyControllerSetFocus(saOwner, saPreviousFocus)
+        }
+        CPControllerResetNavigation()
+    }
+    return saForm["result"]
 }
 
 StudyCandidatesRecommendationDefaults() {
@@ -15169,7 +16804,8 @@ StudyCandidatesRecommendationDefaults() {
         "focusGrammar", true,
         "focusNaturalPhrasing", true,
         "focusReading", true,
-        "additionalCriteria", ""
+        "additionalCriteria", "",
+        "promptInstructions", ""
     )
 }
 
@@ -15207,7 +16843,16 @@ StudyCandidatesRecommendationLoadSettings() {
             scDefaults[scKey] ? "1" : "0"
         )) != "0"
     scSettings["additionalCriteria"] := SubStr(scAdditional, 1, 1000)
+    scSettings["promptInstructions"] := ""
+    try scSettings["promptInstructions"] := StudyCandidatesRecommendationNormalizeInstructions(
+        FileRead(StudyCandidatesRecommendationInstructionsPath(), "UTF-8"))
     return scSettings
+}
+
+StudyCandidatesRecommendationInstructionsPath() {
+    global iniPath
+    SplitPath(iniPath,, &scSettingsDir)
+    return scSettingsDir "\anki_recommendation_instructions.txt"
 }
 
 StudyCandidatesRecommendationSaveSettings(scSettings) {
@@ -15234,6 +16879,14 @@ StudyCandidatesRecommendationSaveSettings(scSettings) {
         )),
         iniPath, "ankiRecommendations", "additionalCriteriaHex"
     )
+    scPath := StudyCandidatesRecommendationInstructionsPath()
+    scInstructions := StudyCandidatesRecommendationNormalizeInstructions(
+        scSettings.Get("promptInstructions", ""))
+    scPrevious := ""
+    if FileExist(scPath)
+        scPrevious := FileRead(scPath, "UTF-8")
+    if (scPrevious != scInstructions)
+        SaveTextAtomic(scPath, scInstructions, true)
 }
 
 StudyCandidatesRecommendationFocusCsv(scSettings) {
@@ -15298,6 +16951,7 @@ StudyCandidatesRecommendationDialogClose(scDialogState, scDialog, scResult, *) {
     )
     scDialogState["result"] := scResult
     scDialogState["closed"] := true
+    StudyBigBoxFocusFrameStop(scDialogState)
     try scDialog.Destroy()
 }
 
@@ -15309,8 +16963,35 @@ StudyCandidatesRecommendationAdvancedDraft(scAdvanced) {
         "focusGrammar", scAdvanced["grammar"].Value = 1,
         "focusNaturalPhrasing", scAdvanced["natural"].Value = 1,
         "focusReading", scAdvanced["reading"].Value = 1,
-        "additionalCriteria", SubStr(scAdvanced["additional"].Value, 1, 1000)
+        "additionalCriteria", SubStr(scAdvanced["additional"].Value, 1, 1000),
+        "promptInstructions", scAdvanced.Get("promptInstructions",
+            scAdvanced["settings"].Get("promptInstructions", ""))
     )
+}
+
+StudyCandidatesRecommendationToggleText(scControl, scLabel, *) {
+    scControl.Text := scLabel "`n" (scControl.Value = 1 ? "On" : "Off")
+}
+
+StudyCandidatesRecommendationSetupBigBoxToggles(scAdvanced) {
+    if !scAdvanced.Get("bigBoxPresentation", false)
+        return
+    scAdvanced["toggleControls"] := []
+    for scSpec in [
+        ["vocabulary", "Reusable vocabulary"], ["grammar", "Grammar patterns"],
+        ["natural", "Natural phrasing"], ["reading", "Reading comprehension"]
+    ] {
+        scControl := scAdvanced[scSpec[1]]
+        ; Keep native checkbox values/accessibility and keyboard behavior, but
+        ; show a large, centered, two-line toggle face instead of a tiny glyph.
+        scControl.Opt("+0x3300") ; BS_PUSHLIKE | BS_MULTILINE | BS_CENTER
+        scControl.OnEvent("Click",
+            StudyCandidatesRecommendationToggleText.Bind(scControl, scSpec[2]))
+        StudyCandidatesRecommendationToggleText(scControl, scSpec[2])
+        scAdvanced["toggleControls"].Push(scControl)
+    }
+    ; Push-like checks use the same themed button faces as the other tiles.
+    scAdvanced["checkBoxes"] := []
 }
 
 StudyCandidatesApplyRecommendationDialogTheme(scDialog, scCheckBoxes := 0) {
@@ -15380,6 +17061,7 @@ StudyLibraryBigBoxFormState(
         "buttonControls", [],
         "editorControls", [],
         "emphasisControls", [],
+        "numberControls", [],
         "checkBoxes", [],
         "bigBoxFontRatio", 0
     )
@@ -15406,6 +17088,8 @@ StudyLibraryBigBoxFormAdd(
         slForm["editorControls"].Push(slControl)
     else if (slRole = "emphasis")
         slForm["emphasisControls"].Push(slControl)
+    else if (slRole = "number")
+        slForm["numberControls"].Push(slControl)
     else if (slRole = "check") {
         slForm["editorControls"].Push(slControl)
         slForm["checkBoxes"].Push(slControl)
@@ -15661,13 +17345,19 @@ StudyLibraryBigBoxFormShow(slForm, slInitialControl := 0) {
     StudyCandidatesRecommendationBigBoxShow(
         slForm, slForm["libraryState"]["gui"].Hwnd
     )
+    if slForm.Get("closed", false) || !StudyLibraryStateAlive(slForm)
+        return
     ; The hidden composition pass cannot reliably enumerate focusable native
     ; children on every Windows build. Bind them again once the form is visible.
     StudyBigBoxFocusFrameStart(slForm)
     if IsObject(slInitialControl) {
-        try slInitialControl.Focus()
-        try StudyControllerClearReadOnlyEditSelection(slInitialControl.Hwnd)
-        StudyBigBoxFocusFrameUpdate(slForm, slInitialControl.Hwnd)
+        ; Focus events/controller timers can close an incoming modal page.
+        ; Do not dereference its controls after a fast Cancel during composition.
+        try {
+            slInitialControl.Focus()
+            StudyControllerClearReadOnlyEditSelection(slInitialControl.Hwnd)
+            StudyBigBoxFocusFrameUpdate(slForm, slInitialControl.Hwnd)
+        }
     }
     CPControllerResetNavigation()
 }
@@ -15697,6 +17387,12 @@ StudyCandidatesRecommendationBigBoxApplyFonts(scState, scRatio) {
         scControl.SetFont("s" Round(11 * scRatio, 2) " Norm")
     for scControl in scState.Get("emphasisControls", [])
         scControl.SetFont("s" Round(13 * scRatio, 2) " Bold")
+    for scControl in scState.Get("numberControls", [])
+        scControl.SetFont("s" Round(24 * scRatio, 2) " Bold")
+    for scControl in scState.Get("toggleControls", [])
+        scControl.SetFont("s" Round(14 * scRatio, 2) " Bold")
+    for scControl in scState.Get("messageControls", [])
+        scControl.SetFont("s" Round(16 * scRatio, 2) " Norm")
 }
 
 StudyCandidatesRecommendationBigBoxApplyTheme(scState) {
@@ -15729,6 +17425,10 @@ StudyCandidatesRecommendationBigBoxApplyTheme(scState) {
         scControl.SetFont("c" scColors["text"])
     }
     CPApplyOwnedDialogTheme(scGui)
+    for scControl in scState.Get("messageControls", []) {
+        scControl.Opt("+Background" scColors["surface"])
+        scControl.SetFont("c" scColors["text"])
+    }
     for scCheckBox in scState.Get("checkBoxes", [])
         CPApplyDialogCheckBoxTheme(scCheckBox)
     StudyBigBoxFocusFrameEnsure(scState)
@@ -15737,7 +17437,7 @@ StudyCandidatesRecommendationBigBoxApplyTheme(scState) {
 StudyCandidatesRecommendationBigBoxResize(
     scState, scGui, scMinMax, scWidth, scHeight
 ) {
-    if (scMinMax = -1 || scWidth < 680 || scHeight < 420)
+    if (scMinMax = -1 || scWidth < 680 || scHeight < 420 || scState.Get("closed", false))
         return
     scActualDpiScale := CPBigBoxDashboardDpiScale(scGui)
     scScale := Max(
@@ -15755,7 +17455,8 @@ StudyCandidatesRecommendationBigBoxResize(
     scGap := Max(9, Round(12 * scScale))
     scWideGap := Max(14, Round(18 * scScale))
     scEyebrowH := Max(20, Ceil(22 * scScale))
-    scTitleH := Max(44, Ceil(54 * scScale))
+    ; Leave room for native font rounding at fractional Windows DPI scales.
+    scTitleH := Max(44, Ceil(56 * scScale))
     scSubtitleH := Max(28, Ceil(34 * scScale))
     scTitleY := scTop + scEyebrowH + scSmallGap
     scSubtitleY := scTitleY + scTitleH + scSmallGap
@@ -15894,7 +17595,36 @@ StudyCandidatesRecommendationBigBoxResize(
         scControls["notice"].Move(
             scNoticeX, scBottomY, scNoticeW, scButtonH
         )
-    } else if (scKind = "studyForm") {
+    } else if (scKind = "vocabularyPicker") {
+        scHeadingH := Max(32, Round(40 * scScale))
+        scButtonH := Max(42, Round(50 * scScale))
+        scLabelH := Max(24, Round(28 * scScale))
+        scFrontH := Max(36, Round(46 * scScale))
+        scControls["heading"].Move(scContentX, scInnerY, scContentW, scHeadingH)
+        scListY := scInnerY + scHeadingH + scGap
+        scBottomY := scContentBottom - scButtonH
+        scListH := scBottomY - scWideGap - scListY
+        scListW := Floor(scContentW * 0.42)
+        scDetailX := scContentX + scListW + scWideGap
+        scDetailW := scContentW - scListW - scWideGap
+        scControls["list"].Move(scContentX, scListY, scListW, scListH)
+        scControls["list"].ModifyCol(1, Max(80, scListW - Round(28 * scScale)))
+        scControls["frontLabel"].Move(scDetailX, scListY, scDetailW, scLabelH)
+        scFrontY := scListY + scLabelH + scSmallGap
+        scControls["front"].Move(scDetailX, scFrontY, scDetailW, scFrontH)
+        scBackY := scFrontY + scFrontH + scGap
+        scControls["backLabel"].Move(scDetailX, scBackY, scDetailW, scLabelH)
+        scBackTextY := scBackY + scLabelH + scSmallGap
+        scControls["backText"].Move(scDetailX, scBackTextY, scDetailW,
+            scListY + scListH - scBackTextY)
+        scButtonW := Min(Round(250 * scScale), Floor((scContentW - scGap) / 2))
+        scControls["previewHint"].Move(scContentX, scBottomY,
+            scContentW - scButtonW - scWideGap, scButtonH)
+        scControls["back"].Move(scContentX + scContentW - scButtonW,
+            scBottomY, scButtonW, scButtonH)
+    } else if (scKind = "ankiPreview") {
+        StudyReaderAnkiPreviewBigBoxResize(scState, scContentX, scInnerY, scContentW, scInnerH, scScale)
+    } else if (scKind = "studyForm" || scKind = "studyMessage") {
         ; Library workflows use one responsive coordinate system.  Their
         ; controls are described in thousandths of the centered content area,
         ; which keeps related rows aligned on every Big Box monitor and DPI.
@@ -15906,6 +17636,10 @@ StudyCandidatesRecommendationBigBoxResize(
                 Max(1, Round(scInnerH * scItem["h"] / 1000))
             )
         }
+        if scGui.HasOwnProp("StudyLibraryManagementForm")
+            StudyLibraryManagementColumns(scState)
+        if (scKind = "studyMessage")
+            StudyLibraryOwnedMessageBigBoxResize(scState)
     } else if (scKind = "imageViewer") {
         scInfoH := Max(28, Round(34 * scScale))
         scButtonH := Max(42, Round(54 * scScale))
@@ -15994,8 +17728,8 @@ StudyCandidatesRecommendationBigBoxResize(
     } else if (scKind = "customize") {
         scTitleControlH := Max(34, Round(42 * scScale))
         scBodyH := Max(22, Round(28 * scScale))
-        scCheckH := Max(30, Round(36 * scScale))
-        scEditorH := Max(100, Round(150 * scScale))
+        scCheckH := Max(48, Round(64 * scScale))
+        scEditorH := Max(90, Round(130 * scScale))
         scHintH := Max(42, Round(54 * scScale))
         scButtonH := Max(38, Round(46 * scScale))
         scY := scInnerY
@@ -16057,35 +17791,65 @@ StudyCandidatesRecommendationBigBoxResize(
             scContentX + scContentW - scButtonW,
             scButtonY, scButtonW, scButtonH
         )
+        if (scKind = "preview" && scControls.Has("save")) {
+            scActionW := Round(scContentW * 0.25)
+            scControls["restore"].Move(scContentX, scButtonY, scActionW, scButtonH)
+            scControls["view"].Move(scContentX + scActionW + scGap,
+                scButtonY, scActionW, scButtonH)
+            scControls["save"].Move(scContentX + scContentW - scButtonW * 2 - scGap,
+                scButtonY, scButtonW, scButtonH)
+        }
     }
     StudyBigBoxFocusFrameUpdate(scState)
 }
 
 StudyCandidatesRecommendationBigBoxShow(scState, scOwnerHwnd) {
-    scGui := scState["gui"]
-    scBounds := CPBigBoxMonitorBounds(scOwnerHwnd)
-    CPSetWindowCloaked(scGui.Hwnd, true)
-    scGui.Show(
-        "Hide x" scBounds["x"] " y" scBounds["y"]
-            . " w" scBounds["w"] " h" scBounds["h"]
-    )
-    scGui.GetClientPos(,, &scClientW, &scClientH)
-    StudyCandidatesRecommendationBigBoxResize(
-        scState, scGui, 0, scClientW, scClientH
-    )
-    StudyCandidatesRecommendationBigBoxApplyTheme(scState)
-    scGui.Show(
-        "NA x" scBounds["x"] " y" scBounds["y"]
-            . " w" scBounds["w"] " h" scBounds["h"]
-    )
-    try DllCall(
-        "user32\RedrawWindow", "ptr", scGui.Hwnd,
-        "ptr", 0, "ptr", 0,
-        "uint", 0x0001 | 0x0020 | 0x0080 | 0x0100
-    )
-    try DllCall("dwmapi\DwmFlush")
-    CPSetWindowCloaked(scGui.Hwnd, false)
-    WinActivate("ahk_id " scGui.Hwnd)
+    ; Compose atomically: a fast B press is handled once the page is ready,
+    ; not halfway through showing or theming controls that it could destroy.
+    scPreviousCritical := A_IsCritical
+    Critical('On')
+    try {
+        scGui := scState["gui"]
+        scBounds := CPBigBoxMonitorBounds(scOwnerHwnd)
+        CPSetWindowCloaked(scGui.Hwnd, true)
+        scGui.Show(
+            "Hide x" scBounds["x"] " y" scBounds["y"]
+                . " w" scBounds["w"] " h" scBounds["h"]
+        )
+        scGui.GetClientPos(,, &scClientW, &scClientH)
+        StudyCandidatesRecommendationBigBoxResize(
+            scState, scGui, 0, scClientW, scClientH
+        )
+        StudyCandidatesRecommendationBigBoxApplyTheme(scState)
+        scGui.Show(
+            "NA x" scBounds["x"] " y" scBounds["y"]
+                . " w" scBounds["w"] " h" scBounds["h"]
+        )
+        try DllCall(
+            "user32\RedrawWindow", "ptr", scGui.Hwnd,
+            "ptr", 0, "ptr", 0,
+            "uint", 0x0001 | 0x0020 | 0x0080 | 0x0100
+        )
+        try DllCall("dwmapi\DwmFlush")
+        CPSetWindowCloaked(scGui.Hwnd, false)
+        WinActivate("ahk_id " scGui.Hwnd)
+        ; Recommendation dialogs bypass StudyLibraryBigBoxFormShow. Start tracking
+        ; here, after first show, so their buttons/combos receive the same blue frame.
+        StudyBigBoxFocusFrameStart(scState)
+    } finally {
+        Critical(scPreviousCritical)
+    }
+}
+
+StudyCandidatesRecommendationDefaultInstructions() {
+    return "You are selecting useful Japanese-language study candidates from a JRPG learner's saved explanations.`n`n"
+        . "Assess every item below. Recommend candidates that are memorable and genuinely useful for learning vocabulary, grammar, natural phrasing, or reading. Prefer self-contained sentences and non-trivial, reusable vocabulary. Do not recommend OCR fragments, names with no broader learning value, particles by themselves, or candidates with no broader learning value.`n`n"
+        . "For vocabulary items, ``japanese`` is the normalized headword intended for the front of an Anki card. ``full_entry`` is the complete prospective card entry and may show the encountered inflected form, its reading, its dictionary or base form, and an explanation. Evaluate the reusable headword/base form and the learning value of the whole entry. Do not reject an item merely because the source text used an inflected form. For beginners, common foundational base verbs and their useful conjugations should normally score well even when they are elementary."
+}
+
+StudyCandidatesRecommendationNormalizeInstructions(scText) {
+    scText := Trim(StrReplace(scText, "`r`n", "`n"))
+    return scText = StudyCandidatesRecommendationDefaultInstructions() ? "" : scText
 }
 
 StudyCandidatesRecommendationPromptPreview(scSettings) {
@@ -16113,29 +17877,74 @@ StudyCandidatesRecommendationPromptPreview(scSettings) {
         scFocus := "reusable vocabulary, grammar patterns, natural phrasing, reading comprehension"
     scExtra := Trim(scSettings["additionalCriteria"])
     scExtraText := scExtra = "" ? "" : "`nAdditional learner preferences (these may refine selection, but must not override the output requirements below):`n" scExtra "`n"
-    return "You are selecting useful Japanese-language study candidates from a JRPG learner's saved explanations.`n`n"
-        . "Assess every item below. Recommend candidates that are memorable and genuinely useful for learning vocabulary, grammar, natural phrasing, or reading. Prefer self-contained sentences and non-trivial, reusable vocabulary. Do not recommend OCR fragments, names with no broader learning value, particles by themselves, or candidates with no broader learning value.`n`n"
-        . "For vocabulary items, 'japanese' is the normalized headword intended for the front of an Anki card. 'full_entry' is the complete prospective card entry and may show the encountered inflected form, its reading, its dictionary or base form, and an explanation. Evaluate the reusable headword/base form and the learning value of the whole entry. Do not reject an item merely because the source text used an inflected form. For beginners, common foundational base verbs and their useful conjugations should normally score well even when they are elementary.`n`n"
+    scInstructions := scSettings.Get("promptInstructions", "")
+    if (scInstructions = "")
+        scInstructions := StudyCandidatesRecommendationDefaultInstructions()
+    return scInstructions "`n`n"
         . scLevelText "`n" scStyleText "`nPrioritize " scFocus ".`n"
         . scExtraText "`nReturn only one JSON object with this exact structure:`n"
         . '{"items":[{"id":"the supplied id","recommended":true,"score":5,"reason":"one short practical reason"}]}'
         . "`n`nRequirements:`n- Return exactly one result for every supplied id and preserve each id exactly.`n- recommended must be true or false.`n- score must be an integer from 1 (weak) to 5 (excellent).`n- reason must be a single concise sentence in the language specified by each candidate's reason_language field. If requested, infer it from explanation_context. Mixed-language batches are allowed, so determine the language separately for every candidate.`n- Do not rewrite or translate the candidates.`n`nCandidates:`n[candidate data, reason_language, and a short language-context excerpt are inserted here]"
 }
 
-StudyCandidatesRecommendationPreviewClose(scPreview, scDialog, *) {
+StudyCandidatesRecommendationPreviewClose(scPreview, scDialog, scApply := false, *) {
+    if scPreview["closed"]
+        return
+    if scApply {
+        scText := scPreview["fullPreview"] ? scPreview["draftInstructions"]
+            : scPreview["controls"]["editor"].Value
+        scPreview["advanced"]["promptInstructions"] :=
+            StudyCandidatesRecommendationNormalizeInstructions(scText)
+    }
     scPreview["closed"] := true
+    StudyBigBoxFocusFrameStop(scPreview)
     try scDialog.Destroy()
+}
+
+StudyCandidatesRecommendationPreviewMode(scPreview, scFull, *) {
+    scEditor := scPreview["controls"]["editor"]
+    if !scPreview["fullPreview"]
+        scPreview["draftInstructions"] := scEditor.Value
+    scPreview["fullPreview"] := scFull
+    scEditor.Opt(scFull ? "+ReadOnly" : "-ReadOnly")
+    if scFull {
+        scSettings := scPreview["settings"].Clone()
+        scSettings["promptInstructions"] := StudyCandidatesRecommendationNormalizeInstructions(
+            scPreview["draftInstructions"])
+        scEditor.Value := StudyCandidatesRecommendationPromptPreview(scSettings)
+    } else
+        scEditor.Value := scPreview["draftInstructions"]
+    scPreview["controls"]["view"].Text := scFull ? "Back to editing" : "View full prompt"
+    scPreview["controls"]["intro"].Value := scFull
+        ? "Full prompt (read-only). Your instructions, current study preferences, and automatic output rules. Candidate data is inserted when generating."
+        : "Edit selection instructions with a keyboard. Study preferences, JSON rules, and candidate data stay automatic. Save keeps the draft; OK in preferences applies it."
+    if scPreview.Has("desktop")
+        StudyDesktopRecommendationPreviewText(scPreview)
+    scEditor.Focus()
+    SendMessage(0x00B1, 0, 0, scEditor.Hwnd) ; EM_SETSEL: caret, not select-all
+    SendMessage(0x0115, 6, 0, scEditor.Hwnd) ; SB_TOP
+}
+
+StudyCandidatesRecommendationPreviewToggle(scPreview, *) {
+    StudyCandidatesRecommendationPreviewMode(scPreview, !scPreview["fullPreview"])
+}
+
+StudyCandidatesRecommendationPreviewRestore(scPreview, *) {
+    scPreview["draftInstructions"] := StudyCandidatesRecommendationDefaultInstructions()
+    scPreview["fullPreview"] := true ; Do not capture the editor being replaced.
+    StudyCandidatesRecommendationPreviewMode(scPreview, false)
 }
 
 StudyCandidatesRecommendationShowPrompt(scAdvanced, *) {
     scSettings := StudyCandidatesRecommendationAdvancedDraft(scAdvanced)
     scOwner := scAdvanced["gui"].Hwnd
     scBigBox := scAdvanced.Get("bigBoxPresentation", false)
+    ; @DESKTOP_RECOMMENDATION_PROMPT_CONTROLS_BEGIN@
     scDialogOptions := "+Owner" scOwner " +AlwaysOnTop +Resize"
         . (scBigBox ? " -Caption +ToolWindow -DPIScale" : "")
     scDialog := Gui(
         scDialogOptions,
-        "Recommendation prompt preview"
+        "Recommendation prompt"
     )
     scDialog.MarginX := scBigBox ? 0 : 16
     scDialog.MarginY := scBigBox ? 0 : 14
@@ -16143,33 +17952,45 @@ StudyCandidatesRecommendationShowPrompt(scAdvanced, *) {
     scShell := scBigBox
         ? StudyCandidatesRecommendationBigBoxShell(
             scDialog,
-            "Recommendation prompt preview",
-            "Inspect the effective instructions without changing protected output rules.",
-            "Prompt preview"
+            "Recommendation prompt",
+            "Edit selection instructions or read the full prompt. Output rules stay automatic.",
+            "Prompt editor"
         )
         : Map()
     scIntro := scDialog.Add(
         "Text", "xm ym w700 h38",
-        "This is the effective prompt. The candidate data and locked JSON rules cannot be edited here."
+        "Edit selection instructions with a keyboard. Study preferences, JSON rules, and candidate data stay automatic. Save keeps the draft; OK in preferences applies it."
     )
     scEditor := scDialog.Add(
-        "Edit", "xm y+8 w700 r24 ReadOnly Multi VScroll",
-        StudyCandidatesRecommendationPromptPreview(scSettings)
+        "Edit", "xm y+8 w700 r24 Multi VScroll WantReturn Limit16000",
+        scSettings.Get("promptInstructions", "") != ""
+            ? scSettings["promptInstructions"] : StudyCandidatesRecommendationDefaultInstructions()
     )
-    scClose := scDialog.Add("Button", "xm y+12 w110 Default", "Close")
+    scDialog.StudyPreserveEditSelection := true
+    scRestore := scDialog.Add("Button", "xm y+12 w190", "Restore default instructions")
+    scView := scDialog.Add("Button", "x+10 yp w170", "View full prompt")
+    scSave := scDialog.Add("Button", "x+100 yp w100", "Save")
+    scClose := scDialog.Add("Button", "x+10 yp w110", "Cancel")
     scPreview := Map(
         "gui", scDialog,
         "bigBoxPresentation", scBigBox,
         "kind", "preview",
+        "advanced", scAdvanced,
+        "settings", scSettings,
+        "draftInstructions", scEditor.Value,
+        "fullPreview", false,
         "shell", scShell,
         "controls", Map(
             "intro", scIntro,
             "editor", scEditor,
-            "close", scClose
+            "close", scClose,
+            "restore", scRestore,
+            "view", scView,
+            "save", scSave
         ),
         "titleControls", [],
         "bodyControls", [scIntro],
-        "buttonControls", [scClose],
+        "buttonControls", [scRestore, scView, scSave, scClose],
         "editorControls", [scEditor],
         "checkBoxes", [],
         "bigBoxFontRatio", 0,
@@ -16177,25 +17998,32 @@ StudyCandidatesRecommendationShowPrompt(scAdvanced, *) {
     )
     scClose.OnEvent(
         "Click", StudyCandidatesRecommendationPreviewClose.Bind(
-            scPreview, scDialog
+            scPreview, scDialog, false
         )
     )
     scDialog.OnEvent(
         "Escape", StudyCandidatesRecommendationPreviewClose.Bind(
-            scPreview, scDialog
+            scPreview, scDialog, false
         )
     )
     scDialog.OnEvent(
         "Close", StudyCandidatesRecommendationPreviewClose.Bind(
-            scPreview, scDialog
+            scPreview, scDialog, false
         )
     )
+    scSave.OnEvent("Click", StudyCandidatesRecommendationPreviewClose.Bind(scPreview, scDialog, true))
+    scRestore.OnEvent("Click", StudyCandidatesRecommendationPreviewRestore.Bind(scPreview))
+    scView.OnEvent("Click", StudyCandidatesRecommendationPreviewToggle.Bind(scPreview))
+    StudyDesktopRecommendationCreate(scPreview)
+    ; @DESKTOP_RECOMMENDATION_PROMPT_CONTROLS_END@
+    if scBigBox
+        scShell["footer"].Value := "D-pad Up / Down  Scroll; leave at edges     Keyboard  Edit text     B / Circle / Esc  Cancel"
     if scBigBox
         scDialog.OnEvent(
             "Size",
             StudyCandidatesRecommendationBigBoxResize.Bind(scPreview)
         )
-    else {
+    else if !scPreview.Has("desktop") {
         scDialog.Show("Hide AutoSize")
         StudyCandidatesApplyRecommendationDialogTheme(scDialog)
     }
@@ -16203,16 +18031,20 @@ StudyCandidatesRecommendationShowPrompt(scAdvanced, *) {
     try {
         if scBigBox
             StudyCandidatesRecommendationBigBoxShow(scPreview, scOwner)
+        else if scPreview.Has("desktop")
+            StudyDesktopDialogShow(scPreview, 1000, 800, scEditor)
         else {
             scDialog.Show("Center")
             ; Native button faces and Edit scrollbars finish initialization
             ; only after the owned window becomes visible.
             StudyCandidatesApplyRecommendationDialogTheme(scDialog)
         }
-        scClose.Focus()
+        scEditor.Focus()
+        SendMessage(0x00B1, 0, 0, scEditor.Hwnd)
         while !scPreview["closed"]
             Sleep(25)
     } finally {
+        StudyBigBoxFocusFrameStop(scPreview)
         try scDialog.Destroy()
         try DllCall("user32\EnableWindow", "ptr", scOwner, "int", 1)
         try WinActivate("ahk_id " scOwner)
@@ -16228,6 +18060,14 @@ StudyCandidatesRecommendationAdvancedRestore(scAdvanced, *) {
     scAdvanced["natural"].Value := 1
     scAdvanced["reading"].Value := 1
     scAdvanced["additional"].Value := ""
+    scAdvanced["promptInstructions"] := ""
+    if scAdvanced.Get("bigBoxPresentation", false) {
+        for scSpec in [
+            ["vocabulary", "Reusable vocabulary"], ["grammar", "Grammar patterns"],
+            ["natural", "Natural phrasing"], ["reading", "Reading comprehension"]
+        ]
+            StudyCandidatesRecommendationToggleText(scAdvanced[scSpec[1]], scSpec[2])
+    }
 }
 
 StudyCandidatesRecommendationAdvancedClose(scAdvanced, scApply, *) {
@@ -16249,6 +18089,7 @@ StudyCandidatesRecommendationAdvancedClose(scAdvanced, scApply, *) {
     }
     scAdvanced["applied"] := scApply
     scAdvanced["closed"] := true
+    StudyBigBoxFocusFrameStop(scAdvanced)
     try scAdvanced["gui"].Destroy()
 }
 
@@ -16259,6 +18100,7 @@ StudyCandidatesRecommendationCustomize(scDialogState, *) {
     scSettings := scDialogState["settings"]
     scOwner := scDialogState["gui"].Hwnd
     scBigBox := scDialogState.Get("bigBoxPresentation", false)
+    ; @DESKTOP_RECOMMENDATION_PREFERENCES_CONTROLS_BEGIN@
     scDialogOptions := "+Owner" scOwner " +AlwaysOnTop"
         . (scBigBox ? " -Caption +ToolWindow -DPIScale" : "")
     scDialog := Gui(
@@ -16307,12 +18149,18 @@ StudyCandidatesRecommendationCustomize(scDialogState, *) {
         "Edit", "xm y+7 w560 r4 Multi VScroll Limit1000",
         scSettings["additionalCriteria"]
     )
+    ; Both lower focus tiles lead into the full-width guidance editor. Its
+    ; distant horizontal center must not make spatial navigation skip it.
+    scDialog.StudyDirectionalFocus := Map(
+        scNatural.Hwnd "|Down", scAdditional.Hwnd,
+        scReading.Hwnd "|Down", scAdditional.Hwnd
+    )
     scHint := scDialog.Add(
         "Text", "xm y+6 w560 h36 cGray",
         "Use this for preferences such as avoiding proper names or favoring dialogue. The output format remains protected."
     )
     CPRegisterMutedControl(scHint)
-    scView := scDialog.Add("Button", "xm y+14 w150", "View full prompt...")
+    scView := scDialog.Add("Button", "xm y+14 w150", "Edit / view prompt...")
     scRestore := scDialog.Add("Button", "x+10 yp w130", "Restore defaults")
     scOK := scDialog.Add("Button", "x+26 yp w100 Default", "OK")
     scCancel := scDialog.Add("Button", "x+10 yp w100", "Cancel")
@@ -16352,6 +18200,7 @@ StudyCandidatesRecommendationCustomize(scDialogState, *) {
         "closed", false,
         "applied", false
     )
+    StudyCandidatesRecommendationSetupBigBoxToggles(scAdvanced)
     scView.OnEvent(
         "Click", StudyCandidatesRecommendationShowPrompt.Bind(scAdvanced)
     )
@@ -16381,12 +18230,14 @@ StudyCandidatesRecommendationCustomize(scDialogState, *) {
     scRecommendationChecks := [
         scVocabulary, scGrammar, scNatural, scReading
     ]
+    StudyDesktopRecommendationCreate(scAdvanced)
+    ; @DESKTOP_RECOMMENDATION_PREFERENCES_CONTROLS_END@
     if scBigBox
         scDialog.OnEvent(
             "Size",
             StudyCandidatesRecommendationBigBoxResize.Bind(scAdvanced)
         )
-    else {
+    else if !scAdvanced.Has("desktop") {
         scDialog.Show("Hide AutoSize")
         StudyCandidatesApplyRecommendationDialogTheme(
             scDialog, scRecommendationChecks
@@ -16396,6 +18247,8 @@ StudyCandidatesRecommendationCustomize(scDialogState, *) {
     try {
         if scBigBox
             StudyCandidatesRecommendationBigBoxShow(scAdvanced, scOwner)
+        else if scAdvanced.Has("desktop")
+            StudyDesktopDialogShow(scAdvanced, 860, 740, scVocabulary)
         else {
             scDialog.Show("Center")
             StudyCandidatesApplyRecommendationDialogTheme(
@@ -16406,6 +18259,7 @@ StudyCandidatesRecommendationCustomize(scDialogState, *) {
         while !scAdvanced["closed"]
             Sleep(25)
     } finally {
+        StudyBigBoxFocusFrameStop(scAdvanced)
         try scDialog.Destroy()
         try DllCall("user32\EnableWindow", "ptr", scOwner, "int", 1)
         try WinActivate("ahk_id " scOwner)
@@ -16431,6 +18285,7 @@ StudyCandidatesRecommendationConfirm(
     scOwner := scState["gui"].Hwnd
     scBigBox := StudyCandidatesBigBoxPresentation(scState)
     scSettings := StudyCandidatesRecommendationLoadSettings()
+    ; @DESKTOP_RECOMMENDATION_CONFIRM_CONTROLS_BEGIN@
     scDialogOptions := "+Owner" scOwner " +AlwaysOnTop"
         . (scBigBox ? " -Caption +ToolWindow -DPIScale" : "")
     scDialog := Gui(
@@ -16555,12 +18410,14 @@ StudyCandidatesRecommendationConfirm(
             scDialogState, scDialog, false
         )
     )
+    StudyDesktopRecommendationCreate(scDialogState, scRegenerate)
+    ; @DESKTOP_RECOMMENDATION_CONFIRM_CONTROLS_END@
     if scBigBox
         scDialog.OnEvent(
             "Size",
             StudyCandidatesRecommendationBigBoxResize.Bind(scDialogState)
         )
-    else {
+    else if !scDialogState.Has("desktop") {
         scDialog.Show("Hide AutoSize")
         StudyCandidatesApplyRecommendationDialogTheme(scDialog)
     }
@@ -16568,6 +18425,8 @@ StudyCandidatesRecommendationConfirm(
     try {
         if scBigBox
             StudyCandidatesRecommendationBigBoxShow(scDialogState, scOwner)
+        else if scDialogState.Has("desktop")
+            StudyDesktopDialogShow(scDialogState, 900, 700, scGenerate)
         else {
             scDialog.Show("Center")
             ; Reapply after first show so Windows paints the final dark button
@@ -16578,6 +18437,7 @@ StudyCandidatesRecommendationConfirm(
         while !scDialogState["closed"]
             Sleep(25)
     } finally {
+        StudyBigBoxFocusFrameStop(scDialogState)
         try scDialog.Destroy()
         try DllCall("user32\EnableWindow", "ptr", scOwner, "int", 1)
         try WinActivate("ahk_id " scOwner)
@@ -16619,6 +18479,13 @@ StudyCandidatesBridgeCommand(scState, scAction, scFront := "") {
             . StudyCandidatesRecommendationFocusCsv(scSettings) '"'
             . ' --additional-criteria-hex "'
             . StudyLibraryHexEncode(scSettings["additionalCriteria"]) '"'
+        ; A file avoids command-line limits and quoting issues for multiline
+        ; Japanese instructions. Default settings use no override.
+        if (scSettings.Get("promptInstructions", "") != "") {
+            scPromptPath := scState["outputDir"] "\recommendation_instructions.txt"
+            SaveTextAtomic(scPromptPath, scSettings["promptInstructions"], false)
+            scCommand .= ' --prompt-file "' scPromptPath '"'
+        }
         if (scAction = "generate-recommendations"
             && scState.Has("forceRecommendations")
             && scState["forceRecommendations"])
@@ -16903,7 +18770,7 @@ StudyCandidatesUpdateActions(scState, *) {
         scAiStatusText := "AI: Not yet assessed."
     scState["status"].Value := scStatusText
     scState["aiStatus"].Value := scAiStatusText
-    StudyBigBoxTableModeUpdate(scState)
+    StudyDesktopCandidatesTabs(scState)
 }
 
 StudyCandidatesRecommendationActivityText(scProviderLabel, scCounts) {
@@ -17426,13 +19293,25 @@ StudyCandidatesAddSelected(scState, *) {
         return
     if StudyCandidatesBigBoxPresentation(scState)
         CPStudyReaderState["returnToCandidates"] := scState
+    scCancelReturn := StudyCandidatesReturnAfterAnkiCancel.Bind(scState, CPStudyReaderState)
     if (scState["tabs"].Value = 2) {
         StudyReaderOpenReviewedAnkiDialog(
             CPStudyReaderState, "vocabulary",
-            scCandidate["front"], scCandidate["back"]
+            scCandidate["front"], scCandidate["back"], true, scCancelReturn
         )
     } else
-        StudyReaderOpenAnkiAddDialog(CPStudyReaderState)
+        StudyReaderOpenReviewedAnkiDialog(CPStudyReaderState, "explanation", "", "", true, scCancelReturn)
+}
+
+StudyCandidatesReturnAfterAnkiCancel(scState, srState) {
+    if !StudyCandidatesGuiAlive(scState) || scState.Get("closeRequested", false)
+        || !StudyLibraryStateAlive(srState) || srState.Get("editing", false)
+        return false
+    ; The Reader is an intermediate step when Add to Anki starts from a list.
+    ; Its normal close path restores that same list without refreshing its rows.
+    srState["returnToCandidates"] := scState
+    StudyReaderClose(srState)
+    return true
 }
 
 StudyCandidatesFinishReview(scState, *) {
@@ -17632,11 +19511,8 @@ StudyCandidatesShowSelectedActions(scState, *) {
         scRow := scList.GetNext()
     if !scRow
         return false
-    scAnchorHwnd := StudyBigBoxTableModeActive(scState)
-        ? scState["tableModeControls"]["actions"].Hwnd
-        : scList.Hwnd
     scPoint := StudyControllerContextPopupPoint(
-        scState["gui"].Hwnd, scAnchorHwnd
+        scState["gui"].Hwnd, scList.Hwnd
     )
     ; Controller polling runs on a repeating timer.  A themed popup waits for
     ; its result, so opening it directly on that timer would prevent the same
@@ -17711,366 +19587,9 @@ StudyCandidatesSwitchBigBoxPage(scState, scDirection, *) {
     CPControllerResetNavigation()
 }
 
-StudyBigBoxTableModeCreate(scGui, scColors) {
-    scControls := Map()
-    scControls["enter"] := scGui.Add(
-        "Button", "x1020 y540 w150 h42", "Table mode..."
-    )
-    scControls["previous"] := scGui.Add(
-        "Button", "x80 y220 w52 h42 Hidden", "‹"
-    )
-    scControls["title"] := scGui.Add(
-        "Text", "x150 y220 w1000 h42 Center +0x200 Hidden Disabled",
-        "Table mode"
-    )
-    scControls["next"] := scGui.Add(
-        "Button", "x1168 y220 w52 h42 Hidden", "›"
-    )
-    scControls["hint"] := scGui.Add(
-        "Text", "x80 y270 w1140 h28 Center +0x4000 Hidden Disabled",
-        "Up / Down browse rows   ·   Left / Right browse columns"
-    )
-    scControls["status"] := scGui.Add(
-        "Text", "x80 y740 w560 h42 +0x200 Hidden Disabled", ""
-    )
-    scControls["open"] := scGui.Add(
-        "Button", "x650 y740 w160 h42 Hidden", "Open selected"
-    )
-    scControls["actions"] := scGui.Add(
-        "Button", "x820 y740 w190 h42 Hidden", "Selected actions..."
-    )
-    scControls["exit"] := scGui.Add(
-        "Button", "x1020 y740 w200 h42 Hidden", "Exit table mode"
-    )
-    return scControls
-}
-
-StudyBigBoxTableModeActive(scState) {
-    return IsObject(scState)
-        && scState.Get("bigBoxPresentation", false)
-        && scState.Get("tableModeActive", false)
-}
-
-StudyBigBoxTableModeLists(scState) {
-    if !IsObject(scState)
-        return []
-    if (scState.Get("tableModeSurface", "") = "candidates")
-        return [scState["sentenceList"], scState["vocabularyList"]]
-    return scState.Has("list") ? [scState["list"]] : []
-}
-
-StudyBigBoxTableModeCurrentList(scState) {
-    if !IsObject(scState)
-        return 0
-    if (scState.Get("tableModeSurface", "") = "candidates")
-        return scState["tabs"].Value = 2
-            ? scState["vocabularyList"] : scState["sentenceList"]
-    return scState.Has("list") ? scState["list"] : 0
-}
-
-StudyBigBoxTableModeText(scState) {
-    if (scState.Get("tableModeSurface", "") = "candidates") {
-        scPage := StudyCandidatesBigBoxPageData(scState["tabs"].Value)
-        return Map(
-            "title", scPage["title"] " table",
-            "hint", "Up / Down browse rows   ·   Left / Right browse columns"
-                . "   ·   A opens row actions   ·   "
-                . "LB / RB switch Sentences / Vocabulary"
-        )
-    }
-    return Map(
-        "title", "Library table",
-        "hint", "Up / Down browse rows   ·   Left / Right browse columns"
-            . "   ·   A opens the selected explanation"
-    )
-}
-
-StudyBigBoxTableModeUpdate(scState) {
-    if !StudyBigBoxTableModeActive(scState)
-        return
-    scControls := scState["tableModeControls"]
-    scText := StudyBigBoxTableModeText(scState)
-    scControls["title"].Value := scText["title"]
-    scControls["hint"].Value := scText["hint"]
-    scList := StudyBigBoxTableModeCurrentList(scState)
-    if !IsObject(scList)
-        return
-    scCount := scList.GetCount()
-    scRow := scList.GetNext(0, "F")
-    if !scRow
-        scRow := scList.GetNext()
-    scControls["status"].Value := scCount > 0
-        ? scCount " entr" (scCount = 1 ? "y" : "ies")
-            . "   ·   Row " (scRow > 0 ? scRow : "—") " of " scCount
-        : "No entries in this table"
-    scControls["open"].Enabled := scRow > 0
-    scControls["actions"].Enabled := true
-    scControls["actions"].Text := scRow > 0
-        ? "Selected actions..." : "Table actions..."
-}
-
-StudyBigBoxTableModeApplyFonts(scState, scRatio) {
-    if !(IsObject(scState) && scState.Has("tableModeControls"))
-        return
-    scControls := scState["tableModeControls"]
-    for scKey in ["enter", "previous", "next", "open", "actions", "exit"]
-        scControls[scKey].SetFont(
-            "s" Round((scKey = "previous" || scKey = "next" ? 15 : 11)
-                * scRatio, 2) " Bold"
-        )
-    scControls["title"].SetFont("s" Round(17 * scRatio, 2) " Bold")
-    for scKey in ["hint", "status"]
-        scControls[scKey].SetFont("s" Round(10.5 * scRatio, 2) " Norm")
-}
-
-StudyBigBoxTableModeApplyTheme(scState, scColors) {
-    if !(IsObject(scState) && scState.Has("tableModeControls"))
-        return
-    scControls := scState["tableModeControls"]
-    for scKey in ["title", "hint", "status"]
-        scControls[scKey].Opt("+Background" scColors["surface"])
-    scControls["title"].SetFont("c" scColors["text"])
-    for scKey in ["hint", "status"]
-        scControls[scKey].SetFont("c" scColors["muted"])
-}
-
-StudyBigBoxTableModeScroll(scState, scDirection, *) {
-    if !StudyBigBoxTableModeActive(scState)
-        return false
-    scList := StudyBigBoxTableModeCurrentList(scState)
-    if !IsObject(scList)
-        return false
-    scScale := scState.Get("bigBoxLayoutScale", 1)
-    scDelta := Round(180 * Max(0.72, scScale))
-        * (scDirection < 0 ? -1 : 1)
-    try SendMessage(0x1014, scDelta, 0, scList.Hwnd) ; LVM_SCROLL
-    try scList.Focus()
-    return true
-}
-
-StudyBigBoxTableModeOpen(scState, *) {
-    if !StudyBigBoxTableModeActive(scState)
-        return
-    if (scState.Get("tableModeSurface", "") = "candidates")
-        StudyCandidatesOpenSelected(scState)
-    else
-        StudyLibraryOpenSelectedReader(scState)
-}
-
-StudyBigBoxTableModeActions(scState, *) {
-    if !StudyBigBoxTableModeActive(scState)
-        return
-    scList := StudyBigBoxTableModeCurrentList(scState)
-    if !IsObject(scList)
-        return
-    scRow := scList.GetNext(0, "F")
-    if !scRow
-        scRow := scList.GetNext()
-    scPoint := StudyControllerContextPopupPoint(
-        scState["gui"].Hwnd,
-        scState["tableModeControls"]["actions"].Hwnd
-    )
-    if (scState.Get("tableModeSurface", "") = "candidates") {
-        ; Use the same deferred path as pressing A on a Review table row so
-        ; native controller polling remains alive while the menu is open.
-        StudyCandidatesShowSelectedActions(scState)
-    } else
-        StudyLibraryContextMenu(
-            scState, scState["gui"], scList, scRow, true,
-            scPoint["x"], scPoint["y"]
-        )
-    StudyBigBoxTableModeUpdate(scState)
-}
-
-StudyBigBoxTableModeRestoreScroll(scState) {
-    if !(IsObject(scState) && scState.Has("tableModeScrollPositions"))
-        return
-    for scList in StudyBigBoxTableModeLists(scState) {
-        if !scState["tableModeScrollPositions"].Has(scList.Hwnd)
-            continue
-        scSaved := scState["tableModeScrollPositions"][scList.Hwnd]
-        scCurrent := DllCall(
-            "user32\GetScrollPos", "ptr", scList.Hwnd, "int", 0, "int"
-        )
-        if (scSaved != scCurrent)
-            try SendMessage(0x1014, scSaved - scCurrent, 0, scList.Hwnd)
-    }
-    scState["tableModeScrollPositions"] := Map()
-}
-
-StudyBigBoxTableModeSet(scState, scActive, *) {
-    if !(IsObject(scState) && scState.Get("bigBoxPresentation", false)
-        && scState.Has("tableModeControls"))
-        return false
-    scActive := scActive ? true : false
-    if (scState.Get("tableModeActive", false) = scActive)
-        return true
-    scControls := scState["tableModeControls"]
-    if scActive {
-        scVisibility := []
-        for scControl in scState.Get("tableModeNormalControls", []) {
-            try {
-                scVisibility.Push(Map(
-                    "control", scControl, "visible", scControl.Visible
-                ))
-                scControl.Visible := false
-            }
-        }
-        scState["tableModeNormalVisibility"] := scVisibility
-        scScrollPositions := Map()
-        for scList in StudyBigBoxTableModeLists(scState)
-            scScrollPositions[scList.Hwnd] := DllCall(
-                "user32\GetScrollPos", "ptr", scList.Hwnd, "int", 0, "int"
-            )
-        scState["tableModeScrollPositions"] := scScrollPositions
-        scState["tableModeFooter"] := scState["bigBoxControls"]["footer"].Value
-        scPrimaryAction := scState.Get("tableModeSurface", "") = "candidates"
-            ? "Row actions" : "Open"
-        scState["bigBoxControls"]["footer"].Value :=
-            "Up / Down  Rows     Left / Right  Columns     "
-                . "A / Cross / Enter  " scPrimaryAction
-                . "     B / Circle / Esc  Exit table mode"
-    }
-    scState["tableModeActive"] := scActive
-    for scKey in ["previous", "title", "next", "hint", "status",
-        "open", "actions", "exit"] {
-        scControls[scKey].Visible := scActive
-        if (scControls[scKey].Type = "Button")
-            scControls[scKey].Enabled := scActive
-    }
-    if !scActive {
-        for scVisibility in scState.Get("tableModeNormalVisibility", [])
-            try scVisibility["control"].Visible := scVisibility["visible"]
-        scState["tableModeNormalVisibility"] := []
-        StudyBigBoxTableModeRestoreScroll(scState)
-        if scState.Has("tableModeFooter")
-            scState["bigBoxControls"]["footer"].Value :=
-                scState["tableModeFooter"]
-    }
-    scState["gui"].GetClientPos(,, &scWidth, &scHeight)
-    if (scState.Get("tableModeSurface", "") = "candidates")
-        StudyCandidatesResizeBigBox(scState, scState["gui"], scWidth, scHeight)
-    else
-        StudyLibraryResizeBigBox(scState, scState["gui"], scWidth, scHeight)
-    if (!scActive && scState.Get("tableModeSurface", "") = "library")
-        StudyLibraryShowImage(scState)
-    StudyBigBoxTableModeUpdate(scState)
-    try (scActive ? StudyBigBoxTableModeCurrentList(scState)
-        : scControls["enter"]).Focus()
-    CPControllerResetNavigation()
-    return true
-}
-
-StudyBigBoxTableModeBind(scState) {
-    if !(IsObject(scState) && scState.Has("tableModeControls"))
-        return
-    scControls := scState["tableModeControls"]
-    scControls["enter"].OnEvent(
-        "Click", StudyBigBoxTableModeSet.Bind(scState, true)
-    )
-    scControls["previous"].OnEvent(
-        "Click", StudyBigBoxTableModeScroll.Bind(scState, -1)
-    )
-    scControls["next"].OnEvent(
-        "Click", StudyBigBoxTableModeScroll.Bind(scState, 1)
-    )
-    scControls["open"].OnEvent(
-        "Click", StudyBigBoxTableModeOpen.Bind(scState)
-    )
-    scControls["actions"].OnEvent(
-        "Click", StudyBigBoxTableModeActions.Bind(scState)
-    )
-    scControls["exit"].OnEvent(
-        "Click", StudyBigBoxTableModeSet.Bind(scState, false)
-    )
-}
-
-StudyBigBoxTableModeLayout(scState, scX, scY, scW, scH, scScale) {
-    if !StudyBigBoxTableModeActive(scState)
-        return false
-    scControls := scState["tableModeControls"]
-    scGap := Max(8, Round(10 * scScale))
-    scWideGap := Max(13, Round(17 * scScale))
-    scTitleH := Max(34, Round(42 * scScale))
-    scArrowW := Max(40, Round(52 * scScale))
-    scControls["previous"].Move(scX, scY, scArrowW, scTitleH)
-    scControls["next"].Move(
-        scX + scW - scArrowW, scY, scArrowW, scTitleH
-    )
-    scControls["title"].Move(
-        scX + scArrowW + scWideGap, scY,
-        scW - 2 * (scArrowW + scWideGap), scTitleH
-    )
-    scHintY := scY + scTitleH + scGap
-    scHintH := Max(22, Round(28 * scScale))
-    scControls["hint"].Move(scX, scHintY, scW, scHintH)
-    scTableY := scHintY + scHintH + scGap
-    if (scState.Get("tableModeSurface", "") = "candidates") {
-        scProgressH := Max(18, Round(22 * scScale))
-        scProgressBarH := Max(6, Round(7 * scScale))
-        scState["progressText"].Move(scX, scTableY, scW, scProgressH)
-        scState["progressBar"].Move(
-            scX, scTableY + scProgressH, scW, scProgressBarH
-        )
-        scTableY += scProgressH + scProgressBarH + scGap
-    }
-    scActionH := Max(38, Round(46 * scScale))
-    scActionY := scY + scH - scActionH
-    scTableH := Max(160, scActionY - scWideGap - scTableY)
-    scButtonWidths := [160, 190, 190]
-    scButtonKeys := ["open", "actions", "exit"]
-    scButtonsW := 0
-    for scWidth in scButtonWidths
-        scButtonsW += Max(120, Round(scWidth * scScale))
-    scButtonsW += scGap * 2
-    scButtonX := scX + scW - scButtonsW
-    scControls["status"].Move(
-        scX, scActionY,
-        Max(100, scButtonX - scX - scGap), scActionH
-    )
-    for scIndex, scKey in scButtonKeys {
-        scButtonW := Max(120, Round(scButtonWidths[scIndex] * scScale))
-        scControls[scKey].Move(scButtonX, scActionY, scButtonW, scActionH)
-        scButtonX += scButtonW + scGap
-    }
-    scListW := Max(300, scW)
-    if (scState.Get("tableModeSurface", "") = "candidates") {
-        scState["tabs"].Move(scX, scTableY, scListW, scTableH)
-        scListInset := Max(7, Round(8 * scScale))
-        scListX := scX + scListInset
-        scListY := scTableY + scListInset
-        scInnerW := Max(280, scListW - scListInset * 2)
-        scInnerH := Max(140, scTableH - scListInset * 2)
-        scState["sentenceList"].Move(scListX, scListY, scInnerW, scInnerH)
-        scState["vocabularyList"].Move(scListX, scListY, scInnerW, scInnerH)
-        StudyCandidatesApplyBigBoxColumns(
-            scState, Max(1, scInnerW - 6), scScale
-        )
-    } else {
-        scState["list"].Move(scX, scTableY, scListW, scTableH)
-        scState["bigBoxListWidth"] := Max(1, scListW - 6)
-        StudyLibraryApplyBigBoxColumns(
-            scState, scState["bigBoxListWidth"], scScale
-        )
-    }
-    StudyBigBoxTableModeUpdate(scState)
-    return true
-}
-
-StudyCandidatesBigBoxColumnWidths(scKind, scAvailableWidth, scScale, scTableMode := false) {
+StudyCandidatesBigBoxColumnWidths(scKind, scAvailableWidth, scScale) {
     scAvailableWidth := Max(1, Round(scAvailableWidth))
-    if (scTableMode && scKind = "vocabulary") {
-        ; Table mode deliberately keeps every data column comfortable instead
-        ; of compressing the complete row into one screen. The shared arrows
-        ; and Left/Right navigation then expose the remaining columns.
-        scFixed := [135, 300, 1050, 130, 200, 190]
-        scFlexibleIndex := 3
-        scFlexibleMinimum := 1050
-    } else if scTableMode {
-        scFixed := [135, 210, 190, 1350, 120]
-        scFlexibleIndex := 4
-        scFlexibleMinimum := 1350
-    } else if (scKind = "vocabulary") {
+    if (scKind = "vocabulary") {
         scFixed := [100, 205, 0, 100, 140, 145]
         scFlexibleIndex := 3
         scFlexibleMinimum := 240
@@ -18101,14 +19620,12 @@ StudyCandidatesApplyBigBoxColumns(scState, scListWidth, scScale) {
     if !StudyCandidatesBigBoxPresentation(scState)
         return
     scSentenceWidths := StudyCandidatesBigBoxColumnWidths(
-        "sentences", scListWidth, scScale,
-        StudyBigBoxTableModeActive(scState)
+        "sentences", scListWidth, scScale
     )
     for scIndex, scWidth in scSentenceWidths
         scState["sentenceList"].ModifyCol(scIndex, scWidth)
     scVocabularyWidths := StudyCandidatesBigBoxColumnWidths(
-        "vocabulary", scListWidth, scScale,
-        StudyBigBoxTableModeActive(scState)
+        "vocabulary", scListWidth, scScale
     )
     for scIndex, scWidth in scVocabularyWidths
         scState["vocabularyList"].ModifyCol(scIndex, scWidth)
@@ -18148,7 +19665,6 @@ StudyCandidatesApplyBigBoxFonts(scState, scRatio) {
         "scopeLabel", "aiFilterLabel", "progressText", "status", "aiStatus"
     ]
         scState[scLabelKey].SetFont("s" Round(10.5 * scRatio, 2) " Norm")
-    StudyBigBoxTableModeApplyFonts(scState, scRatio)
 }
 
 StudyCandidatesApplyBigBoxTheme(scState) {
@@ -18181,7 +19697,6 @@ StudyCandidatesApplyBigBoxTheme(scState) {
         scState[scPanelKey].Opt("+Background" scColors["surface"])
         scState[scPanelKey].SetFont("c" scColors["muted"])
     }
-    StudyBigBoxTableModeApplyTheme(scState, scColors)
     CPApplyOwnedDialogTheme(scState["gui"])
     StudyBigBoxFocusFrameEnsure(scState)
 }
@@ -18262,13 +19777,6 @@ StudyCandidatesResizeBigBox(scState, scGui, scWidth, scHeight) {
         scBigBox["footer"].Move(scMargin, scFooterY, scPanelW, scFooterH)
 
         scState["bigBoxLayoutScale"] := scScale
-        if StudyBigBoxTableModeLayout(
-            scState,
-            scInnerX, scPanelY + scPanelPad,
-            scInnerW, scInnerBottom - (scPanelY + scPanelPad), scScale
-        )
-            return
-
         scPageY := scPanelY + scPanelPad
         scPageH := Max(34, Round(40 * scScale))
         scPageArrowW := Max(40, Round(50 * scScale))
@@ -18374,10 +19882,6 @@ StudyCandidatesResizeBigBox(scState, scGui, scWidth, scHeight) {
             )
             scActionX += scActionW + scGap
         }
-        scTableModeW := Max(112, Round(150 * scScale))
-        scState["tableModeControls"]["enter"].Move(
-            scActionX, scActionY, scTableModeW, scActionH
-        )
         scState["status"].Move(scInnerX, scStatusY, scInnerW, scStatusH)
         scState["aiStatus"].Move(
             scInnerX, scAiStatusY, scInnerW, scAiStatusH
@@ -18397,6 +19901,10 @@ StudyCandidatesResize(scState, scGui, scMinMax, scWidth, scHeight) {
         return
     if StudyCandidatesBigBoxPresentation(scState) {
         StudyCandidatesResizeBigBox(scState, scGui, scWidth, scHeight)
+        return
+    }
+    if scState.Has("desktop") {
+        StudyDesktopDialogResize(scState, scGui, scMinMax, scWidth, scHeight)
         return
     }
     scMargin := 14, scGap := 10
@@ -18673,7 +20181,6 @@ StudyLibraryOpenCandidates(slState, *) {
     CPApplyOwnedDialogTheme(scGui)
 
     scBigBoxControls := Map()
-    scTableModeControls := Map()
     if scWantBigBox {
         scBigBoxControls["accent"] := scGui.Add(
             "Text", "x0 y0 w10 h8 Disabled Background"
@@ -18727,7 +20234,6 @@ StudyLibraryOpenCandidates(slState, *) {
             "Text", "x80 y280 w560 h4 Disabled Background"
                 . scColors["accent"], ""
         )
-        scTableModeControls := StudyBigBoxTableModeCreate(scGui, scColors)
     }
     scScopeLabel := scGui.Add("Text", "x14 y19 w46", "Show:")
     scScopeDdl := scGui.Add(
@@ -18753,9 +20259,18 @@ StudyLibraryOpenCandidates(slState, *) {
         "Progress", "x14 y70 w812 h6 Hidden +0x8 Range0-100 Background"
             . scColors["surface"] " c" scColors["accent"], 0
     )
-    scTabs := scGui.Add("Tab3", "x14 y80 w812 h412", ["Sentences", "Vocabulary"])
+    ; Tab2 keeps the desktop lists on the main surface when the native tab
+    ; strip is replaced by the modern Sentences / Vocabulary buttons.
+    scTabs := scGui.Add(!scWantBigBox && CPDesktopActive() ? "Tab2" : "Tab3",
+        "x14 y80 w812 h412", ["Sentences", "Vocabulary"])
+    ; Fullscreen uses the visible page arrows/shoulders; the native tab is only
+    ; a list container. Do not let focus stop on its invisible outer rectangle.
+    if scWantBigBox
+        scTabs.Opt("-TabStop")
     scTabs.SetFont("c" scColors["text"])
-    scTabs.UseTab("Sentences")
+    scTabs.UseTab()
+    if scWantBigBox || !CPDesktopActive()
+        scTabs.UseTab("Sentences")
     scSentenceList := scGui.Add(
         "ListView", "x22 y111 w796 h373 Grid Background"
             . scColors["surface"] " c" scColors["text"],
@@ -18765,7 +20280,8 @@ StudyLibraryOpenCandidates(slState, *) {
     scSentenceList.ModifyCol(1, 88), scSentenceList.ModifyCol(2, 125)
     scSentenceList.ModifyCol(3, 125), scSentenceList.ModifyCol(4, 380)
     scSentenceList.ModifyCol(5, 70)
-    scTabs.UseTab("Vocabulary")
+    if scWantBigBox || !CPDesktopActive()
+        scTabs.UseTab("Vocabulary")
     scVocabularyList := scGui.Add(
         "ListView", "x22 y111 w796 h373 Grid Background"
             . scColors["surface"] " c" scColors["text"],
@@ -18798,17 +20314,6 @@ StudyLibraryOpenCandidates(slState, *) {
     CPRegisterMutedControl(scStatus)
     scAiStatus := scGui.Add("Text", "x14 y559 w812 h50 cGray", "")
     CPRegisterMutedControl(scAiStatus)
-    scTableModeNormalControls := []
-    if scWantBigBox {
-        scTableModeNormalControls := [
-            scBigBoxControls["pagePrevious"], scBigBoxControls["pageTitle"],
-            scBigBoxControls["pageNext"], scBigBoxControls["pageHint"],
-            scBigBoxControls["pageTrack"], scBigBoxControls["pageHighlight"],
-            scScopeLabel, scScopeDdl, scRefresh, scRecommend,
-            scAiFilterLabel, scAiFilterDdl, scOpen, scAdd, scFinish, scTriage,
-            scClose, scStatus, scAiStatus, scTableModeControls["enter"]
-        ]
-    }
     scState := Map(
         "gui", scGui,
         "libraryState", slState,
@@ -18816,10 +20321,6 @@ StudyLibraryOpenCandidates(slState, *) {
         "bigBoxControls", scBigBoxControls,
         "bigBoxFontRatio", 0,
         "bigBoxLayoutScale", 1,
-        "tableModeSurface", "candidates",
-        "tableModeControls", scTableModeControls,
-        "tableModeNormalControls", scTableModeNormalControls,
-        "tableModeActive", false,
         "database", slState["database"],
         "outputDir", scOutputDir,
         "scopeLabel", scScopeLabel,
@@ -18866,7 +20367,6 @@ StudyLibraryOpenCandidates(slState, *) {
     if scWantBigBox {
         ; Establish colored focus surfaces before the first fullscreen paint.
         StudyBigBoxFocusFrameStart(scState)
-        StudyBigBoxTableModeBind(scState)
     }
     scScopeDdl.OnEvent("Change", StudyCandidatesScopeChanged.Bind(scState))
     scAiFilterDdl.OnEvent(
@@ -18890,6 +20390,8 @@ StudyLibraryOpenCandidates(slState, *) {
     scGui.OnEvent("Close", StudyCandidatesClose.Bind(scState))
     scGui.OnEvent("Size", StudyCandidatesResize.Bind(scState))
     scGui.OnEvent("ContextMenu", StudyCandidatesContextMenu.Bind(scState))
+    StudyDesktopCandidatesCreate(scState)
+    ; @DESKTOP_CANDIDATES_CONTROLS_END@
     if scWantBigBox {
         scBigBoxControls["pagePrevious"].OnEvent(
             "Click", StudyCandidatesSwitchBigBoxPage.Bind(scState, -1)
@@ -18918,6 +20420,8 @@ StudyLibraryOpenCandidates(slState, *) {
         try DllCall("dwmapi\DwmFlush")
         CPSetWindowCloaked(scGui.Hwnd, false)
         StudyBigBoxFocusFrameEnsure(scState)
+    } else if scState.Has("desktop") {
+        StudyDesktopDialogShow(scState, 1040, 800, scScopeDdl)
     } else {
         scGui.Show("Hide w840 h575")
         CPApplyOwnedDialogTheme(scGui)
@@ -19071,6 +20575,7 @@ StudyLibraryOpenStorage(slState, *) {
     if !StudyLibraryRefreshStorage(slState, true)
         return
     SplitPath(slState["database"],, &slDirectory)
+    ; @DESKTOP_STORAGE_CONTROLS_BEGIN@
     slBigBox := StudyLibraryBigBoxPresentation(slState)
     slDialogOptions := "+Owner" slState["gui"].Hwnd " +OwnDialogs"
         . (slBigBox ? " +AlwaysOnTop -Caption +ToolWindow -DPIScale" : "")
@@ -19134,6 +20639,10 @@ StudyLibraryOpenStorage(slState, *) {
     slDialog.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slDialog))
     slDialog.OnEvent("Close", StudyLibraryCloseDialog.Bind(slDialog))
     StudyLibraryUpdateStorageDialog(slState, slControls)
+    slDesktop := StudyDesktopStorageCreate(Map("gui", slDialog, "bigBoxPresentation", slBigBox,
+        "ownerState", slState, "heading", slHeading, "path", slPath, "values", slControls,
+        "labels", slLabels, "openButton", slOpenFolder, "refreshButton", slRefresh, "closeButton", slClose))
+    ; @DESKTOP_STORAGE_CONTROLS_END@
     if slBigBox {
         StudyLibraryBigBoxFormAdd(
             slForm, "heading", slHeading, 0, 0, 1000, 70, "title"
@@ -19174,6 +20683,8 @@ StudyLibraryOpenStorage(slState, *) {
             slForm, "close", slClose, 795, 855, 205, 105, "button"
         )
         StudyLibraryBigBoxFormShow(slForm, slClose)
+    } else if IsObject(slDesktop) {
+        StudyDesktopDialogShow(slDesktop, 860, 770, slClose)
     } else {
         slDialog.Show("AutoSize Center")
         CPApplyOwnedDialogTheme(slDialog)
@@ -19366,10 +20877,1217 @@ StudyLibraryClearDetail(slState, slMessage := "Select an explanation.") {
         slState["sectionNavCallback"].Call()
     slState["picture"].Visible := false
     try slState["picture"].Value := ""
-    slState["imageInfo"].Value := "No source screenshot selected."
+    slState["imageInfo"].Value := slState.Get("compactImageNavigation", false)
+        ? "No image" : "No source screenshot selected."
     slState["previousImage"].Enabled := false
     slState["nextImage"].Enabled := false
     slState["openImage"].Enabled := false
+}
+
+; Desktop Study windows share the control center's visual language, but retain
+; their own paint/layout state. No study controls join the main canvas or its
+; scrolling/visibility lists, and the Big Box presentation is left untouched.
+StudyDesktopRegistry() {
+    static windows := Map()
+    return windows
+}
+
+StudyDesktopContext(hwnd) {
+    windows := StudyDesktopRegistry()
+    if !hwnd || !windows.Count
+        return 0
+    root := DllCall("user32\GetAncestor", "ptr", hwnd, "uint", 2, "ptr")
+    return windows.Get(root, 0)
+}
+
+StudyDesktopCreate(state, kind) {
+    global CPStudyLibraryState
+    if state.Get("bigBoxPresentation", false) || !CPDesktopActive()
+        return
+    d := StudyDesktopRegister(state, kind)
+    dlg := state["gui"]
+    state["compactImageNavigation"] := true
+    state["imageLayoutCallback"] := StudyLibraryRunQueuedImageLayout.Bind(state)
+    ; The modern context card already paints the preview background. Keep the
+    ; legacy frame only as a layout reference: its opaque sibling HWND sits
+    ; above the Picture and can cover it on native repaints/entry changes.
+    state["imageFrame"].Visible := false
+    ; Replace only the cramped metadata label: the existing loader still owns
+    ; its value. A read-only, borderless field also exposes long model/tag names.
+    state["metadata"].Visible := false
+    state["metadata"] := dlg.AddEdit("x0 y0 w1 h1 ReadOnly Multi VScroll -Border -E0x200")
+    CPRegisterMutedControl(state["metadata"])
+    c := d["chrome"]
+    c["brand"] := dlg.AddText("x92 y20 w250 h32 +0x200", "JRPG Translator")
+    c["brand"].SetFont("s14 Bold")
+    c["title"] := dlg.AddText("x24 y88 w500 h38", kind = "library" ? "Study Library" : "Study Reader")
+    c["title"].SetFont("s24 Bold")
+    c["subtitle"] := dlg.AddText("x24 y130 w600 h24", kind = "library"
+        ? "Browse saved explanations and prepare material for Anki."
+        : "Read saved explanations, explore the language, and build your vocabulary.")
+    CPRegisterMutedControl(c["subtitle"])
+    for action in ["minimize", "maximize", "close"] {
+        c[action] := dlg.AddButton("x0 y0 w36 h36", StrTitle(action))
+        c[action].OnEvent("Click", StudyDesktopWindowAction.Bind(state, action))
+        d["paint"][c[action].Hwnd] := Map("ctrl", c[action], "kind", "caption", "surface", "bar", "selected", false, "action", action)
+    }
+    closeLabel := kind = "library" ? "Close Library"
+        : (StudyLibraryStateAlive(CPStudyLibraryState) ? "Back to Library" : "Close Reader")
+    c["back"] := dlg.AddButton("x0 y0 w160 h36", closeLabel)
+    c["back"].OnEvent("Click", kind = "library" ? StudyLibraryClose.Bind(state) : StudyReaderClose.Bind(state))
+    if kind = "library" {
+        c["listTitle"] := dlg.AddText("x0 y0 w220 h24", "Saved explanations")
+        c["listTitle"].SetFont("s13 Bold")
+        state["newLibraryButton"].Text := "Manage…"
+        state["studyButton"].Text := "Open in Reader"
+        state["removeVersionButton"].Text := "Remove…"
+        state["currentChapterStatus"].Opt("+0x4000")
+        state["detailTitle"].Opt("+0x4000")
+        SendMessage(0x1501, 1, StrPtr("Search saved explanations…"), state["search"].Hwnd)
+        state["list"].Opt("-Grid -Border -E0x200")
+        state["list"].SetFont("s10")
+        SendMessage(0x1036, 0x10000, 0x10000, state["list"].Hwnd) ; LVS_EX_DOUBLEBUFFER
+    } else {
+        c["library"] := dlg.AddText("x0 y0 w220 h28 Right +0x200", "Library: " StudyLibraryConfiguredName())
+        CPRegisterMutedControl(c["library"])
+        state["detailTitle"].Visible := false
+        state["explanation"].SetFont("s11")
+        state["contextTitle"].SetFont("s13 Bold")
+    }
+    for ctrl in dlg {
+        surface := "panel"
+        if ctrl = c["brand"] || (kind = "library" && (ctrl = state["libraryLabel"] || ctrl = state["libraryDdl"] || ctrl = state["newLibraryButton"]))
+            surface := "bar"
+        else if ctrl = c["title"] || ctrl = c["subtitle"] || (kind = "library" && (ctrl = state["currentChapterButton"] || ctrl = state["currentChapterStatus"]))
+            surface := "window"
+        else if ctrl = c["back"] || (kind = "library" && (ctrl = state["status"] || ctrl = state["exportButton"] || ctrl = state["storageButton"])) || (kind = "reader" && (ctrl = state["ankiCheck"] || ctrl = state["previousEntry"] || ctrl = state["entryStatus"] || ctrl = state["nextEntry"]))
+            surface := "bar"
+        else if kind = "reader" && ctrl = c["library"]
+            surface := "bar"
+        d["surfaces"][ctrl.Hwnd] := surface
+        if kind = "library" && ctrl = state["search"]
+            d["surfaces"][ctrl.Hwnd] := "field"
+        if ctrl.Type = "Button" && !d["paint"].Has(ctrl.Hwnd) {
+            role := ctrl = state[kind = "library" ? "studyButton" : "addAnkiButton"] ? "primary" : "button"
+            if kind = "library" && ctrl = state["removeVersionButton"]
+                role := "link"
+            d["paint"][ctrl.Hwnd] := Map("ctrl", ctrl, "kind", role, "surface", surface, "selected", false)
+        } else if ctrl = state.Get("libraryDdl", 0) {
+            d["combos"][ctrl.Hwnd] := Map("ctrl", ctrl)
+            CPPrepareStudyCombo(ctrl.Hwnd)
+        }
+        if ctrl.Type = "Edit" || ctrl = state["imageFrame"] || ctrl = state["versionView"] || ctrl = state.Get("sectionStatus", 0) || ctrl = state.Get("entryStatus", 0)
+            ctrl.Opt("-Border -E0x200")
+    }
+    StudyDesktopTheme(d)
+}
+
+StudyDesktopRegister(state, kind, minW := 960, minH := 700) {
+    static exitRegistered := false
+    if !exitRegistered {
+        OnExit(StudyDesktopShutdown, -1)
+        ; Intercept only messages we draw/handle. A whole-window native
+        ; subclass also wraps DefWindowProc's modal move/activation loops in
+        ; an AHK callback, unnecessarily delaying normal GUI events.
+        for message in [0x2B, 0x133, 0x134, 0x135, 0x138, 0x14, 0x84, 0x82]
+            OnMessage(message, StudyDesktopWindowMessage, -1)
+        OnMessage(0x84, StudyDesktopLabelHitTest)
+        OnMessage(0x200, StudyDesktopCaptionMouse)
+        OnMessage(0x2A3, StudyDesktopCaptionMouse)
+        exitRegistered := true
+    }
+    dlg := state["gui"]
+    d := Map("state", state, "kind", kind, "frameHwnd", dlg.Hwnd,
+        "paint", Map(), "surfaces", Map(), "combos", Map(), "iconFonts", Map(),
+        "hover", 0, "chrome", Map(), "panels", [], "width", 0, "height", 0)
+    state["desktop"] := d
+    StudyDesktopRegistry()[dlg.Hwnd] := d
+    ; The table buffers its own drawing. Whole-window WS_EX_COMPOSITED fights
+    ; native ListView/header painting and delays presentation during dragging.
+    ; WS_CLIPCHILDREN also keeps panel erasure off the table/text/image HWNDs.
+    dlg.Opt("-Caption +Resize +MinSize" minW "x" minH " -E0x02000000 +0x02000000")
+    dlg.SetFont("s10", "Segoe UI")
+    return d
+}
+
+StudyDesktopTheme(d) {
+    colors := CPDesktopPalette(), state := d["state"]
+    state["gui"].BackColor := colors["window"]
+    for hwnd, surface in d["surfaces"] {
+        ctrl := GuiCtrlFromHwnd(hwnd)
+        if ctrl.Type != "Picture" {
+            ctrl.Opt("+Background" colors[surface])
+            if ctrl.Type = "Text"
+                ctrl.SetFont("c" colors[CPIsMutedControl(hwnd) ? "muted" : "text"])
+        }
+        if (ctrl.Type = "Edit" && (d["kind"] = "newVersionName" || d["kind"] = "input" || d["kind"] = "modelBrowser"))
+            || (ctrl.Type = "ListBox" && d["kind"] = "modelBrowser") {
+            ; Plain inputs do not need a native theme. Keep Explorer's theme on
+            ; the browser fields so their scrollbars stay dark, but drop borders.
+            if d["kind"] != "modelBrowser"
+                DllCall("uxtheme\SetWindowTheme", "ptr", hwnd, "wstr", "", "wstr", "")
+            ctrl.Opt("-Border -E0x200")
+            DllCall("user32\SetWindowPos", "ptr", hwnd, "ptr", 0, "int", 0, "int", 0,
+                "int", 0, "int", 0, "uint", 0x37)
+        }
+    }
+    for hwnd, paint in d["paint"] {
+        style := DllCall("user32\GetWindowLongPtr", "ptr", hwnd, "int", -16, "ptr")
+        DllCall("user32\SetWindowLongPtr", "ptr", hwnd, "int", -16, "ptr", (style & ~0xF) | 0xB, "ptr")
+    }
+    for hwnd, spec in d["combos"] {
+        SendMessage(0x0153, -1, Round(30 * GetWindowDPI(hwnd) / 96) - 6, hwnd)
+        CPDesktopLayoutComboEdit(hwnd)
+    }
+    for list in (d["kind"] = "library" || d["kind"] = "libraryManager" || d["kind"] = "libraryArchives" ? [state["list"]]
+        : d["kind"] = "candidates" ? [state["sentenceList"], state["vocabularyList"]] : []) {
+        list.Opt("+Background" colors["panel"] " c" colors["text"] " -Grid")
+        SendMessage(0x1026, 0, CPColorRef(colors["panel"]), list.Hwnd)
+    }
+}
+
+StudyDesktopDialogCreate(s, kind, title, subtitle, minW := 960, minH := 700) {
+    if s.Get("bigBoxPresentation", false) || !CPDesktopActive()
+        return false
+    d := StudyDesktopRegister(s, kind, minW, minH), g := s["gui"], c := d["chrome"]
+    c["brand"] := g.AddText("x92 y20 w250 h32 +0x200", "JRPG Translator")
+    c["brand"].SetFont("s14 Bold")
+    c["title"] := g.AddText("x24 y90 w600 h38 +0x80", title)
+    c["title"].SetFont("s22 Bold")
+    c["subtitle"] := g.AddText("x24 y132 w600 h24 +0x80", subtitle)
+    CPRegisterMutedControl(c["subtitle"])
+    for action in ["minimize", "maximize", "close"] {
+        c[action] := g.AddButton("x0 y0 w36 h36", StrTitle(action))
+        c[action].OnEvent("Click", StudyDesktopWindowAction.Bind(s, action))
+        d["paint"][c[action].Hwnd] := Map("ctrl", c[action], "kind", "caption", "surface", "bar", "selected", false, "action", action)
+    }
+    for ctrl in g {
+        surface := ctrl = c["brand"] ? "bar" : ctrl = c["title"] || ctrl = c["subtitle"] ? "window"
+            : ctrl.Type = "Edit" || ctrl.Type = "DDL" || ctrl.Type = "ComboBox" || ctrl.Type = "ListBox" ? "field" : "panel"
+        d["surfaces"][ctrl.Hwnd] := surface
+        if ctrl.Type = "Button" && !d["paint"].Has(ctrl.Hwnd)
+            d["paint"][ctrl.Hwnd] := Map("ctrl", ctrl, "kind", ctrl = s.Get("addButton", 0) ? "primary" : "button", "surface", surface, "selected", false)
+        if ctrl.Type = "DDL" || ctrl.Type = "ComboBox" {
+            d["combos"][ctrl.Hwnd] := Map("ctrl", ctrl)
+            CPPrepareStudyCombo(ctrl.Hwnd)
+        }
+        if ctrl.Type = "Edit" || ctrl.Type = "ListView" || ctrl.Type = "ListBox"
+            ctrl.Opt("-Border -E0x200")
+    }
+    s["desktopResize"] := StudyDesktopDialogResize.Bind(s)
+    if kind != "candidates"
+        g.OnEvent("Size", s["desktopResize"])
+    StudyDesktopTheme(d)
+    return true
+}
+
+StudyDesktopDialogFooter(s, ctrl) {
+    d := s["desktop"]
+    d["surfaces"][ctrl.Hwnd] := "bar"
+    if d["paint"].Has(ctrl.Hwnd)
+        d["paint"][ctrl.Hwnd]["surface"] := "bar"
+}
+
+StudyDesktopDialogShow(s, width, height, focusCtrl) {
+    g := s["gui"]
+    g.Show("Hide w" width " h" height)
+    StudyDesktopDialogResize(s, g, 0, width, height)
+    CPApplyOwnedDialogTheme(g)
+    StudyWindowRevealFinished(g, "Center w" width " h" height)
+    ; A quick Cancel can run while Windows is activating an owned dialog.
+    ; Its initial focus is best-effort once that dialog has been revealed.
+    if !s.Get("closed", false) && StudyLibraryStateAlive(s) {
+        try WinActivate("ahk_id " g.Hwnd)
+        try focusCtrl.Focus()
+    }
+}
+
+StudyDesktopDialogResize(s, g, minMax, w, h) {
+    if minMax = -1 || !s.Has("desktop")
+        return
+    d := s["desktop"], c := d["chrome"], visible := DllCall("user32\IsWindowVisible", "ptr", g.Hwnd)
+    prior := A_IsCritical
+    Critical "On"
+    if visible
+        SendMessage(0xB, 0, 0, g.Hwnd)
+    try {
+        d["width"] := w, d["height"] := h
+        c["title"].Move(24, 90, w - 48, 38)
+        c["subtitle"].Move(24, 132, w - 48, 24)
+        for i, action in ["minimize", "maximize", "close"]
+            c[action].Move(w - 132 + (i - 1) * 40, 18, 36, 36)
+        d["panels"] := [[0, 0, w, 72, "bar"], [0, h - 66, w, 66, "bar"]]
+        switch d["kind"] {
+            case "anki": StudyDesktopLayoutAnki(s, w, h)
+            case "candidates": StudyDesktopLayoutCandidates(s, w, h)
+            case "message": StudyDesktopLayoutMessage(s, w, h)
+            case "input": CPInputDialogLayout(s, w, h)
+            case "modelSource", "modelBrowser": CPModelDialogLayout(s, w, h)
+            case "chapter", "columns", "filters", "details": StudyDesktopLayoutMetadata(s, w, h)
+            case "datePicker": StudyDesktopLayoutDatePicker(s, w, h)
+            case "libraryManager", "libraryArchives": StudyDesktopLayoutManagement(s, w, h)
+            case "libraryName": StudyDesktopLayoutLibraryName(s, w, h)
+            case "storage": StudyDesktopLayoutStorage(s, w, h)
+            case "recommendationConfirm", "recommendationPreferences", "recommendationPrompt":
+                StudyDesktopLayoutRecommendation(s, w, h)
+            case "ankiConnection", "bulkDetails", "newVersion", "newVersionPrompt", "newVersionName":
+                StudyDesktopLayoutStudyTool(s, w, h)
+        }
+    } finally {
+        if visible {
+            SendMessage(0xB, 1, 0, g.Hwnd)
+            DllCall("user32\RedrawWindow", "ptr", g.Hwnd, "ptr", 0, "ptr", 0, "uint", 0x185)
+        }
+        Critical prior
+    }
+}
+
+; Secondary Study tools reuse their original controls and callbacks. No bridge,
+; Anki, prompt-file or generation operation is performed by this presentation.
+StudyDesktopStudyToolCreate(s, kind, controls) {
+    if s.Get("bigBoxPresentation", false) || !CPDesktopActive()
+        return 0
+    specs := Map(
+        "ankiConnection", ["Anki connection", "Connect a Study Profile to Anki and check existing cards.", 820, 760],
+        "bulkDetails", ["Edit selected explanations", "Apply only the metadata changes you choose.", 820, 720],
+        "newVersion", ["Generate new explanation version", "Create another explanation while keeping every existing version.", 820, 700],
+        "newVersionPrompt", ["Explanation prompt", "Edit the saved prompt used to generate explanations.", 820, 650],
+        "newVersionName", ["New explanation prompt", "Create a separate prompt without changing existing prompts.", 680, 450])
+    spec := specs[kind], s["controls"] := controls, s["addButton"] := controls["save"]
+    StudyDesktopDialogCreate(s, kind, spec[1], spec[2], spec[3], spec[4])
+    for key in (kind = "ankiConnection" ? ["refresh", "save", "cancel"] : ["save", "cancel"])
+        StudyDesktopDialogFooter(s, controls[key])
+    if kind = "ankiConnection" {
+        controls["heading"].Text := "Connection status", controls["heading"].SetFont("s12 Bold")
+        controls["intro"].Text := "Checks exact Japanese matches without changing cards in Anki. A parent deck includes its subdecks."
+        CPRegisterMutedControl(controls["intro"])
+    } else if kind = "bulkDetails" {
+        controls["heading"].SetFont("s12 Bold")
+        controls["intro"].Text := "Keep existing leaves that field untouched. Choose Set to, Clear, or a tag action only where needed."
+    } else if kind = "newVersion" {
+        controls["heading"].Text := "AI settings", controls["heading"].SetFont("s12 Bold")
+        controls["intro"].Text := "Uses the archived Japanese and source screenshots. Existing explanations stay unchanged."
+        CPRegisterMutedControl(controls["intro"])
+        for key in ["edit", "add", "delete"]
+            s["desktop"]["paint"][controls[key].Hwnd]["kind"] := "link"
+        controls["edit"].Text := "Edit prompt…", controls["add"].Text := "New prompt…", controls["delete"].Text := "Delete prompt…"
+    } else {
+        controls["label"].SetFont("s12 Bold")
+        controls["editor"].SetFont("s11")
+        CPRegisterMutedControl(controls["intro"])
+    }
+    StudyDesktopTheme(s["desktop"])
+    return s
+}
+
+StudyDesktopLayoutStudyTool(s, w, h) {
+    d := s["desktop"], c := s["controls"], kind := d["kind"], cw := w - 80, half := Floor((cw - 24) / 2)
+    c["save"].Move(w - 326, h - 50, 180, 34)
+    c["cancel"].Move(w - 134, h - 50, 110, 34)
+    switch kind {
+        case "ankiConnection":
+            d["panels"].Push([24, 174, w - 48, 152, "panel"], [24, 342, w - 48, h - 428, "panel"])
+            c["heading"].Move(40, 194, cw - 170, 28)
+            c["status"].Move(40, 234, cw - 170, 64)
+            c["test"].Move(w - 194, 194, 154, 34)
+            for i, key in ["profile", "deck", "model", "japanese", "explanation"] {
+                row := i <= 2 ? 0 : i = 3 ? 1 : 2
+                right := i = 2 || i = 5
+                x := right ? 64 + half : 40, y := 360 + row * 78
+                fw := i = 3 ? cw : half
+                c[key "Label"].Move(x, y, fw, 24), c[key].Move(x, y + 28, fw)
+            }
+            c["intro"].Move(40, 600, cw, h - 706)
+            c["refresh"].Move(24, h - 50, 192, 34)
+        case "bulkDetails":
+            d["panels"].Push([24, 174, w - 48, h - 260, "panel"])
+            c["heading"].Move(40, 194, cw, 28)
+            c["intro"].Move(40, 232, cw, 46)
+            for i, key in ["chapter", "speaker", "tags"] {
+                y := 296 + (i - 1) * 78
+                c[key "Label"].Move(40, y, cw, 24)
+                c[key "Mode"].Move(40, y + 28, 190)
+                c[key].Move(246, y + 28, cw - 206, 32)
+            }
+            c["ankiLabel"].Move(40, 534, 190, 24), c["anki"].Move(246, 530, cw - 206)
+            c["hint"].Move(40, 582, cw, h - 688)
+        case "newVersion":
+            d["panels"].Push([24, 174, w - 48, 296, "panel"], [24, 486, w - 48, h - 572, "panel"])
+            c["heading"].Move(40, 194, cw, 28)
+            for i, key in ["provider", "gemini", "openai"] {
+                x := i = 1 ? 40 : 64 + half
+                c[key "Label"].Move(x, 240, half, 24), c[key].Move(x, 272, half)
+            }
+            c["promptLabel"].Move(40, 326, cw, 24), c["prompt"].Move(40, 358, cw)
+            for i, key in ["edit", "add", "delete"]
+                c[key].Move(40 + (i - 1) * 154, 406, 142, 34)
+            c["intro"].Move(40, 506, cw, 48)
+            c["status"].Move(40, 568, cw, h - 674)
+        case "newVersionPrompt", "newVersionName":
+            d["panels"].Push([24, 174, w - 48, h - 260, "panel"])
+            c["label"].Move(40, 194, cw, 28)
+            if kind = "newVersionPrompt" {
+                c["intro"].Move(40, 232, cw, 48)
+                c["editor"].Move(40, 292, cw, h - 398)
+            } else {
+                c["editor"].Move(40, 236, cw, 34)
+                c["intro"].Move(40, 290, cw, h - 396)
+            }
+    }
+}
+
+StudyDesktopRecommendationCreate(s, regenerate := false) {
+    if s.Get("bigBoxPresentation", false) || !CPDesktopActive()
+        return
+    c := s["controls"], kind := s["kind"]
+    if kind = "confirm" {
+        s["addButton"] := c["generate"]
+        title := regenerate ? "Regenerate recommendations" : "Generate recommendations"
+        subtitle := "Choose how AI should assess the current study candidates."
+        desktopKind := "recommendationConfirm", minW := 780, minH := 670
+    } else if kind = "customize" {
+        s["addButton"] := c["ok"]
+        title := "Recommendation preferences"
+        subtitle := "Adjust what makes a sentence or word valuable for your study."
+        desktopKind := "recommendationPreferences", minW := 780, minH := 700
+    } else {
+        s["addButton"] := c["save"]
+        title := "Recommendation prompt"
+        subtitle := "Edit selection instructions. Output rules stay automatic."
+        desktopKind := "recommendationPrompt", minW := 900, minH := 700
+    }
+    StudyDesktopDialogCreate(s, desktopKind, title, subtitle, minW, minH)
+    for ctrl in s["buttonControls"]
+        StudyDesktopDialogFooter(s, ctrl)
+    if kind = "confirm" {
+        c["question"].SetFont("s13 Bold")
+        c["generate"].Text := regenerate ? "Regenerate" : "Generate"
+        CPRegisterMutedControl(c["breakdown"])
+        s["desktop"]["surfaces"][c["hint"].Hwnd] := "window"
+    } else if kind = "customize" {
+        c["heading"].SetFont("s13 Bold")
+        c["guidanceLabel"].SetFont("s12 Bold")
+        c["ok"].Text := "Apply preferences"
+        c["view"].Text := "Edit / view prompt…"
+        c["hint"].Text := "For example: avoid proper names or favor dialogue. Output rules stay protected. Nothing is sent until you choose Generate."
+    } else {
+        c["editor"].SetFont("s11")
+        c["save"].Text := "Save draft"
+        CPRegisterMutedControl(c["intro"])
+        StudyDesktopRecommendationPreviewText(s)
+    }
+    StudyDesktopTheme(s["desktop"])
+}
+
+StudyDesktopRecommendationPreviewText(s) {
+    full := s["fullPreview"]
+    s["desktop"]["chrome"]["subtitle"].Text := full
+        ? "Full prompt preview · Read-only" : "Edit selection instructions. Output rules stay automatic."
+    s["controls"]["intro"].Text := full
+        ? "Your instructions, study preferences and protected output rules are combined below. Candidate data is inserted when generating; this preview makes no API request."
+        : "Edit only the selection instructions below. Save draft keeps your edits in preferences; Apply preferences accepts them. Study preferences, output rules and candidate data stay automatic."
+}
+
+StudyDesktopLayoutRecommendation(s, w, h) {
+    d := s["desktop"], c := s["controls"], cw := Floor((w - 104) / 2)
+    switch s["kind"] {
+        case "confirm":
+            d["panels"].Push([24, 174, w - 48, 142, "panel"], [24, 332, w - 48, 140, "panel"])
+            c["question"].Move(40, 194, w - 80, 28)
+            c["breakdown"].Move(40, 230, w - 80, 24)
+            c["info"].Move(40, 266, w - 80, 42)
+            c["levelLabel"].Move(40, 352, cw, 24)
+            c["level"].Move(40, 384, cw)
+            c["styleLabel"].Move(64 + cw, 352, cw, 24)
+            c["style"].Move(64 + cw, 384, cw)
+            c["hint"].Move(40, 490, w - 80, h - 580)
+            c["customize"].Move(24, h - 50, 156, 34)
+            c["generate"].Move(w - 310, h - 50, 160, 34)
+            c["cancel"].Move(w - 138, h - 50, 114, 34)
+        case "customize":
+            d["panels"].Push([24, 174, w - 48, 146, "panel"], [24, 336, w - 48, h - 422, "panel"])
+            c["heading"].Move(40, 194, w - 80, 28)
+            for i, key in ["vocabulary", "grammar", "natural", "reading"]
+                c[key].Move(40 + Mod(i - 1, 2) * (cw + 24), 234 + Floor((i - 1) / 2) * 38, cw, 28)
+            c["guidanceLabel"].Move(40, 356, w - 80, 28)
+            c["additional"].Move(40, 396, w - 80, h - 566)
+            c["hint"].Move(40, h - 158, w - 80, 52)
+            c["view"].Move(24, h - 50, 174, 34)
+            c["restore"].Move(210, h - 50, 154, 34)
+            c["ok"].Move(w - 330, h - 50, 180, 34)
+            c["cancel"].Move(w - 138, h - 50, 114, 34)
+        case "preview":
+            d["panels"].Push([24, 174, w - 48, h - 260, "panel"])
+            c["intro"].Move(40, 194, w - 80, 62)
+            c["editor"].Move(40, 270, w - 80, h - 378)
+            c["restore"].Move(24, h - 50, 206, 34)
+            c["view"].Move(242, h - 50, 170, 34)
+            c["save"].Move(w - 284, h - 50, 146, 34)
+            c["close"].Move(w - 126, h - 50, 102, 34)
+    }
+}
+
+StudyDesktopManagementCreate(s, archived := false) {
+    if s.Get("bigBoxPresentation", false) || !CPDesktopActive()
+        return
+    s["archived"] := archived
+    s["addButton"] := s[archived ? "restoreButton" : "switchButton"]
+    if !StudyDesktopDialogCreate(s, archived ? "libraryArchives" : "libraryManager",
+        archived ? "Archived libraries" : "Manage Study Libraries",
+        archived ? "Restore a library with its explanations, screenshots and backups."
+            : "Keep your saved explanations organized in separate libraries.", 900, 660)
+        return
+    d := s["desktop"]
+    s["title"].Visible := false
+    s["list"].Opt("-Grid -Border -E0x200 +NoSortHdr")
+    SendMessage(0x1036, 0x10000, 0x10000, s["list"].Hwnd) ; LVS_EX_DOUBLEBUFFER
+    s["hint"].Text := archived
+        ? "Archives keep their complete database and media. Restoring makes a library available again; nothing here is deleted automatically."
+        : "Each library has its own database, screenshots, backups and Trash. Default keeps the original Library folder and cannot be renamed or archived."
+    s["closeButton"].Text := archived ? "Back to libraries" : "Back to Library"
+    StudyDesktopDialogFooter(s, s["closeButton"])
+    if !archived {
+        s["newButton"].Text := "New library…"
+        s["switchButton"].Text := "Switch library"
+        s["archivedButton"].Text := "Archived libraries…"
+        StudyDesktopDialogFooter(s, s["archivedButton"])
+        d["paint"][s["newButton"].Hwnd]["surface"] := "window"
+        d["surfaces"][s["newButton"].Hwnd] := "window"
+    }
+    StudyDesktopTheme(d)
+}
+
+StudyDesktopManagementColumns(s) {
+    if !s.Has("desktop")
+        return
+    s["list"].GetPos(,, &w)
+    widths := s.Get("archived", false) ? [0, 184, 88, 114, 110] : [0, 102, 88, 114, 110]
+    widths[1] := Max(180, w - 22 - widths[2] - widths[3] - widths[4] - widths[5])
+    for i, width in widths
+        s["list"].ModifyCol(i, width)
+}
+
+StudyDesktopLayoutManagement(s, w, h) {
+    d := s["desktop"], archived := s["archived"]
+    d["panels"].Push([24, 174, w - 48, h - 260, "panel"])
+    s["hint"].Move(40, 194, w - 80, 48)
+    s["list"].Move(40, 256, w - 80, h - (archived ? 446 : 406))
+    if archived {
+        s["emptyText"].Move(40, h - 178, w - 80, 26)
+        specs := [["restoreButton", 40, 160], ["openButton", 212, 140]]
+    } else {
+        d["chrome"]["title"].Move(24, 90, w - 240, 38)
+        s["newButton"].Move(w - 200, 94, 176, 34)
+        s["archivedButton"].Move(24, h - 50, 190, 34)
+        specs := [["switchButton", 40, 146], ["renameButton", 198, 122], ["archiveButton", 332, 122], ["openButton", 466, 140]]
+    }
+    for spec in specs
+        s[spec[1]].Move(spec[2], h - 130, spec[3], 34)
+    s["closeButton"].Move(w - 208, h - 50, 184, 34)
+    StudyDesktopManagementColumns(s)
+}
+
+StudyDesktopOpenLibraryName(parent, mode, value := "") {
+    s := StudyDesktopLibraryNameCreate(parent, mode, value)
+    StudyDesktopDialogShow(s, 760, 500, s["nameEdit"])
+    SendMessage(0xB1, 0, -1, s["nameEdit"].Hwnd) ; Select the suggested name locally.
+    return s
+}
+
+StudyDesktopLibraryNameCreate(parent, mode, value := "") {
+    root := parent.Get("ownerState", parent)
+    title := mode = "new" ? "New Study Library" : mode = "rename" ? "Rename Study Library" : "Restore Study Library"
+    name := mode = "new" ? "" : mode = "rename" ? value : value["name"]
+    if mode = "restore" && DirExist(StudyLibraryDirectoryForName(name))
+        name .= " Restored"
+    g := Gui("+Owner" parent["gui"].Hwnd " +OwnDialogs", title)
+    g.SetFont("s10", "Segoe UI")
+    s := Map("gui", g, "ownerState", root, "mode", mode)
+    s["label"] := g.AddText("x0 y0 w1 h1", "Library name")
+    s["nameEdit"] := g.AddEdit("x0 y0 w1 h1", name)
+    SendMessage(0x1501, 1, StrPtr("For example: Dragon Quest or PC Engine"), s["nameEdit"].Hwnd)
+    s["hint"] := g.AddText("x0 y0 w1 h1", mode = "new"
+        ? "New explanations will be saved here after creation. Existing explanations stay in their current library."
+        : mode = "rename" ? "All explanations, screenshots, backups and Trash are kept. Only the library name changes."
+        : "The complete archived folder returns to the library list. No existing library will be overwritten.")
+    s["help"] := g.AddText("x0 y0 w1 h1", "Use up to 80 characters. The name Default is reserved.")
+    CPRegisterMutedControl(s["hint"]), CPRegisterMutedControl(s["help"])
+    s["addButton"] := g.AddButton("x0 y0 w1 h1 Default", mode = "new" ? "Create library" : mode = "rename" ? "Rename library" : "Restore library")
+    s["cancel"] := g.AddButton("x0 y0 w1 h1", "Cancel")
+    action := mode = "new" ? StudyLibraryCreateNew.Bind(root, g, s["nameEdit"], parent.Has("ownerState") ? parent : 0)
+        : mode = "rename" ? StudyLibraryManagerRenameApply.Bind(parent, g, s["nameEdit"], value)
+        : StudyLibraryArchiveRestoreApply.Bind(parent, g, s["nameEdit"], value)
+    s["addButton"].OnEvent("Click", action)
+    s["cancel"].OnEvent("Click", StudyLibraryCloseDialog.Bind(g))
+    g.OnEvent("Escape", StudyLibraryCloseDialog.Bind(g))
+    g.OnEvent("Close", StudyLibraryCloseDialog.Bind(g))
+    StudyDesktopDialogCreate(s, "libraryName", title,
+        mode = "new" ? "Create a separate home for your saved explanations."
+            : mode = "rename" ? "Choose a new name for this library." : "Make an archived library available again.", 680, 500)
+    for ctrl in [s["addButton"], s["cancel"]]
+        StudyDesktopDialogFooter(s, ctrl)
+    return s
+}
+
+StudyDesktopLayoutLibraryName(s, w, h) {
+    s["desktop"]["panels"].Push([24, 174, w - 48, h - 260, "panel"])
+    s["label"].Move(40, 194, w - 80, 24)
+    s["nameEdit"].Move(40, 226, w - 80, 34)
+    s["hint"].Move(40, 282, w - 80, 50)
+    s["help"].Move(40, 358, w - 80, 34)
+    s["addButton"].Move(w - 338, h - 50, 180, 34)
+    s["cancel"].Move(w - 146, h - 50, 122, 34)
+}
+
+StudyDesktopStorageCreate(s) {
+    if s.Get("bigBoxPresentation", false) || !CPDesktopActive()
+        return 0
+    s["path"].Visible := false
+    s["path"] := s["gui"].AddEdit("x0 y0 w1 h1 ReadOnly Multi -HScroll -VScroll", s["path"].Value)
+    StudyDesktopDialogCreate(s, "storage", "Library storage", "See where this library uses space and open its storage folder.", 760, 770)
+    for key, ctrl in s["labels"]
+        CPRegisterMutedControl(ctrl)
+    for key, ctrl in s["values"] {
+        if key != "notice" {
+            ctrl.Opt("-Right")
+            ctrl.SetFont(key = "total" ? "s13 Bold" : "s11")
+        }
+    }
+    for key in ["openButton", "refreshButton", "closeButton"]
+        StudyDesktopDialogFooter(s, s[key])
+    d := s["desktop"]
+    d["surfaces"][s["values"]["notice"].Hwnd] := "window"
+    StudyDesktopTheme(d)
+    return s
+}
+
+StudyDesktopLayoutStorage(s, w, h) {
+    d := s["desktop"], cw := Floor((w - 104) / 2)
+    d["panels"].Push([24, 174, w - 48, 126, "panel"], [24, 316, w - 48, h - 492, "panel"])
+    s["heading"].Move(40, 192, w - 80, 26)
+    s["path"].Move(40, 232, w - 80, 52)
+    for i, key in ["entries", "database", "media", "backups", "trash", "other", "total", "free"] {
+        x := 40 + Mod(i - 1, 2) * (cw + 24), y := 334 + Floor((i - 1) / 2) * 58
+        s["labels"][key].Move(x, y, cw, 22)
+        s["values"][key].Move(x, y + 24, cw, 28)
+    }
+    s["values"]["notice"].Move(24, h - 156, w - 48, 64)
+    s["openButton"].Move(24, h - 50, 200, 34)
+    s["refreshButton"].Move(w - 284, h - 50, 126, 34)
+    s["closeButton"].Move(w - 146, h - 50, 122, 34)
+}
+
+StudyDesktopMetadataCreate(s, kind, controls) {
+    if s.Get("bigBoxPresentation", false) || !CPDesktopActive()
+        return 0
+    specs := Map(
+        "chapter", ["Current chapter", "Choose the chapter assigned automatically to new explanations.", 760, 600],
+        "columns", ["Library columns", "Choose the information shown in your Study Library.", 620, 630],
+        "filters", ["Library filters", "Narrow saved explanations by metadata, Anki status, or date.", 780, 720],
+        "details", ["Edit explanation details", "Update searchable information for the selected explanation.", 720, 600])
+    spec := specs[kind]
+    s["addButton"] := controls["save"], s["desktopControls"] := controls
+    StudyDesktopDialogCreate(s, kind, spec[1], spec[2], spec[3], spec[4])
+    for ctrl in [controls["save"], controls["cancel"]]
+        StudyDesktopDialogFooter(s, ctrl)
+    if kind = "filters" {
+        StudyDesktopDialogFooter(s, controls["clear"])
+        controls["hint"].Text := "Filters also use the search field. Choose From or To to set a custom range; apply when ready."
+    } else if kind = "chapter" {
+        controls["hint"].Text := "Type a new chapter or choose a saved one. Only new explanations in this Library and Profile receive it; existing explanations and versions stay unchanged."
+        CPRegisterMutedControl(controls["library"])
+        CPRegisterMutedControl(controls["profile"])
+    } else if kind = "columns" {
+        controls["heading"].Text := "Visible columns"
+        controls["heading"].SetFont("s12 Bold")
+    } else if kind = "details" {
+        controls["hint"].Text := "Separate tags with commas. Chapter, speaker and tags are included in Library searches."
+    }
+    StudyDesktopTheme(s["desktop"])
+    return s
+}
+
+StudyDesktopLayoutMetadata(s, w, h) {
+    d := s["desktop"], c := s["desktopControls"], kind := d["kind"], cw := w - 80
+    d["panels"].Push([24, 174, w - 48, h - 260, "panel"])
+    c["save"].Move(w - 326, h - 50, 168, 34)
+    c["cancel"].Move(w - 146, h - 50, 122, 34)
+    switch kind {
+        case "chapter":
+            c["library"].Move(40, 194, cw, 26)
+            c["profile"].Move(40, 226, cw, 26)
+            c["chapterLabel"].Move(40, 270, cw, 24)
+            c["chapter"].Move(40, 302, cw, 32)
+            c["hint"].Move(40, 354, cw, 62)
+            for i, key in ["clear", "remove", "history"]
+                c[key].Move(40 + (i - 1) * 172, h - 138, 160, 34)
+        case "columns":
+            c["heading"].Move(40, 194, cw, 28)
+            colW := Floor((cw - 24) / 2), rows := Ceil(c["checks"].Length / 2)
+            for i, check in c["checks"]
+                check.Move(40 + Floor((i - 1) / rows) * (colW + 24), 238 + Mod(i - 1, rows) * 44, colW, 28)
+            c["hint"].Move(40, h - 154, cw, 52)
+        case "details":
+            colW := Floor((cw - 24) / 2)
+            for i, key in ["chapter", "speaker"] {
+                x := 40 + (i - 1) * (colW + 24)
+                c[key "Label"].Move(x, 194, colW, 24)
+                c[key].Move(x, 226, colW, 34)
+            }
+            c["tagsLabel"].Move(40, 282, cw, 24)
+            c["tags"].Move(40, 314, cw, 34)
+            c["hint"].Move(40, 368, cw, 48)
+            c["anki"].Move(40, 446, cw, 28)
+        case "filters":
+            d["panels"].Pop()
+            d["panels"].Push([24, 174, w - 48, 276, "panel"], [24, 466, w - 48, h - 552, "panel"])
+            colW := Floor((cw - 24) / 2)
+            for i, key in ["profile", "chapter", "speaker", "tag", "anki", "date"] {
+                x := 40 + Mod(i - 1, 2) * (colW + 24), y := 194 + Floor((i - 1) / 2) * 84
+                c[key "Label"].Move(x, y, colW, 24)
+                c[key].Move(x, y + 32, colW, 32)
+            }
+            for i, key in ["from", "to"] {
+                x := 40 + (i - 1) * (colW + 24)
+                c[key "Label"].Move(x, 484, colW, 24)
+                c[key].Move(x, 516, colW, 34)
+            }
+            c["hint"].Move(40, 568, cw, 48)
+            c["clear"].Move(24, h - 50, 126, 34)
+    }
+}
+
+StudyDesktopOpenDatePicker(form, dateDdl, target, returnButton, rangeName, *) {
+    s := StudyDesktopDatePickerCreate(form, dateDdl, target, returnButton, rangeName)
+    s["owner"].Opt("+Disabled")
+    try StudyDesktopDialogShow(s, 760, 550, s["wheels"][1]["value"])
+    catch as pickerError {
+        StudyLibraryDatePickerClose(s, false)
+        throw pickerError
+    }
+    return s
+}
+
+StudyDesktopDatePickerCreate(form, dateDdl, target, returnButton, rangeName) {
+    owner := form["gui"], g := Gui("+Owner" owner.Hwnd " +OwnDialogs", "Study Library - " rangeName " date and time")
+    g.SetFont("s10", "Segoe UI")
+    s := Map("gui", g, "owner", owner, "hwnd", g.Hwnd, "dateDdl", dateDdl,
+        "target", target, "returnButton", returnButton, "stamp", SubStr(target.Value, 1, 12) "00",
+        "closed", false, "wheels", [], "controls", Map(), "labels", [])
+    c := s["controls"]
+    c["preview"] := g.AddText("x0 y0 w1 h1 Center +0x80")
+    c["preview"].SetFont("s12 Bold")
+    c["help"] := g.AddText("x0 y0 w1 h1 Center", "Use the arrows to adjust each part. Left / Right chooses a number; Up / Down changes it.")
+    CPRegisterMutedControl(c["help"])
+    for part, name in ["Year", "Month", "Day", "Hour", "Minute"] {
+        s["labels"].Push(g.AddText("x0 y0 w1 h1 Center", name))
+        wheel := Map()
+        for key in ["up", "value", "down"]
+            wheel[key] := g.AddButton("x0 y0 w1 h1")
+        wheel["value"].SetFont("s16 Bold")
+        wheel["up"].OnEvent("Click", StudyLibraryDatePickerAdjust.Bind(s, part, 1))
+        wheel["down"].OnEvent("Click", StudyLibraryDatePickerAdjust.Bind(s, part, -1))
+        s["wheels"].Push(wheel)
+    }
+    c["save"] := g.AddButton("x0 y0 w1 h1 Default", "Use date/time")
+    c["cancel"] := g.AddButton("x0 y0 w1 h1", "Cancel")
+    s["addButton"] := c["save"]
+    StudyDesktopDialogCreate(s, "datePicker", rangeName " date and time",
+        "Set the " (rangeName = "From" ? "start" : "end") " of the custom date range.", 720, 550)
+    for ctrl in [c["save"], c["cancel"]]
+        StudyDesktopDialogFooter(s, ctrl)
+    c["save"].OnEvent("Click", StudyLibraryDatePickerClose.Bind(s, true))
+    c["cancel"].OnEvent("Click", StudyLibraryDatePickerClose.Bind(s, false))
+    g.OnEvent("Escape", StudyLibraryDatePickerClose.Bind(s, false))
+    g.OnEvent("Close", StudyLibraryDatePickerClose.Bind(s, false))
+    StudyLibraryDatePickerRefresh(s)
+    StudyLibraryDatePickerRegistry()[g.Hwnd] := s
+    OnMessage(0x0100, StudyLibraryDatePickerKeyDown)
+    OnMessage(0x0082, StudyLibraryDatePickerDestroyed)
+    return s
+}
+
+StudyDesktopLayoutDatePicker(s, w, h) {
+    d := s["desktop"], c := s["controls"], cw := w - 80, partW := Floor((cw - 64) / 5)
+    d["panels"].Push([24, 174, w - 48, h - 260, "panel"])
+    c["preview"].Move(40, 194, cw, 28)
+    c["help"].Move(40, h - 130, cw, 38)
+    for i, wheel in s["wheels"] {
+        x := 40 + (i - 1) * (partW + 16)
+        s["labels"][i].Move(x, 242, partW, 24)
+        wheel["up"].Move(x, 278, partW, 32)
+        wheel["value"].Move(x, 318, partW, 46)
+        wheel["down"].Move(x, 372, partW, 32)
+    }
+    c["save"].Move(w - 326, h - 50, 168, 34)
+    c["cancel"].Move(w - 146, h - 50, 122, 34)
+}
+
+StudyDesktopAnkiCreate(s, controls) {
+    if !StudyDesktopDialogCreate(s, "anki", s["cardKind"] = "vocabulary" ? "Review vocabulary card" : "Review explanation card",
+        "Review the card and destination. Nothing is sent until you confirm.")
+        return
+    s["desktopControls"] := controls
+    controls["heading"].Visible := false
+    controls["hint"].Visible := false
+    controls["imageFrame"].Visible := false
+    controls["imageHint"].Text := s["screenshotPath"] != ""
+        ? "Compact JPEG on the card back. Your original stays unchanged." : "No screenshot is saved for this version."
+    s["includeScreenshot"].Text := "Include screenshot"
+    controls["mapping"].SetFont("s10")
+    for key in ["front", "back"]
+        s[key].SetFont("s11")
+    for ctrl in [s["addButton"], controls["cancel"], s["status"]]
+        StudyDesktopDialogFooter(s, ctrl)
+    StudyDesktopTheme(s["desktop"])
+}
+
+StudyDesktopLayoutAnki(s, w, h) {
+    d := s["desktop"], c := s["desktopControls"], rightW := 300, leftW := w - rightW - 64, rightX := 40 + leftW
+    bottom := h - 86
+    d["panels"].Push([24, 174, leftW, bottom - 174, "panel"], [rightX, 174, rightW, bottom - 174, "panel"])
+    x := 40, cw := leftW - 32
+    c["frontLabel"].Move(x, 194, cw, 24)
+    s["front"].Move(x, 226, cw, 86)
+    c["backLabel"].Move(x, 326, cw - 210, 30)
+    if IsObject(s["exampleButton"])
+        s["exampleButton"].Move(x + cw - 204, 320, 204, 34)
+    s["back"].Move(x, 366, cw, Max(80, bottom - 382))
+    x := rightX + 16, cw := rightW - 32
+    c["deckLabel"].Move(x, 194, cw, 24)
+    s["deckDdl"].Move(x, 226, cw, 32)
+    c["mapping"].Move(x, 276, cw, 66)
+    c["imageLabel"].Move(x, 354, cw, 24)
+    imageY := 390, imageH := Max(42, bottom - imageY - 112)
+    StudyDesktopAnkiImage(s, x, imageY, cw, imageH)
+    s["includeScreenshot"].Move(x, bottom - 96, cw, 28)
+    c["imageHint"].Move(x, bottom - 58, cw, 44)
+    s["status"].Move(24, h - 52, Max(250, w - 386), 42)
+    s["addButton"].Move(w - 338, h - 50, 180, 34)
+    c["cancel"].Move(w - 146, h - 50, 122, 34)
+}
+
+StudyDesktopAnkiImage(s, x, y, w, h) {
+    image := s["desktopControls"]["image"], path := s["screenshotPath"]
+    if path = "" || !FileExist(path) {
+        image.Visible := false
+        return
+    }
+    if !s.Has("desktopImageDimensions") {
+        StudyLibraryImageDimensions(path, &nw, &nh)
+        s["desktopImageDimensions"] := [nw, nh]
+    }
+    dims := s["desktopImageDimensions"]
+    if dims[1] <= 0 || dims[2] <= 0
+        return
+    ratio := Min(w / dims[1], h / dims[2]), iw := Max(1, Round(dims[1] * ratio)), ih := Max(1, Round(dims[2] * ratio))
+    scale := GetWindowDPI(s["gui"].Hwnd) / 96, size := iw "|" ih "|" scale
+    if s.Get("desktopImageSize", "") != size {
+        try image.Value := "*w" Round(iw * scale) " *h" Round(ih * scale) " " path
+        catch {
+            image.Visible := false
+            return
+        }
+        s["desktopImageSize"] := size
+    }
+    image.Move(x + Floor((w - iw) / 2), y + Floor((h - ih) / 2), iw, ih)
+    image.Visible := true
+}
+
+StudyDesktopCandidatesCreate(s) {
+    if !StudyDesktopDialogCreate(s, "candidates", "Review for Anki",
+        "Review saved sentences and vocabulary before adding them to Anki.", 960, 760)
+        return
+    g := s["gui"], d := s["desktop"]
+    s["tabs"].Visible := false
+    s["tabs"].Opt("-TabStop")
+    s["desktopTabs"] := []
+    for i, tabLabel in ["Sentences", "Vocabulary"] {
+        ctrl := g.AddButton("x0 y0 w150 h34", tabLabel)
+        ctrl.OnEvent("Click", StudyDesktopCandidatesChoose.Bind(s, i))
+        s["desktopTabs"].Push(ctrl)
+        d["paint"][ctrl.Hwnd] := Map("ctrl", ctrl, "kind", "segment", "surface", "panel", "selected", i = 1)
+        d["surfaces"][ctrl.Hwnd] := "panel"
+    }
+    for ctrl in [s["sentenceList"], s["vocabularyList"]] {
+        ctrl.Opt("-Grid -Border -E0x200")
+        SendMessage(0x1036, 0x10000, 0x10000, ctrl.Hwnd)
+    }
+    s["aiFilterLabel"].Text := "AI assessment"
+    s["scopeLabel"].Text := "Show entries"
+    s["closeButton"].Text := "Back to Library"
+    s["desktopAiSummary"] := s["aiStatus"]
+    s["desktopAiSummary"].Opt("+0x80") ; SS_NOPREFIX for assessment text.
+    s["aiStatus"].Visible := false
+    s["aiStatus"] := g.AddEdit("x0 y0 w1 h1 ReadOnly Multi VScroll -Border -E0x200")
+    d["surfaces"][s["aiStatus"].Hwnd] := "panel"
+    CPRegisterMutedControl(s["aiStatus"])
+    for ctrl in [s["status"], s["closeButton"]]
+        StudyDesktopDialogFooter(s, ctrl)
+    StudyDesktopCandidatesTabs(s)
+    StudyDesktopTheme(d)
+}
+
+StudyDesktopCandidatesChoose(s, index, *) {
+    s["tabs"].Choose(index)
+    StudyCandidatesTabChanged(s)
+}
+
+StudyDesktopCandidatesTabs(s) {
+    if !s.Has("desktopTabs")
+        return
+    index := s["tabs"].Value
+    s["sentenceList"].Visible := index != 2
+    s["vocabularyList"].Visible := index = 2
+    for i, ctrl in s["desktopTabs"] {
+        s["desktop"]["paint"][ctrl.Hwnd]["selected"] := i = index
+        ctrl.Redraw()
+    }
+    if s["desktop"]["width"] > 0
+        StudyDesktopCandidatesSummary(s, s["desktop"]["width"], s["desktop"]["height"])
+}
+
+StudyDesktopCandidatesSummary(s, w, h) {
+    summary := s["desktopAiSummary"], detail := s["aiStatus"]
+    summary.Text := detail.Value
+    scale := GetWindowDPI(s["gui"].Hwnd) / 96
+    scroll := CPMeasureWrappedTextHeight(summary, (w - 80) * scale) / scale > 44
+    summary.Move(40, h - 178, w - 80, 44)
+    detail.Move(40, h - 178, w - 80, 44)
+    summary.Visible := !scroll, detail.Visible := scroll
+}
+
+StudyDesktopLayoutCandidates(s, w, h) {
+    d := s["desktop"], fieldW := Floor((w - 234) / 2)
+    d["panels"].Push([24, 174, w - 48, 94, "panel"], [24, 284, w - 48, h - 366, "panel"])
+    s["scopeLabel"].Move(40, 188, fieldW, 24)
+    s["scopeDdl"].Move(40, 222, fieldW, 32)
+    s["aiFilterLabel"].Move(56 + fieldW, 188, fieldW, 24)
+    s["aiFilterDdl"].Move(56 + fieldW, 222, fieldW, 32)
+    s["refreshButton"].Move(w - 148, 220, 108, 34)
+    d["chrome"]["title"].Move(24, 90, w - 330, 38)
+    s["recommendButton"].Move(w - 300, 94, 276, 34)
+    d["paint"][s["recommendButton"].Hwnd]["surface"] := "window"
+    for i, ctrl in s["desktopTabs"]
+        ctrl.Move(40 + (i - 1) * 164, 300, 154, 34)
+    s["progressText"].Move(386, 300, w - 426, 26)
+    s["progressBar"].Move(386, 330, w - 426, 4)
+    for list in [s["sentenceList"], s["vocabularyList"]]
+        list.Move(40, 350, w - 80, Max(170, h - 538))
+    StudyDesktopCandidatesSummary(s, w, h)
+    for spec in [["addButton", 40, 152], ["openButton", 204, 148], ["finishButton", 364, 142], ["triageButton", 518, 184]]
+        s[spec[1]].Move(spec[2], h - 120, spec[3], 34)
+    s["status"].Move(24, h - 50, w - 244, 40)
+    s["closeButton"].Move(w - 194, h - 50, 170, 34)
+}
+
+StudyDesktopMessageCreate(owner, message, title, buttons, subtitle, yesLabel, noLabel) {
+    g := Gui("+Owner" owner " +OwnDialogs +AlwaysOnTop", title)
+    g.SetFont("s11", "Segoe UI")
+    s := Map("gui", g, "closed", false, "result", buttons = "yesno" ? "No" : "OK")
+    s["body"] := g.AddText("x0 y0 w600 h200 +0x80", message)
+    s["body"].SetFont("s12")
+    s["overflow"] := g.AddEdit("x0 y0 w600 h200 Hidden ReadOnly Multi VScroll -Border -E0x200", message)
+    s["overflow"].SetFont("s12")
+    s["cancel"] := g.AddButton("x0 y0 w170 h34 Default", buttons = "yesno" ? noLabel : "OK")
+    s["cancel"].OnEvent("Click", CPThemedDialogFinish.Bind(s, g, s["result"]))
+    if buttons = "yesno" {
+        s["addButton"] := g.AddButton("x0 y0 w170 h34", yesLabel)
+        s["addButton"].OnEvent("Click", CPThemedDialogFinish.Bind(s, g, "Yes"))
+    }
+    g.OnEvent("Escape", CPThemedDialogFinish.Bind(s, g, s["result"]))
+    g.OnEvent("Close", CPThemedDialogFinish.Bind(s, g, s["result"]))
+    StudyDesktopDialogCreate(s, "message", title, subtitle, 640, 400)
+    for ctrl in [s["cancel"], s.Get("addButton", s["cancel"])]
+        StudyDesktopDialogFooter(s, ctrl)
+    StudyDesktopTheme(s["desktop"])
+    return s
+}
+
+StudyDesktopLayoutMessage(s, w, h) {
+    s["desktop"]["panels"].Push([24, 176, w - 48, h - 258, "panel"])
+    scale := GetWindowDPI(s["gui"].Hwnd) / 96
+    available := h - 294, textH := Ceil(CPMeasureWrappedTextHeight(s["body"], (w - 88) * scale) / scale) + 8
+    scroll := textH > available
+    s["body"].Move(44, 194 + Max(0, Floor((available - textH) / 2)), w - 88, Min(textH, available))
+    s["overflow"].Move(44, 194, w - 88, available)
+    s["body"].Visible := !scroll, s["overflow"].Visible := scroll
+    s["cancel"].Move(w - 204, h - 50, 180, 34)
+    if s.Has("addButton")
+        s["addButton"].Move(w - 396, h - 50, 180, 34)
+}
+
+StudyDesktopMessage(owner, message, title, buttons := "ok", subtitle := "Study Library", yesLabel := "Yes", noLabel := "Cancel") {
+    defaultResult := buttons = "yesno" ? "No" : "OK"
+    if !DllCall("user32\IsWindow", "ptr", owner)
+        return defaultResult
+    priorEnabled := DllCall("user32\IsWindowEnabled", "ptr", owner)
+    priorFocus := StudyControllerFocusedHwnd(owner)
+    s := StudyDesktopMessageCreate(owner, message, title, buttons, subtitle, yesLabel, noLabel)
+    try {
+        DllCall("user32\EnableWindow", "ptr", owner, "int", 0)
+        StudyDesktopDialogShow(s, 760, 520, s["cancel"])
+        while !s["closed"] && DllCall("user32\IsWindow", "ptr", owner)
+            Sleep(25)
+    } finally {
+        try s["gui"].Destroy()
+        if DllCall("user32\IsWindow", "ptr", owner) {
+            DllCall("user32\EnableWindow", "ptr", owner, "int", priorEnabled)
+            if priorEnabled {
+                try WinActivate("ahk_id " owner)
+                if priorFocus
+                    try StudyControllerSetFocus(owner, priorFocus)
+            }
+        }
+    }
+    return s["result"]
+}
+
+StudyDesktopShutdown(*) {
+    ; Stop painting before the shared logo/brush renderer is disposed.
+    for message in [0x2B, 0x133, 0x135, 0x138, 0x14, 0x84, 0x82]
+        OnMessage(message, StudyDesktopWindowMessage, 0)
+    for hwnd, d in StudyDesktopRegistry()
+        StudyDesktopDisposeFonts(d)
+    StudyDesktopRegistry().Clear()
+    OnMessage(0x84, StudyDesktopLabelHitTest, 0)
+    OnMessage(0x200, StudyDesktopCaptionMouse, 0)
+    OnMessage(0x2A3, StudyDesktopCaptionMouse, 0)
+}
+
+StudyDesktopLabelHitTest(wParam, lParam, msg, hwnd) {
+    d := StudyDesktopContext(hwnd)
+    if IsObject(d) && (hwnd = d["chrome"]["brand"].Hwnd || (d["kind"] = "reader" && hwnd = d["chrome"]["library"].Hwnd))
+        return -1 ; Header labels do not intercept native dragging.
+}
+
+StudyDesktopCaptionMouse(wParam, lParam, msg, hwnd) {
+    d := StudyDesktopContext(hwnd)
+    if !IsObject(d) || !d["paint"].Has(hwnd) || d["paint"][hwnd]["kind"] != "caption"
+        return
+    next := msg = 0x2A3 ? 0 : hwnd, previous := d["hover"]
+    if next = previous
+        return
+    d["hover"] := next
+    if previous
+        try GuiCtrlFromHwnd(previous).Redraw()
+    if next {
+        GuiCtrlFromHwnd(next).Redraw()
+        track := Buffer(A_PtrSize = 8 ? 24 : 16, 0)
+        NumPut("uint", track.Size, "uint", 2, "ptr", hwnd, track)
+        DllCall("user32\TrackMouseEvent", "ptr", track)
+    }
+}
+
+StudyDesktopWindowAction(state, action, *) {
+    dlg := state["gui"]
+    if action = "minimize"
+        dlg.Minimize()
+    else if action = "maximize" {
+        if DllCall("user32\IsZoomed", "ptr", dlg.Hwnd)
+            dlg.Restore()
+        else
+            dlg.Maximize()
+    } else
+        PostMessage(0x10, 0, 0, dlg.Hwnd) ; Preserve unsaved-edit and close handlers.
+}
+
+StudyDesktopWindowMessage(wParam, lParam, msg, hwnd) {
+    windows := StudyDesktopRegistry(), d := windows.Get(hwnd, 0)
+    if IsObject(d) {
+        if msg = 0x2B && lParam && CPDesktopDrawItem(lParam, d)
+            return true
+        if (msg = 0x133 || msg = 0x134 || msg = 0x135 || msg = 0x138) && d["surfaces"].Has(lParam) {
+            colors := CPDesktopPalette(), hex := colors[d["surfaces"][lParam]]
+            DllCall("gdi32\SetBkMode", "ptr", wParam, "int", 2)
+            DllCall("gdi32\SetBkColor", "ptr", wParam, "uint", CPColorRef(hex))
+            DllCall("gdi32\SetTextColor", "ptr", wParam, "uint", CPColorRef(colors[CPIsMutedControl(lParam) ? "muted" : "text"]))
+            return CPDesktopBrush(hex)
+        }
+        if msg = 0x14 && wParam {
+            colors := CPDesktopPalette(), scale := GetWindowDPI(hwnd) / 96, rect := Buffer(16)
+            DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", rect)
+            DllCall("user32\FillRect", "ptr", wParam, "ptr", rect, "ptr", CPDesktopBrush(colors["window"]))
+            for panel in d["panels"]
+                StudyDesktopPaintRect(wParam, panel, colors[panel[5]], scale)
+            CPDesktopPaintLogo(wParam, scale)
+            return 1
+        }
+        if msg = 0x84 {
+            hit := DllCall("user32\DefWindowProcW", "ptr", hwnd, "uint", msg, "uptr", wParam, "ptr", lParam, "ptr")
+            if hit != 1
+                return hit
+            point := Buffer(8)
+            NumPut("int", (lParam << 48) >> 48, "int", (lParam << 32) >> 48, point)
+            DllCall("user32\ScreenToClient", "ptr", hwnd, "ptr", point)
+            if NumGet(point, 4, "int") < Round(72 * GetWindowDPI(hwnd) / 96) {
+                child := DllCall("user32\ChildWindowFromPointEx", "ptr", hwnd, "int64", NumGet(point, 0, "int64"), "uint", 7, "ptr")
+                return child = hwnd || child = d["chrome"]["brand"].Hwnd || (d["kind"] = "reader" && child = d["chrome"]["library"].Hwnd) ? 2 : 1
+            }
+        }
+    }
+    if msg = 0x82 && windows.Has(hwnd) {
+        ; Children have already finished destruction. No native parent
+        ; subclass/original-procedure references depend on this registry.
+        windows.Delete(hwnd)
+        StudyDesktopDisposeFonts(d)
+        d["state"].Delete("desktop")
+    }
+    ; Leave all unhandled messages to AHK/Windows, without a nested native call.
+}
+
+StudyDesktopDisposeFonts(d) {
+    for height, font in d["iconFonts"]
+        DllCall("gdi32\DeleteObject", "ptr", font)
+    d["iconFonts"].Clear()
+}
+
+StudyDesktopPaintRect(dc, panel, hex, scale) {
+    oldBrush := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", CPDesktopBrush(hex), "ptr")
+    oldPen := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", DllCall("gdi32\GetStockObject", "int", 8, "ptr"), "ptr")
+    radius := panel[5] = "bar" ? 0 : Round(12 * scale)
+    DllCall("gdi32\RoundRect", "ptr", dc, "int", Round(panel[1] * scale), "int", Round(panel[2] * scale),
+        "int", Round((panel[1] + panel[3]) * scale), "int", Round((panel[2] + panel[4]) * scale), "int", radius, "int", radius)
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldBrush)
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldPen)
+}
+
+StudyDesktopResize(state, width, height) {
+    d := state["desktop"], c := d["chrome"], dlg := state["gui"], hwnd := dlg.Hwnd
+    visible := DllCall("user32\IsWindowVisible", "ptr", hwnd)
+    ; A single buffered layout, no delayed re-positioning of header/footer.
+    previousCritical := A_IsCritical
+    Critical "On"
+    if visible
+        SendMessage(0xB, 0, 0, hwnd)
+    try {
+        d["width"] := width, d["height"] := height
+        c["title"].Move(24, 90, d["kind"] = "library" ? 320 : width - 400, 38)
+        c["subtitle"].Move(24, 130, width - 48, 24)
+        for i, action in ["minimize", "maximize", "close"]
+            c[action].Move(width - 132 + (i - 1) * 40, 18, 36, 36)
+        c["back"].Move(width - 184, height - 48, 160, 34)
+        d["panels"] := [[0, 0, width, 72, "bar"], [0, height - 62, width, 62, "bar"]]
+        if d["kind"] = "library"
+            StudyDesktopLayoutLibrary(state, width, height)
+        else
+            StudyDesktopLayoutReader(state, width, height)
+        ; Native fields scroll within their own HWND instead of moving under
+        ; chrome. Give the borderless reading text comfortable inner padding.
+        for key in ["source", "explanation", "metadata"] {
+            ctrl := state[key], rect := Buffer(16)
+            DllCall("user32\GetClientRect", "ptr", ctrl.Hwnd, "ptr", rect)
+            inset := key = "explanation" && d["kind"] = "reader" ? 8 : 2
+            NumPut("int", inset, "int", inset, rect)
+            NumPut("int", Max(1, NumGet(rect, 8, "int") - inset), rect, 8)
+            SendMessage(0xB3, 0, rect.Ptr, ctrl.Hwnd) ; EM_SETRECTNP
+        }
+    } finally {
+        if visible {
+            SendMessage(0xB, 1, 0, hwnd)
+            DllCall("user32\RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0, "uint", 0x185)
+        }
+        Critical previousCritical
+    }
+    if visible
+        StudyLibraryQueueImageLayout(state, 40)
+    else
+        StudyLibraryShowImage(state)
+}
+
+StudyDesktopLayoutLibrary(s, w, h) {
+    d := s["desktop"], c := d["chrome"], rightW := Max(310, Min(390, Round(w * .30)))
+    leftW := w - 64 - rightW, rightX := 40 + leftW, bottom := h - 78
+    s["layoutWidth"] := w
+    s["libraryLabel"].Move(w - 510, 25, 48, 24)
+    s["libraryDdl"].Move(w - 456, 20, 198, 32)
+    s["newLibraryButton"].Move(w - 250, 18, 104, 36)
+    s["currentChapterButton"].Move(w - 194, 90, 170, 36)
+    s["currentChapterStatus"].Move(w - 484, 96, 280, 24)
+    d["panels"].Push([24, 164, w - 48, 68, "panel"], [24, 248, leftW, bottom - 248, "panel"], [rightX, 248, rightW, bottom - 248, "panel"])
+    searchW := w - 48 - 32 - 380
+    d["panels"].Push([40, 180, searchW, 36, "field"])
+    s["search"].Move(50, 187, searchW - 20, 24)
+    for i, key in ["searchButton", "filterButton", "columnsButton", "refreshButton"]
+        s[key].Move(40 + searchW + 12 + (i - 1) * 92, 180, 84, 36)
+    c["listTitle"].Move(40, 264, leftW - 32, 26)
+    s["list"].Move(40, 302, leftW - 32, bottom - 362)
+    s["studyButton"].Move(40, bottom - 48, 156, 34)
+    s["editDetailsButton"].Move(206, bottom - 48, 116, 34)
+    s["ankiButton"].Move(332, bottom - 48, 84, 34)
+    x := rightX + 16, cw := rightW - 32
+    s["detailTitle"].Move(x, 264, cw - 88, 26)
+    s["removeVersionButton"].Move(x + cw - 84, 260, 84, 30)
+    s["versionLabel"].Move(x, 298, 52, 30)
+    s["previousVersion"].Move(x + 52, 298, 28, 30)
+    s["versionView"].Move(x + 86, 298, cw - 120, 30)
+    s["nextVersion"].Move(x + cw - 28, 298, 28, 30)
+    s["metadata"].Move(x, 340, cw, 52)
+    s["imageLabel"].Move(x, 402, cw, 20)
+    imageY := 430, imageH := Max(60, bottom - imageY - 142)
+    StudyDesktopLayoutImage(s, x, imageY, cw, imageH)
+    s["status"].Move(24, h - 42, Max(100, w - 520), 24)
+    s["exportButton"].Move(w - 494, h - 48, 118, 34)
+    s["storageButton"].Move(w - 364, h - 48, 168, 34)
+}
+
+StudyDesktopLayoutReader(s, w, h) {
+    d := s["desktop"], c := d["chrome"], rightW := Max(310, Min(390, Round(w * .30)))
+    leftW := w - 64 - rightW, rightX := 40 + leftW, bottom := h - 78
+    c["library"].Move(w - 440, 22, 284, 28)
+    d["panels"].Push([24, 166, leftW, bottom - 166, "panel"], [rightX, 166, rightW, bottom - 166, "panel"])
+    x := 40, cw := leftW - 32
+    s["detailTitle"].Visible := false
+    s["versionLabel"].Move(x, 182, 52, 32)
+    s["previousVersion"].Move(x + 52, 182, 30, 32)
+    s["versionView"].Move(x + 90, 182, cw - 254, 32)
+    s["nextVersion"].Move(x + cw - 158, 182, 30, 32)
+    s["newVersionButton"].Move(x + cw - 120, 182, 120, 32)
+    s["fullSectionButton"].Move(x, 226, 136, 32)
+    s["previousSection"].Move(x + 146, 226, 30, 32)
+    s["sectionStatus"].Move(x + 182, 226, cw - 218, 32)
+    s["nextSection"].Move(x + cw - 30, 226, 30, 32)
+    s["explanationLabel"].Move(x, 274, Max(90, cw - 334), 24)
+    s["addAnkiButton"].Move(x + cw - 324, 268, 132, 34)
+    s["copyButton"].Move(x + cw - 182, 268, 86, 34)
+    s["editExplanationButton"].Move(x + cw - 86, 268, 86, 34)
+    s["saveEditButton"].Move(x + cw - 182, 268, 86, 34)
+    s["cancelEditButton"].Move(x + cw - 86, 268, 86, 34)
+    if s.Get("editing", false)
+        s["explanationLabel"].Move(x, 274, cw - 196, 24)
+    s["explanation"].Move(x, 314, cw, bottom - 330)
+    x := rightX + 16, cw := rightW - 32
+    s["contextTitle"].Move(x, 182, cw, 26)
+    s["metadata"].Move(x, 220, cw, 70)
+    s["imageLabel"].Move(x, 302, cw, 20)
+    imageY := 330, imageH := Max(80, bottom - imageY - 142)
+    StudyDesktopLayoutImage(s, x, imageY, cw, imageH)
+    s["previousEntry"].Move(24, h - 48, 32, 34)
+    s["entryStatus"].Move(64, h - 48, 110, 34)
+    s["nextEntry"].Move(182, h - 48, 32, 34)
+    s["ankiCheck"].Move(238, h - 44, Max(280, w - 450), 28)
+}
+
+StudyDesktopLayoutImage(s, x, y, w, h) {
+    s["imageFrame"].Move(x, y, w, h)
+    s["imageArea"] := Map("x", x + 2, "y", y + 2, "w", w - 4, "h", h - 4)
+    navY := y + h + 8
+    s["previousImage"].Move(x, navY, 28, 30)
+    s["imageInfo"].Move(x + 32, navY, w - 194, 30)
+    s["imageInfo"].Opt("+0x201")
+    s["nextImage"].Move(x + w - 158, navY, 28, 30)
+    s["openImage"].Move(x + w - 122, navY, 122, 30)
+    s["sourceLabel"].Move(x, navY + 40, w, 20)
+    s["source"].Move(x, navY + 64, w, 56)
+}
+
+StudyLibraryAddVersionDisplay(slGui, slOptions) {
+    global controlDarkMode
+    slColors := CPPalette(controlDarkMode)
+    ; Informational, not an editor: no caret, selection, or navigation stop.
+    ; SS_CENTERIMAGE vertically centers one line; SS_ENDELLIPSIS prevents wrap.
+    return slGui.Add("Text", slOptions " Border -TabStop +0x4280 Background"
+        . slColors["surface"] " c" slColors["text"], "")
 }
 
 StudyLibrarySyncVersionNavigation(slState) {
@@ -19449,6 +22167,11 @@ StudyLibraryImageDimensions(slPath, &slWidth, &slHeight) {
     return (slWidth > 0 && slHeight > 0)
 }
 
+StudyLibraryImageCounterText(slState, slIndex, slCount) {
+    return slState.Get("compactImageNavigation", false)
+        ? slIndex " / " slCount : "Screenshot " slIndex " of " slCount
+}
+
 StudyLibraryShowImage(slState, *) {
     if !(slState.Has("gui") && slState["gui"] && slState["gui"].Hwnd)
         return
@@ -19456,7 +22179,8 @@ StudyLibraryShowImage(slState, *) {
     slIndex := slState["mediaIndex"]
     if (slIndex < 1 || slIndex > slMedia.Length) {
         slState["picture"].Visible := false
-        slState["imageInfo"].Value := "No source screenshot saved for this version."
+        slState["imageInfo"].Value := slState.Get("compactImageNavigation", false)
+            ? "No image" : "No source screenshot saved for this version."
         slState["previousImage"].Enabled := false
         slState["nextImage"].Enabled := false
         slState["openImage"].Enabled := false
@@ -19467,7 +22191,8 @@ StudyLibraryShowImage(slState, *) {
     slPath := slItem["path"]
     if !FileExist(slPath) {
         slState["picture"].Visible := false
-        slState["imageInfo"].Value := "The saved source screenshot is missing."
+        slState["imageInfo"].Value := slState.Get("compactImageNavigation", false)
+            ? "Missing image" : "The saved source screenshot is missing."
         slState["previousImage"].Enabled := (slIndex > 1)
         slState["nextImage"].Enabled := (slIndex < slMedia.Length)
         slState["openImage"].Enabled := false
@@ -19499,11 +22224,11 @@ StudyLibraryShowImage(slState, *) {
         ; Assigning a new bitmap can resize the Picture control. Restore the
         ; intended logical bounds after loading it.
         slState["picture"].Move(slX, slY, slDisplayW, slDisplayH)
-        slState["picture"].Visible := !StudyBigBoxTableModeActive(slState)
+        slState["picture"].Visible := true
     } catch {
         slState["picture"].Visible := false
     }
-    slState["imageInfo"].Value := "Screenshot " slIndex " of " slMedia.Length
+    slState["imageInfo"].Value := StudyLibraryImageCounterText(slState, slIndex, slMedia.Length)
     slState["previousImage"].Enabled := (slIndex > 1)
     slState["nextImage"].Enabled := (slIndex < slMedia.Length)
     slState["openImage"].Enabled := true
@@ -19872,6 +22597,15 @@ StudyLibraryUpdateMetadataText(slState) {
     slProvider := slState.Has("currentProvider") ? slState["currentProvider"] : ""
     slModel := slState.Has("currentModel") ? slState["currentModel"] : ""
     slPrompt := slState.Has("currentPrompt") ? slState["currentPrompt"] : ""
+    if slState.Has("desktop") {
+        slState["metadata"].Value := "Profile: " (slProfile != "" ? slProfile : "Unsorted")
+            . "  ·  Chapter: " (slState["currentChapter"] != "" ? slState["currentChapter"] : "—")
+            . "`r`nAnki: " StudyAnkiStatusLabel(slState["currentAnkiStatus"], slState["currentAddedToAnkiAt"])
+            . "`r`nSpeaker: " (slState["currentSpeaker"] != "" ? slState["currentSpeaker"] : "—")
+            . "`r`nTags: " (slState["currentTags"] != "" ? slState["currentTags"] : "—")
+            . "`r`nModel: " slProvider " / " slModel "`r`nPrompt: " slPrompt
+        return
+    }
     slState["metadata"].Value := "Profile: "
         . (slProfile != "" ? slProfile : "Unsorted")
         . "    Chapter: "
@@ -20367,6 +23101,14 @@ StudyReaderEditNewVersionPrompt(srNewState, *) {
     srText := ""
     try srText := FileExist(srPath) ? FileRead(srPath, "UTF-8") : ""
 
+    if CPDesktopActive() || srNewState.Get("bigBoxPresentation", false) {
+        srDialog := StudyReaderPromptDialogCreate(srNewState, "edit", srText, srName)
+        srDialog["controls"]["save"].OnEvent("Click", StudyReaderSaveNewVersionPrompt.Bind(
+            srNewState, srDialog["gui"], srDialog["controls"]["editor"], srPath, srName))
+        StudyReaderPromptDialogRun(srDialog)
+        return
+    }
+
     srEditorGui := Gui(
         "+Resize +Owner" srNewState["gui"].Hwnd,
         "Edit Explanation Prompt - " srName
@@ -20395,10 +23137,13 @@ StudyReaderEditNewVersionPrompt(srNewState, *) {
 }
 
 StudyReaderAddNewVersionPrompt(srNewState, *) {
-    srInput := CPThemedInputBox(
-        "Enter a name for the new EXPLANATION prompt:",
-        "New EXPLAIN prompt", "", "", 420, srNewState["gui"].Hwnd
-    )
+    if CPDesktopActive() || srNewState.Get("bigBoxPresentation", false)
+        srInput := StudyReaderPromptDialogRun(StudyReaderPromptDialogCreate(srNewState, "name"))
+    else
+        srInput := CPThemedInputBox(
+            "Enter a name for the new EXPLANATION prompt:",
+            "New EXPLAIN prompt", "", "", 420, srNewState["gui"].Hwnd
+        )
     if (srInput.Result = "Cancel")
         return
     srName := Trim(srInput.Value)
@@ -20450,10 +23195,96 @@ StudyReaderDeleteNewVersionPrompt(srNewState, *) {
     StudyReaderRefreshMainExplainPromptList()
 }
 
+StudyReaderPromptDialogCreate(parent, mode, text := "", name := "") {
+    bigBox := parent.Get("bigBoxPresentation", false), isPromptEdit := mode = "edit"
+    title := isPromptEdit ? "Explanation prompt" : "New explanation prompt"
+    subtitle := isPromptEdit ? "Edit the saved prompt. No explanation is generated here." : "Create a separate prompt without changing existing prompts."
+    g := Gui("+Owner" parent["gui"].Hwnd " +OwnDialogs"
+        . (bigBox ? " +AlwaysOnTop -Caption +ToolWindow -DPIScale" : ""), title)
+    g.MarginX := 0, g.MarginY := 0
+    g.SetFont("s11", "Segoe UI")
+    s := Map("gui", g, "parentState", parent, "mode", mode, "bigBoxPresentation", bigBox,
+        "closed", false, "result", {Result: "Cancel", Value: ""})
+    if bigBox
+        s["bigBoxForm"] := StudyLibraryBigBoxFormState(g, parent, title, subtitle, StudyLibraryConfiguredName())
+    c := Map()
+    c["label"] := g.AddText("x40 y194 w700 h28", isPromptEdit ? "Prompt: " name : "Prompt name")
+    c["intro"] := g.AddText("x40 y232 w700 h48", isPromptEdit
+        ? "Save updates this prompt file for future use, including other places that select it. Close discards edits made since the last save."
+        : "Use a descriptive name. Creating a prompt selects it for this new version; nothing is generated until you confirm generation.")
+    c["editor"] := g.AddEdit(isPromptEdit ? "x40 y292 w700 h300 Multi VScroll WantReturn" : "x40 y236 w600 h34", text)
+    c["save"] := g.AddButton("x420 y600 w180 h34" (isPromptEdit ? "" : " Default"), isPromptEdit ? "Save prompt" : "Create prompt")
+    c["cancel"] := g.AddButton("x612 y600 w110 h34", isPromptEdit ? "Close" : "Cancel")
+    s["controls"] := c, g.StudyPreserveEditSelection := true
+    if !isPromptEdit
+        c["save"].OnEvent("Click", StudyReaderPromptDialogClose.Bind(s, true))
+    c["cancel"].OnEvent("Click", StudyReaderPromptDialogClose.Bind(s, false))
+    g.OnEvent("Escape", StudyReaderPromptDialogClose.Bind(s, false))
+    g.OnEvent("Close", StudyReaderPromptDialogClose.Bind(s, false))
+    if bigBox {
+        f := s["bigBoxForm"]
+        f["shell"]["footer"].Text := "D-pad  Navigate / scroll     A / Cross  Select     Keyboard  Edit text     B / Circle / Esc  Close"
+        StudyLibraryBigBoxFormAdd(f, "label", c["label"], 0, 0, 1000, 65, "title")
+        StudyLibraryBigBoxFormAdd(f, "intro", c["intro"], 0, 80, 1000, 120)
+        StudyLibraryBigBoxFormAdd(f, "editor", c["editor"], 0, 220, 1000, isPromptEdit ? 570 : 95, "editor")
+        StudyLibraryBigBoxFormAdd(f, "save", c["save"], 620, 840, 215, 110, "button")
+        StudyLibraryBigBoxFormAdd(f, "cancel", c["cancel"], 850, 840, 150, 110, "button")
+    } else
+        StudyDesktopStudyToolCreate(s, isPromptEdit ? "newVersionPrompt" : "newVersionName", c)
+    return s
+}
+
+StudyReaderPromptDialogClose(s, accept := false, *) {
+    if s["closed"]
+        return
+    if accept
+        s["result"] := {Result: "OK", Value: s["controls"]["editor"].Value}
+    s["closed"] := true
+    if s.Has("bigBoxForm") {
+        s["bigBoxForm"]["closed"] := true
+        StudyBigBoxFocusFrameStop(s["bigBoxForm"])
+    }
+    try s["gui"].Destroy()
+}
+
+StudyReaderPromptDialogRun(s) {
+    owner := s["parentState"]["gui"].Hwnd, previousFocus := StudyControllerFocusedHwnd(owner)
+    enabled := DllCall("user32\IsWindowEnabled", "ptr", owner)
+    try {
+        DllCall("user32\EnableWindow", "ptr", owner, "int", 0)
+        if s.Get("bigBoxPresentation", false)
+            StudyLibraryBigBoxFormShow(s["bigBoxForm"], s["controls"]["editor"])
+        else
+            StudyDesktopDialogShow(s, s["mode"] = "edit" ? 1000 : 760, s["mode"] = "edit" ? 780 : 480, s["controls"]["editor"])
+        while !s["closed"] && DllCall("user32\IsWindow", "ptr", owner)
+            Sleep(25)
+    } finally {
+        StudyReaderPromptDialogClose(s)
+        if DllCall("user32\IsWindow", "ptr", owner) {
+            DllCall("user32\EnableWindow", "ptr", owner, "int", enabled)
+            if enabled {
+                try WinActivate("ahk_id " owner)
+                if previousFocus && CPHwndIsFocusable(previousFocus)
+                    StudyControllerSetFocus(owner, previousFocus)
+            }
+        }
+        CPControllerResetNavigation()
+    }
+    return s["result"]
+}
+
 StudyReaderNewVersionProviderChanged(srNewState, *) {
     srProvider := StrLower(Trim(srNewState["provider"].Text))
     srNewState["geminiModel"].Enabled := srProvider = "gemini"
     srNewState["openAIModel"].Enabled := srProvider = "openai"
+    if srNewState.Has("desktop") {
+        c := srNewState["controls"]
+        for key in ["gemini", "openai"] {
+            c[key].Visible := key = srProvider
+            c[key "Label"].Visible := key = srProvider
+            c[key "Label"].Text := "Model"
+        }
+    }
 }
 
 StudyReaderCloseNewVersionDialog(srNewState, *) {
@@ -20671,6 +23502,7 @@ StudyReaderOpenNewVersionDialog(srState, *) {
         }
     }
 
+    ; @DESKTOP_NEW_VERSION_CONTROLS_BEGIN@
     srBigBox := StudyReaderBigBoxPresentation(srState)
     srDialogOptions := "+Owner" srState["gui"].Hwnd " +OwnDialogs"
         . (srBigBox
@@ -20838,8 +23670,17 @@ StudyReaderOpenNewVersionDialog(srState, *) {
     srNewGui.OnEvent(
         "Close", StudyReaderCloseNewVersionDialog.Bind(srNewState)
     )
+    StudyDesktopStudyToolCreate(srNewState, "newVersion", Map("heading", srHeading, "intro", srIntro,
+        "providerLabel", srProviderLabel, "provider", srProvider, "geminiLabel", srGeminiLabel, "gemini", srGeminiModel,
+        "openaiLabel", srOpenAILabel, "openai", srOpenAIModel, "promptLabel", srPromptLabel, "prompt", srPrompt,
+        "edit", srPromptEdit, "add", srPromptAdd, "delete", srPromptDelete, "status", srStatus,
+        "save", srGenerate, "cancel", srCancel))
+    StudyReaderNewVersionProviderChanged(srNewState)
+    ; @DESKTOP_NEW_VERSION_CONTROLS_END@
     if srBigBox
         StudyLibraryBigBoxFormShow(srForm, srProvider)
+    else if srNewState.Has("desktop")
+        StudyDesktopDialogShow(srNewState, 920, 740, srProvider)
     else {
         srNewGui.Show("Hide AutoSize")
         CPApplyOwnedDialogTheme(srNewGui)
@@ -20912,6 +23753,9 @@ StudyReaderSetEditing(srState, srEditing) {
         srState["explanationLabel"].Value := srState["editMode"] = "section"
             ? "Editing section (heading protected)"
             : "Editing full explanation (section headings affect navigation)"
+        if srState.Has("desktop")
+            srState["explanationLabel"].Value := srState["editMode"] = "section"
+                ? "Editing section" : "Editing full explanation"
         srState["explanation"].Focus()
     } else {
         srState["explanationLabel"].Value := "Explanation"
@@ -21421,8 +24265,7 @@ StudyReaderResizeBigBox(srState, srGui, srWidth, srHeight) {
         srVersionLabelW := Max(58, Round(68 * srScale))
         srNewVersionW := Max(104, Round(132 * srScale))
         srState["versionLabel"].Move(
-            srInnerX, srVersionY + Round(8 * srScale),
-            srVersionLabelW, Max(22, Round(24 * srScale))
+            srInnerX, srVersionY, srVersionLabelW, srRowH
         )
         srVersionPrevX := srInnerX + srVersionLabelW
         srState["previousVersion"].Move(
@@ -21597,6 +24440,8 @@ StudyReaderResize(srState, srGui, srMinMax, srWidth, srHeight) {
         srState["deferredResizeHeight"] := srHeight
         return
     }
+    if srState.Has("desktop")
+        return StudyDesktopResize(srState, srWidth, srHeight)
     if srVisible
         DllCall("user32\SendMessageW", "ptr", srHwnd, "uint", 0x000B,
             "ptr", 0, "ptr", 0) ; WM_SETREDRAW off
@@ -21623,7 +24468,7 @@ StudyReaderResize(srState, srGui, srMinMax, srWidth, srHeight) {
             Max(110, srLeftW - srVersionLabelW - srArrowW * 2
                 - srNavGap * 2 - srNewVersionW - 14)
         )
-        srState["versionLabel"].Move(srMargin, srToolbarY + 4, srVersionLabelW, 22)
+        srState["versionLabel"].Move(srMargin, srToolbarY, srVersionLabelW, 30)
         srVersionPrevX := srMargin + srVersionLabelW
         srState["previousVersion"].Move(
             srVersionPrevX, srToolbarY, srArrowW, 30
@@ -21898,6 +24743,8 @@ StudyWindowSizeMoveMessage(wParam, lParam, msg, hwnd) {
 StudyReaderClose(srState, *) {
     global CPStudyReaderState
     srReturnLibrary := srState.Get("returnToBigBoxLibrary", 0)
+    if !StudyLibraryStateAlive(srReturnLibrary)
+        srReturnLibrary := srState.Get("returnToDesktopLibrary", 0)
     srReturnCandidates := srState.Get("returnToCandidates", 0)
     if (srState.Has("editing") && srState["editing"]
         && CPThemedOwnedMessage(
@@ -21914,6 +24761,8 @@ StudyReaderClose(srState, *) {
     if (srState.Has("newVersionDialog")
         && IsObject(srState["newVersionDialog"]))
         try StudyReaderCloseNewVersionDialog(srState["newVersionDialog"])
+    if IsObject(srState.Get("vocabularyPicker", 0))
+        StudyReaderVocabularyPickerClose(srState["vocabularyPicker"])
     try srState["gui"].Destroy()
     CPStudyReaderState := 0
     if (StudyCandidatesGuiAlive(srReturnCandidates)
@@ -21933,6 +24782,41 @@ StudyReaderClose(srState, *) {
     }
     CPControllerResetNavigation()
     StudyStandaloneMaybeExit()
+}
+
+StudyReaderSyncDesktopOwner(srState) {
+    global CPStudyLibraryState
+    if !srState.Has("desktop") || !StudyLibraryStateAlive(CPStudyLibraryState)
+        || !CPStudyLibraryState.Has("desktop")
+        return
+    if srState.Get("returnToDesktopLibrary", 0) = CPStudyLibraryState
+        return
+    StudyReaderDetachDesktopOwner(srState)
+    reader := srState["gui"]
+    srState["desktopPreviousOwner"] := DllCall("user32\GetWindow", "ptr", reader.Hwnd, "uint", 4, "ptr")
+    srState["desktopPreviousTopmost"] := !!(WinGetExStyle(reader.Hwnd) & 8)
+    ; A desktop Library can inherit topmost from the control center. Owning
+    ; the Reader keeps it above that Library without making either modal.
+    reader.Opt("+Owner" CPStudyLibraryState["gui"].Hwnd)
+    ; Setting an owner on an already-created HWND does not move it into the
+    ; owner's topmost band. Match that band until the Library is detached.
+    if WinGetExStyle(CPStudyLibraryState["gui"].Hwnd) & 8
+        reader.Opt("+AlwaysOnTop")
+    srState["returnToDesktopLibrary"] := CPStudyLibraryState
+    srState["desktop"]["chrome"]["back"].Text := "Back to Library"
+}
+
+StudyReaderDetachDesktopOwner(srState) {
+    if !StudyLibraryStateAlive(srState) || !srState.Has("returnToDesktopLibrary")
+        return
+    reader := srState["gui"], previous := srState.Get("desktopPreviousOwner", 0)
+    reader.Opt(previous && DllCall("user32\IsWindow", "ptr", previous)
+        ? "+Owner" previous : "-Owner")
+    reader.Opt(srState.Get("desktopPreviousTopmost", false) ? "+AlwaysOnTop" : "-AlwaysOnTop")
+    srState.Delete("returnToDesktopLibrary")
+    srState.Delete("desktopPreviousOwner")
+    srState.Delete("desktopPreviousTopmost")
+    srState["desktop"]["chrome"]["back"].Text := "Close Reader"
 }
 
 StudyLibraryOpenSelectedReader(slState, *) {
@@ -22072,6 +24956,7 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
                 CPStudyReaderState["returnToBigBoxLibrary"] := srBigBoxLibrary
                 CPStudyReaderState["gui"].Opt("+AlwaysOnTop")
             }
+            StudyReaderSyncDesktopOwner(CPStudyReaderState)
             if IsObject(srGroups)
                 StudyReaderSetEntrySequence(
                     CPStudyReaderState, srGroups, srGroupId
@@ -22165,14 +25050,14 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
     srAnkiCheck := srGui.Add(
         "CheckBox", "x204 y49 w210 h24 Disabled", "Added to Anki  (Alt+A)"
     )
-    srVersionLabel := srGui.Add("Text", "x14 y85 w58", "Version:")
+    srVersionLabel := srGui.Add("Text", "x14 y81 w58 h30 +0x200", "Version:")
     ; Keep the original list hidden as the version data model. The visible
-    ; read-only field and arrow buttons provide simpler navigation.
+    ; display label and arrow buttons provide simpler navigation.
     srVersionDdl := srGui.Add(
         "DropDownList", "x0 y0 w1 h1 Hidden 0x210", []
     )
-    srVersionView := srGui.Add(
-        "Edit", "x72 y81 w220 h30 ReadOnly", ""
+    srVersionView := StudyLibraryAddVersionDisplay(
+        srGui, "x72 y81 w220 h30"
     )
     srPreviousVersion := srGui.Add(
         "Button", "x298 y81 w34 h30 Disabled", "‹"
@@ -22380,6 +25265,8 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
     srGui.OnEvent("Escape", StudyReaderClose.Bind(srState))
     srGui.OnEvent("Close", StudyReaderClose.Bind(srState))
     StudyReaderBindHotkeys(srState)
+    StudyDesktopCreate(srState, "reader")
+    StudyReaderSyncDesktopOwner(srState)
 
     if srWantBigBox {
         srBigBoxBounds := CPBigBoxMonitorBounds(srBigBoxLibrary["gui"].Hwnd)
@@ -22405,8 +25292,8 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
         try srSavedH := Integer(srSavedH)
         catch
             srSavedH := srDefaultH
-        srSavedW := Max(720, Min(srMaxW, srSavedW))
-        srSavedH := Max(480, Min(srMaxH, srSavedH))
+        srSavedW := Max(srState.Has("desktop") ? 960 : 720, Min(srMaxW, srSavedW))
+        srSavedH := Max(srState.Has("desktop") ? 700 : 480, Min(srMaxH, srSavedH))
         srGui.Show("Hide w" srSavedW " h" srSavedH)
         CPApplyOwnedDialogTheme(srGui)
     }
@@ -22537,7 +25424,6 @@ StudyLibraryUpdateSelectionActions(slState, *) {
     slState["editDetailsButton"].Enabled := slCount > 0
     if slState.Has("studyButton")
         slState["studyButton"].Enabled := slCount = 1
-    StudyBigBoxTableModeUpdate(slState)
 }
 
 StudyLibraryEditDetails(slState, *) {
@@ -22550,6 +25436,7 @@ StudyLibraryEditDetails(slState, *) {
         StudyLibraryLoadGroup(slState, slIds[1])
     if (slState["currentGroupId"] <= 0)
         return
+    ; @DESKTOP_DETAILS_CONTROLS_BEGIN@
     slBigBox := StudyLibraryBigBoxPresentation(slState)
     slDialogOptions := "+Owner" slState["gui"].Hwnd " +OwnDialogs"
         . (slBigBox ? " +AlwaysOnTop -Caption +ToolWindow -DPIScale" : "")
@@ -22599,6 +25486,11 @@ StudyLibraryEditDetails(slState, *) {
     slCancelButton.OnEvent("Click", StudyLibraryCloseDialog.Bind(slDialog))
     slDialog.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slDialog))
     slDialog.OnEvent("Close", StudyLibraryCloseDialog.Bind(slDialog))
+    slDesktop := StudyDesktopMetadataCreate(Map("gui", slDialog, "bigBoxPresentation", slBigBox,
+        "libraryState", slState), "details", Map("chapterLabel", slChapterLabel, "chapter", slChapterEdit,
+        "speakerLabel", slSpeakerLabel, "speaker", slSpeakerEdit, "tagsLabel", slTagsLabel,
+        "tags", slTagsEdit, "anki", slAddedToAnki, "hint", slHint, "save", slSaveButton, "cancel", slCancelButton))
+    ; @DESKTOP_DETAILS_CONTROLS_END@
     if slBigBox {
         slHeading := slDialog.Add(
             "Text", "x0 y0 w10 h10", "Selected explanation"
@@ -22633,6 +25525,8 @@ StudyLibraryEditDetails(slState, *) {
             slForm, "cancel", slCancelButton, 835, 855, 165, 105, "button"
         )
         StudyLibraryBigBoxFormShow(slForm, slChapterEdit)
+    } else if IsObject(slDesktop) {
+        StudyDesktopDialogShow(slDesktop, 800, 600, slChapterEdit)
     } else {
         slDialog.Show("AutoSize Center")
         CPApplyOwnedDialogTheme(slDialog)
@@ -22645,6 +25539,10 @@ StudyLibraryBulkValueModeChanged(slModeDdl, slValueEdit, slEnabledValues, *) {
 }
 
 StudyLibraryBulkOwnedMessage(slOwnerHwnd, slMessage, slIcon := "warning") {
+    if CPDialogPresentation(slOwnerHwnd) != "classic" {
+        CPThemedOwnedMessage(slOwnerHwnd, slMessage, "Study Library - Bulk edit", "ok", slIcon)
+        return 1 ; Preserve MessageBoxW's IDOK contract.
+    }
     if !slOwnerHwnd || !DllCall("user32\IsWindow", "ptr", slOwnerHwnd, "int")
         slOwnerHwnd := DllCall("user32\GetForegroundWindow", "ptr")
     slFlags := 0x00010000 ; MB_SETFOREGROUND
@@ -22657,6 +25555,7 @@ StudyLibraryBulkOwnedMessage(slOwnerHwnd, slMessage, slIcon := "warning") {
 }
 
 StudyLibraryOpenBulkDetails(slState, slIds) {
+    ; @DESKTOP_BULK_DETAILS_CONTROLS_BEGIN@
     slCount := slIds.Length
     slBigBox := StudyLibraryBigBoxPresentation(slState)
     slDialogOptions := "+Owner" slState["gui"].Hwnd " +OwnDialogs"
@@ -22748,6 +25647,13 @@ StudyLibraryOpenBulkDetails(slState, slIds) {
     slCancel.OnEvent("Click", StudyLibraryCloseDialog.Bind(slDialog))
     slDialog.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slDialog))
     slDialog.OnEvent("Close", StudyLibraryCloseDialog.Bind(slDialog))
+    slDesktop := StudyDesktopStudyToolCreate(Map("gui", slDialog, "bigBoxPresentation", slBigBox,
+        "libraryState", slState), "bulkDetails", Map("heading", slHeading, "intro", slHint,
+        "chapterLabel", slChapterLabel, "chapterMode", slChapterMode, "chapter", slChapterEdit,
+        "speakerLabel", slSpeakerLabel, "speakerMode", slSpeakerMode, "speaker", slSpeakerEdit,
+        "tagsLabel", slTagsLabel, "tagsMode", slTagsMode, "tags", slTagsEdit,
+        "ankiLabel", slAnkiLabel, "anki", slAnkiMode, "hint", slTagHint, "save", slApply, "cancel", slCancel))
+    ; @DESKTOP_BULK_DETAILS_CONTROLS_END@
     if slBigBox {
         StudyLibraryBigBoxFormAdd(
             slForm, "heading", slHeading, 0, 0, 1000, 62, "title"
@@ -22792,7 +25698,9 @@ StudyLibraryOpenBulkDetails(slState, slIds) {
             slForm, "cancel", slCancel, 850, 845, 150, 110, "button"
         )
         StudyLibraryBigBoxFormShow(slForm, slChapterMode)
-    } else {
+    } else if IsObject(slDesktop)
+        StudyDesktopDialogShow(slDesktop, 900, 760, slChapterMode)
+    else {
         slDialog.Show("AutoSize Center")
         CPApplyOwnedDialogTheme(slDialog)
         slChapterMode.Focus()
@@ -23234,8 +26142,243 @@ StudyLibraryApplyFilters(
     StudyLibraryRefresh(slState)
 }
 
+StudyLibraryDatePickerRegistry() {
+    static slPickers := Map()
+    static slExitRegistered := false
+    if !slExitRegistered {
+        OnExit(StudyLibraryDatePickerShutdown, -1)
+        slExitRegistered := true
+    }
+    return slPickers
+}
+
+StudyLibraryDatePickerShutdown(*) {
+    ; Native destruction can continue after static variables are released.
+    ; Detach these observers while their registry still exists.
+    OnMessage(0x0100, StudyLibraryDatePickerKeyDown, 0)
+    OnMessage(0x0082, StudyLibraryDatePickerDestroyed, 0)
+    for hwnd, picker in StudyLibraryDatePickerRegistry() {
+        picker["closed"] := true
+        StudyBigBoxFocusFrameStop(picker)
+        try picker["owner"].Opt("-Disabled")
+    }
+    StudyLibraryDatePickerRegistry().Clear()
+}
+
+StudyLibraryDatePickerStep(slStamp, slPart, slDelta) {
+    slValues := [Integer(SubStr(slStamp, 1, 4)), Integer(SubStr(slStamp, 5, 2)),
+        Integer(SubStr(slStamp, 7, 2)), Integer(SubStr(slStamp, 9, 2)),
+        Integer(SubStr(slStamp, 11, 2))]
+    slYear := slValues[1], slMonth := slValues[2]
+    slLeap := Mod(slYear, 4) = 0 && (Mod(slYear, 100) != 0 || Mod(slYear, 400) = 0)
+    slDays := [31, slLeap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    slMinimum := [1601, 1, 1, 0, 0]
+    slMaximum := [9999, 12, slDays[slMonth], 23, 59]
+    slValue := slValues[slPart] + slDelta
+    ; Components roll independently, like a date/time spinner. Years stop at
+    ; the bounds supported by the desktop DateTime control.
+    slValues[slPart] := slPart = 1
+        ? Max(1601, Min(9999, slValue))
+        : (slValue < slMinimum[slPart] ? slMaximum[slPart]
+            : (slValue > slMaximum[slPart] ? slMinimum[slPart] : slValue))
+    slYear := slValues[1], slMonth := slValues[2]
+    slLeap := Mod(slYear, 4) = 0 && (Mod(slYear, 100) != 0 || Mod(slYear, 400) = 0)
+    slDays[2] := slLeap ? 29 : 28
+    slValues[3] := Min(slValues[3], slDays[slMonth])
+    return Format("{:04d}{:02d}{:02d}{:02d}{:02d}00", slValues*)
+}
+
+StudyLibraryDatePickerPartText(slStamp, slPart) {
+    return SubStr(slStamp, slPart = 1 ? 1 : slPart * 2 + 1, slPart = 1 ? 4 : 2)
+}
+
+StudyLibraryDatePickerRefresh(slPicker) {
+    if slPicker["closed"]
+        return
+    slStamp := slPicker["stamp"]
+    for slPart, slWheel in slPicker["wheels"] {
+        slWheel["value"].Text := StudyLibraryDatePickerPartText(slStamp, slPart)
+        for slDirection, slKey in Map(1, "up", -1, "down") {
+            slNext := StudyLibraryDatePickerStep(slStamp, slPart, slDirection)
+            slWheel[slKey].Text := (slDirection > 0 ? "▲  " : "▼  ")
+                . StudyLibraryDatePickerPartText(slNext, slPart)
+            slWheel[slKey].Enabled := slNext != slStamp
+        }
+    }
+    slPicker["controls"]["preview"].Value :=
+        FormatTime(slStamp, "dddd, dd MMMM yyyy") "   ·   " FormatTime(slStamp, "HH:mm")
+}
+
+StudyLibraryDatePickerAdjust(slPicker, slPart, slDelta, *) {
+    if slPicker["closed"]
+        return
+    slPicker["stamp"] := StudyLibraryDatePickerStep(slPicker["stamp"], slPart, slDelta)
+    StudyLibraryDatePickerRefresh(slPicker)
+    slPicker["wheels"][slPart]["value"].Focus()
+}
+
+StudyLibraryDatePickerClose(slPicker, slSave := false, *) {
+    if slPicker["closed"]
+        return
+    slPicker["closed"] := true
+    slRegistry := StudyLibraryDatePickerRegistry()
+    if slRegistry.Has(slPicker["hwnd"])
+        slRegistry.Delete(slPicker["hwnd"])
+    ; Only the Filters dialog's working copy is changed here. Apply filters
+    ; still performs range validation and commits the complete filter selection.
+    slOwnerAlive := false
+    try slOwnerAlive := DllCall("user32\IsWindow", "ptr", slPicker["owner"].Hwnd, "int")
+    if (slSave && slOwnerAlive) {
+        slPicker["target"].Value := slPicker["stamp"]
+        slPicker["returnButton"].Text := StudyLibraryCompactDateTime(slPicker["stamp"])
+        slPicker["dateDdl"].Choose(6)
+    }
+    StudyBigBoxFocusFrameStop(slPicker)
+    if slOwnerAlive {
+        try slPicker["owner"].Opt("-Disabled")
+        try WinActivate("ahk_id " slPicker["owner"].Hwnd)
+    }
+    try slPicker["gui"].Destroy()
+    if slOwnerAlive
+        try slPicker["returnButton"].Focus()
+    CPControllerResetNavigation()
+}
+
+StudyLibraryDatePickerNavigate(slCommand, slHwnd) {
+    slRegistry := StudyLibraryDatePickerRegistry()
+    if !slRegistry.Has(slHwnd)
+        return false
+    slPicker := slRegistry[slHwnd]
+    if slPicker["closed"]
+        return true
+    if (slCommand = "Cancel") {
+        StudyLibraryDatePickerClose(slPicker, false)
+        return true
+    }
+    if (slCommand = "PreviousTab" || slCommand = "NextTab")
+        return true
+    slFocus := StudyControllerFocusedHwnd(slHwnd)
+    for slPart, slWheel in slPicker["wheels"] {
+        if (slFocus != slWheel["value"].Hwnd)
+            continue
+        switch slCommand {
+            case "Up", "Down":
+                StudyLibraryDatePickerAdjust(slPicker, slPart, slCommand = "Up" ? 1 : -1)
+            case "Left", "Right":
+                slNext := slPart + (slCommand = "Left" ? -1 : 1)
+                if (slNext >= 1 && slNext <= 5)
+                    slPicker["wheels"][slNext]["value"].Focus()
+                else
+                    slPicker["controls"][slNext < 1 ? "cancel" : "save"].Focus()
+            case "Activate":
+                StudyLibraryDatePickerClose(slPicker, true)
+        }
+        return true
+    }
+    ; Let the existing Study navigation handle the mouse-friendly arrow and
+    ; Save/Cancel buttons. Up from the action row returns to the number wheels.
+    if (slCommand = "Up" && (slFocus = slPicker["controls"]["save"].Hwnd
+        || slFocus = slPicker["controls"]["cancel"].Hwnd)) {
+        slPicker["wheels"][slFocus = slPicker["controls"]["save"].Hwnd ? 4 : 5]["value"].Focus()
+        return true
+    }
+    return false
+}
+
+StudyLibraryDatePickerDestroyed(wParam, lParam, msg, hwnd) {
+    slRegistry := StudyLibraryDatePickerRegistry()
+    if !slRegistry.Has(hwnd)
+        return
+    slPicker := slRegistry[hwnd]
+    slRegistry.Delete(hwnd)
+    slPicker["closed"] := true
+    StudyBigBoxFocusFrameStop(slPicker)
+    try slPicker["owner"].Opt("-Disabled")
+}
+
+StudyLibraryDatePickerKeyDown(wParam, lParam, msg, hwnd) {
+    slRoot := DllCall("user32\GetAncestor", "ptr", hwnd, "uint", 2, "ptr")
+    if !StudyLibraryDatePickerRegistry().Has(slRoot)
+        return
+    slKeys := Map(0x26, "Up", 0x28, "Down", 0x25, "Left", 0x27, "Right",
+        0x0D, "Activate", 0x20, "Activate", 0x1B, "Cancel", 0x21, "PreviousTab", 0x22, "NextTab")
+    if !slKeys.Has(wParam)
+        return
+    slCommand := slKeys[wParam]
+    if CPControllerKeyboardMirrorActive(slCommand)
+        return 0
+    if StudyLibraryDatePickerNavigate(slCommand, slRoot)
+        return 0
+}
+
+StudyLibraryOpenDatePicker(slForm, slDateDdl, slTarget, slReturnButton, slRangeName, *) {
+    slOwner := slForm["gui"]
+    slGui := Gui("+Owner" slOwner.Hwnd
+        . " +OwnDialogs +AlwaysOnTop -Caption +ToolWindow -DPIScale",
+        "Study Library - " slRangeName " date and time")
+    slGui.MarginX := 0, slGui.MarginY := 0
+    slGui.SetFont("s12", "Segoe UI")
+    slPicker := StudyLibraryBigBoxFormState(slGui, slForm["libraryState"],
+        slRangeName " date and time", "Set the " (slRangeName = "From" ? "start" : "end")
+            . " of the custom generated-date range.")
+    slPicker["owner"] := slOwner
+    slPicker["hwnd"] := slGui.Hwnd
+    slPicker["dateDdl"] := slDateDdl
+    slPicker["target"] := slTarget
+    slPicker["returnButton"] := slReturnButton
+    slPicker["stamp"] := SubStr(slTarget.Value, 1, 12) "00"
+    slPicker["closed"] := false
+    slPicker["wheels"] := []
+    slPicker["shell"]["footer"].Value :=
+        "Left / Right  Choose part     Up / Down  Change value     "
+            . "A / Enter  Use date/time     B / Esc  Cancel"
+    slPreview := slGui.AddText("x0 y0 w10 h10 Center", "")
+    StudyLibraryBigBoxFormAdd(slPicker, "preview", slPreview, 0, 25, 1000, 90, "title")
+    slHelp := slGui.AddText("x0 y0 w10 h10 Center",
+        "Choose a number with Left / Right, then change it with Up / Down."
+            . "`nA confirms this date/time. The Library updates only after Apply filters.")
+    StudyLibraryBigBoxFormAdd(slPicker, "help", slHelp, 0, 140, 1000, 95)
+    for slPart, slName in ["Year", "Month", "Day", "Hour", "Minute"] {
+        slX := (slPart - 1) * 205
+        slLabel := slGui.AddText("x0 y0 w10 h10 Center", slName)
+        StudyLibraryBigBoxFormAdd(slPicker, "label" slPart, slLabel, slX, 295, 180, 60)
+        slWheel := Map()
+        for slSpec in [["up", 375, 80, "button"], ["value", 470, 140, "number"],
+            ["down", 625, 80, "button"]] {
+            slButton := slGui.AddButton("x0 y0 w10 h10", "")
+            slWheel[slSpec[1]] := slButton
+            StudyLibraryBigBoxFormAdd(slPicker, slSpec[1] slPart, slButton,
+                slX, slSpec[2], 180, slSpec[3], slSpec[4])
+        }
+        slWheel["up"].OnEvent("Click", StudyLibraryDatePickerAdjust.Bind(slPicker, slPart, 1))
+        slWheel["down"].OnEvent("Click", StudyLibraryDatePickerAdjust.Bind(slPicker, slPart, -1))
+        slPicker["wheels"].Push(slWheel)
+    }
+    slSave := slGui.AddButton("x0 y0 w10 h10", "Use date/time")
+    slCancel := slGui.AddButton("x0 y0 w10 h10", "Cancel")
+    StudyLibraryBigBoxFormAdd(slPicker, "save", slSave, 520, 835, 275, 110, "button")
+    StudyLibraryBigBoxFormAdd(slPicker, "cancel", slCancel, 820, 835, 180, 110, "button")
+    slSave.OnEvent("Click", StudyLibraryDatePickerClose.Bind(slPicker, true))
+    slCancel.OnEvent("Click", StudyLibraryDatePickerClose.Bind(slPicker, false))
+    slGui.OnEvent("Escape", StudyLibraryDatePickerClose.Bind(slPicker, false))
+    slGui.OnEvent("Close", StudyLibraryDatePickerClose.Bind(slPicker, false))
+    StudyLibraryDatePickerRefresh(slPicker)
+    StudyLibraryDatePickerRegistry()[slGui.Hwnd] := slPicker
+    OnMessage(0x0100, StudyLibraryDatePickerKeyDown)
+    OnMessage(0x0082, StudyLibraryDatePickerDestroyed) ; WM_NCDESTROY
+    slOwner.Opt("+Disabled")
+    try StudyLibraryBigBoxFormShow(slPicker, slPicker["wheels"][1]["value"])
+    catch as slPickerError {
+        StudyLibraryDatePickerClose(slPicker, false)
+        throw slPickerError
+    }
+    return slPicker
+}
+
 StudyLibraryOpenFilters(slState, *) {
+    ; @DESKTOP_FILTERS_CONTROLS_BEGIN@
     slBigBox := StudyLibraryBigBoxPresentation(slState)
+    slModern := !slBigBox && CPDesktopActive()
     slDialogOptions := "+Owner" slState["gui"].Hwnd " +OwnDialogs"
         . (slBigBox ? " +AlwaysOnTop -Caption +ToolWindow -DPIScale" : "")
     slDialog := Gui(slDialogOptions, "Study Library - Filters")
@@ -23247,7 +26390,7 @@ StudyLibraryOpenFilters(slState, *) {
             slDialog, slState, "Library filters",
             "Narrow the library by metadata, Anki status, or date."
         )
-        : 0
+        : (slModern ? Map("gui", slDialog, "libraryState", slState, "bigBoxPresentation", false) : 0)
     slProfileLabel := slDialog.Add("Text", "xm ym w90", "Profile:")
     slProfileDdl := slDialog.Add(
         "DropDownList", "x+10 yp-4 w310 0x210", slState["profileLabels"]
@@ -23294,28 +26437,53 @@ StudyLibraryOpenFilters(slState, *) {
     )
     slDateDdl.Choose(StudyLibraryDateModeIndex(slState["dateMode"]))
     slFromLabel := slDialog.Add("Text", "xm y+16 w90", "From:")
-    slFromDate := slDialog.Add(
-        "DateTime", "x+10 yp-4 w140 Choose" slState["dateFrom"], "yyyy-MM-dd"
-    )
-    slFromTime := slDialog.Add(
-        "DateTime", "x+8 yp w90 Choose" slState["dateFrom"], "HH:mm"
-    )
+    if slBigBox || slModern {
+        ; Keep a dialog-local draft with the same Value interface as the desktop
+        ; pickers. No library filter changes until Apply filters is pressed.
+        slFromDate := {Value: slState["dateFrom"]}
+        slFromTime := slFromDate
+        slFromButton := slDialog.Add("Button", "x+10 yp w310 h42",
+            StudyLibraryCompactDateTime(slFromDate.Value))
+    } else {
+        slFromDate := slDialog.Add(
+            "DateTime", "x+10 yp-4 w140 Choose" slState["dateFrom"], "yyyy-MM-dd"
+        )
+        slFromTime := slDialog.Add(
+            "DateTime", "x+8 yp w90 Choose" slState["dateFrom"], "HH:mm"
+        )
+    }
     slToLabel := slDialog.Add("Text", "xm y+16 w90", "To:")
-    slToDate := slDialog.Add(
-        "DateTime", "x+10 yp-4 w140 Choose" slState["dateTo"], "yyyy-MM-dd"
-    )
-    slToTime := slDialog.Add(
-        "DateTime", "x+8 yp w90 Choose" slState["dateTo"], "HH:mm"
-    )
-    slDateDdl.OnEvent("Change", StudyLibraryDateControlsChanged.Bind(
-        slDateDdl, slFromDate, slFromTime, slToDate, slToTime
-    ))
-    StudyLibraryDateControlsChanged(
-        slDateDdl, slFromDate, slFromTime, slToDate, slToTime
-    )
+    if slBigBox || slModern {
+        slToDate := {Value: slState["dateTo"]}
+        slToTime := slToDate
+        slToButton := slDialog.Add("Button", "x+10 yp w310 h42",
+            StudyLibraryCompactDateTime(slToDate.Value))
+        for slRange in [
+            ["From", slFromDate, slFromButton],
+            ["To", slToDate, slToButton]
+        ]
+            slRange[3].OnEvent("Click", (slModern ? StudyDesktopOpenDatePicker : StudyLibraryOpenDatePicker).Bind(
+                slForm, slDateDdl, slRange[2], slRange[3], slRange[1]
+            ))
+    } else {
+        slToDate := slDialog.Add(
+            "DateTime", "x+10 yp-4 w140 Choose" slState["dateTo"], "yyyy-MM-dd"
+        )
+        slToTime := slDialog.Add(
+            "DateTime", "x+8 yp w90 Choose" slState["dateTo"], "HH:mm"
+        )
+        slDateDdl.OnEvent("Change", StudyLibraryDateControlsChanged.Bind(
+            slDateDdl, slFromDate, slFromTime, slToDate, slToTime
+        ))
+        StudyLibraryDateControlsChanged(
+            slDateDdl, slFromDate, slFromTime, slToDate, slToTime
+        )
+    }
     slHint := slDialog.Add(
         "Text", "xm y+12 w410 h38 cGray",
-        "These filters work together with the search field."
+        slBigBox
+            ? "Choose From or To to set a custom range. Nothing changes until Apply filters."
+            : "These filters work together with the search field."
     )
     CPRegisterMutedControl(slHint)
     slApply := slDialog.Add("Button", "xm y+12 w120 Default", "Apply filters")
@@ -23329,6 +26497,16 @@ StudyLibraryOpenFilters(slState, *) {
     slCancel.OnEvent("Click", StudyLibraryCloseDialog.Bind(slDialog))
     slDialog.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slDialog))
     slDialog.OnEvent("Close", StudyLibraryCloseDialog.Bind(slDialog))
+    if slModern {
+        slForm["dateFrom"] := slFromDate, slForm["dateTo"] := slToDate
+        StudyDesktopMetadataCreate(slForm, "filters", Map("profileLabel", slProfileLabel, "profile", slProfileDdl,
+            "chapterLabel", slChapterLabel, "chapter", slChapterDdl, "speakerLabel", slSpeakerLabel,
+            "speaker", slSpeakerDdl, "tagLabel", slTagLabel, "tag", slTagDdl, "ankiLabel", slAnkiLabel,
+            "anki", slAnkiDdl, "dateLabel", slDateLabel, "date", slDateDdl, "fromLabel", slFromLabel,
+            "from", slFromButton, "toLabel", slToLabel, "to", slToButton, "hint", slHint,
+            "save", slApply, "clear", slClear, "cancel", slCancel))
+    }
+    ; @DESKTOP_FILTERS_CONTROLS_END@
     if slBigBox {
         slHeading := slDialog.Add(
             "Text", "x0 y0 w10 h10", "Filter saved explanations"
@@ -23360,22 +26538,16 @@ StudyLibraryOpenFilters(slState, *) {
             )
         }
         for slRangeSpec in [
-            ["fromLabel", slFromLabel, "fromDate", slFromDate,
-                "fromTime", slFromTime, 0],
-            ["toLabel", slToLabel, "toDate", slToDate,
-                "toTime", slToTime, 520]
+            ["fromLabel", slFromLabel, "fromDate", slFromButton, 0],
+            ["toLabel", slToLabel, "toDate", slToButton, 520]
         ] {
             StudyLibraryBigBoxFormAdd(
                 slForm, slRangeSpec[1], slRangeSpec[2],
-                slRangeSpec[7], 625, 95, 62
+                slRangeSpec[5], 625, 95, 62
             )
             StudyLibraryBigBoxFormAdd(
                 slForm, slRangeSpec[3], slRangeSpec[4],
-                slRangeSpec[7] + 105, 615, 235, 78, "editor"
-            )
-            StudyLibraryBigBoxFormAdd(
-                slForm, slRangeSpec[5], slRangeSpec[6],
-                slRangeSpec[7] + 350, 615, 130, 78, "editor"
+                slRangeSpec[5] + 105, 615, 375, 90, "emphasis"
             )
         }
         StudyLibraryBigBoxFormAdd(
@@ -23391,10 +26563,13 @@ StudyLibraryOpenFilters(slState, *) {
             slForm, "cancel", slCancel, 895, 845, 105, 110, "button"
         )
         StudyLibraryBigBoxFormShow(slForm, slProfileDdl)
+    } else if slModern {
+        StudyDesktopDialogShow(slForm, 900, 720, slProfileDdl)
     } else {
         slDialog.Show("AutoSize Center")
         CPApplyOwnedDialogTheme(slDialog)
     }
+    return slForm
 }
 
 StudyLibraryClearFilters(slState, *) {
@@ -23615,18 +26790,8 @@ StudyLibraryBigBoxColumnWidths(slState, slAvailableWidth, slScale) {
     slTotalWidth := 0
     slSourceIndex := 0
     slPhysicalScale := Max(0.9, slScale)
-    slTableMode := StudyBigBoxTableModeActive(slState)
-    slTableMinimums := Map(
-        "updated", 160, "profile", 150, "chapter", 170,
-        "speaker", 150, "tags", 230, "source", 700,
-        "grammar", 450, "versions", 110, "anki", 160
-    )
     for slColumnIndex, slColumn in slState["columns"] {
         slLogicalWidth := slColumn["width"]
-        if (slTableMode && slTableMinimums.Has(slColumn["key"]))
-            slLogicalWidth := Max(
-                slLogicalWidth, slTableMinimums[slColumn["key"]]
-            )
         slWidth := slColumn["visible"]
             ? Max(
                 Round(40 * slPhysicalScale),
@@ -23647,16 +26812,20 @@ StudyLibraryBigBoxColumnWidths(slState, slAvailableWidth, slScale) {
     return slWidths
 }
 
+StudyLibraryColumnTitle(slState, slColumn) {
+    ; A trailing marker disappears when Windows ellipsizes a narrow heading
+    ; (notably Date generated). Keep filter state in the always-visible prefix.
+    return (StudyLibraryColumnFilterActive(slState, slColumn["key"]) ? "▼  " : "")
+        . slColumn["label"]
+}
+
 StudyLibraryApplyBigBoxColumns(slState, slAvailableWidth, slScale) {
     slWidths := StudyLibraryBigBoxColumnWidths(
         slState, slAvailableWidth, slScale
     )
     for slColumnIndex, slColumn in slState["columns"] {
-        slTitle := slColumn["label"]
-        if StudyLibraryColumnFilterActive(slState, slColumn["key"])
-            slTitle .= "  ▼"
         slState["list"].ModifyCol(
-            slColumn["index"], slWidths[slColumnIndex], slTitle
+            slColumn["index"], slWidths[slColumnIndex], StudyLibraryColumnTitle(slState, slColumn)
         )
     }
     StudyLibraryEnsureInternalColumnHidden(slState)
@@ -23675,11 +26844,8 @@ StudyLibraryApplyColumns(slState) {
     }
     for slColumn in slState["columns"] {
         slWidth := slColumn["visible"] ? slColumn["width"] : 0
-        slTitle := slColumn["label"]
-        if StudyLibraryColumnFilterActive(slState, slColumn["key"])
-            slTitle .= "  ▼"
         slState["list"].ModifyCol(
-            slColumn["index"], slWidth, slTitle
+            slColumn["index"], slWidth, StudyLibraryColumnTitle(slState, slColumn)
         )
     }
     StudyLibraryEnsureInternalColumnHidden(slState)
@@ -24432,13 +27598,14 @@ StudyLibraryOpenColumns(slState, *) {
     if StudyLibraryBigBoxPresentation(slState)
         return StudyLibraryOpenBigBoxColumns(slState)
     StudyLibraryCaptureColumnWidths(slState)
+    ; @DESKTOP_COLUMNS_CONTROLS_BEGIN@
     slDialog := Gui(
         "+Owner" slState["gui"].Hwnd " +OwnDialogs",
         "Study Library - Columns"
     )
     slDialog.MarginX := 18, slDialog.MarginY := 16
     slDialog.SetFont("s10", "Segoe UI")
-    slDialog.Add("Text", "xm ym w320", "Choose which columns are shown:")
+    slHeading := slDialog.Add("Text", "xm ym w320", "Choose which columns are shown:")
     slChecks := []
     for slColumn in slState["columns"] {
         slCheck := slDialog.Add("CheckBox", "xm y+9 w300", slColumn["label"])
@@ -24460,8 +27627,15 @@ StudyLibraryOpenColumns(slState, *) {
     slCancel.OnEvent("Click", StudyLibraryCloseDialog.Bind(slDialog))
     slDialog.OnEvent("Escape", StudyLibraryCloseDialog.Bind(slDialog))
     slDialog.OnEvent("Close", StudyLibraryCloseDialog.Bind(slDialog))
-    slDialog.Show("AutoSize Center")
-    CPApplyOwnedDialogTheme(slDialog)
+    slDesktop := StudyDesktopMetadataCreate(Map("gui", slDialog, "libraryState", slState), "columns",
+        Map("heading", slHeading, "checks", slChecks, "hint", slHint, "save", slApply, "cancel", slCancel))
+    ; @DESKTOP_COLUMNS_CONTROLS_END@
+    if IsObject(slDesktop)
+        StudyDesktopDialogShow(slDesktop, 700, 630, slChecks[1])
+    else {
+        slDialog.Show("AutoSize Center")
+        CPApplyOwnedDialogTheme(slDialog)
+    }
 }
 
 StudyLibraryQueueImageLayout(slState, slDelay := 24) {
@@ -24685,6 +27859,20 @@ StudyLibraryBigBoxPresentation(slState) {
     return IsObject(slState) && slState.Get("bigBoxPresentation", false)
 }
 
+StudyLibraryClearButtonHover(slState) {
+    if !StudyLibraryBigBoxPresentation(slState) || !StudyLibraryStateAlive(slState)
+        return
+    ; A hidden/stationary mouse can leave a native Button in BST_HOT after a
+    ; fullscreen page transition. Controller focus is conveyed by the blue
+    ; frame, not by a second light-gray mouse highlight on a different button.
+    for slControl in slState["gui"] {
+        if slControl.Type != "Button"
+            continue
+        if (SendMessage(0x00F2, 0, 0, slControl.Hwnd) & 0x0200) ; BM_GETSTATE / BST_HOT
+            SendMessage(0x02A3, 0, 0, slControl.Hwnd) ; WM_MOUSELEAVE
+    }
+}
+
 StudyLibraryApplyBigBoxFonts(slState, slRatio) {
     if !StudyLibraryBigBoxPresentation(slState)
         return
@@ -24723,7 +27911,6 @@ StudyLibraryApplyBigBoxFonts(slState, slRatio) {
         "imageInfo", "sourceLabel", "status"
     ]
         slState[slLabelKey].SetFont("s" Round(10.5 * slRatio, 2) " Norm")
-    StudyBigBoxTableModeApplyFonts(slState, slRatio)
 }
 
 StudyLibraryApplyBigBoxTheme(slState) {
@@ -24751,7 +27938,6 @@ StudyLibraryApplyBigBoxTheme(slState) {
             "c" ((slPanelKey = "detailTitle") ? slColors["text"] : slColors["muted"])
         )
     }
-    StudyBigBoxTableModeApplyTheme(slState, slColors)
     CPApplyOwnedDialogTheme(slState["gui"])
     StudyBigBoxFocusFrameEnsure(slState)
 }
@@ -24834,13 +28020,6 @@ StudyLibraryResizeBigBox(slState, slGui, slWidth, slHeight) {
         )
 
         slState["bigBoxLayoutScale"] := slScale
-        if StudyBigBoxTableModeLayout(
-            slState,
-            slInnerX, slPanelY + slPanelPad,
-            slInnerW, slInnerBottom - (slPanelY + slPanelPad), slScale
-        )
-            return
-
         slToolbarH := Max(36, Round(42 * slScale))
         slToolbarY := slPanelY + slPanelPad
         slLibraryLabelW := Max(62, Round(72 * slScale))
@@ -24888,11 +28067,6 @@ StudyLibraryResizeBigBox(slState, slGui, slWidth, slHeight) {
             )
             slActionX += slActionW + slGap
         }
-        slTableModeW := Max(106, Round(142 * slScale))
-        slState["tableModeControls"]["enter"].Move(
-            slActionX, slActionY, slTableModeW, slActionH
-        )
-        slActionX += slTableModeW + slGap
         slChapterStatusW := Max(0, slInnerRight - slActionX)
         if slChapterStatusW >= Max(100, Round(120 * slScale)) {
             slState["currentChapterStatus"].Move(
@@ -24932,8 +28106,7 @@ StudyLibraryResizeBigBox(slState, slGui, slWidth, slHeight) {
         slArrowW := Max(34, Round(42 * slScale))
         slRemoveW := Max(126, Round(154 * slScale))
         slState["versionLabel"].Move(
-            slRightX, slVersionY + Round(8 * slScale),
-            slVersionLabelW, Max(22, Round(24 * slScale))
+            slRightX, slVersionY, slVersionLabelW, slVersionH
         )
         slVersionPrevX := slRightX + slVersionLabelW
         slState["previousVersion"].Move(
@@ -25019,8 +28192,10 @@ StudyLibraryResizeBigBox(slState, slGui, slWidth, slHeight) {
             "w", Max(1, slImageW - 8),
             "h", Max(1, slImageH - 8)
         )
-        slNavArrowW := Max(34, Round(40 * slScale))
-        slOpenImageW := Max(86, Round(112 * slScale))
+        ; Reserve a single line for the full action label. The compact counter
+        ; and narrower arrow buttons leave more room without shrinking text.
+        slNavArrowW := Max(28, Round(32 * slScale))
+        slOpenImageW := Max(128, Round(160 * slScale))
         slImageInfoW := Max(
             40,
             slImageW - slNavArrowW * 2 - slOpenImageW - slGap * 3
@@ -25030,8 +28205,7 @@ StudyLibraryResizeBigBox(slState, slGui, slWidth, slHeight) {
         )
         slState["imageInfo"].Move(
             slRightX + slNavArrowW + slGap,
-            slImageNavY + Round(6 * slScale),
-            slImageInfoW, Max(20, Round(22 * slScale))
+            slImageNavY, slImageInfoW, slImageNavH
         )
         slNextImageX := slRightX + slNavArrowW + slGap
             + slImageInfoW + slGap
@@ -25102,6 +28276,8 @@ StudyLibraryResize(slState, slGui, slMinMax, slWidth, slHeight) {
         slState["deferredResizeHeight"] := slHeight
         return
     }
+    if slState.Has("desktop")
+        return StudyDesktopResize(slState, slWidth, slHeight)
     if slVisible
         DllCall("user32\SendMessageW", "ptr", slHwnd, "uint", 0x000B,
             "ptr", 0, "ptr", 0) ; WM_SETREDRAW off
@@ -25186,7 +28362,7 @@ StudyLibraryResize(slState, slGui, slMinMax, slWidth, slHeight) {
     slDetailY := slContentY
     slState["detailTitle"].Move(slRightX, slDetailY, slRightW, 24)
     slVersionY := slDetailY + 27
-    slState["versionLabel"].Move(slRightX, slVersionY + 4, 58, 22)
+    slState["versionLabel"].Move(slRightX, slVersionY, 58, 30)
     slArrowW := 34, slVersionGap := 6
     slPreviousVersionX := slRightX + 58
     slState["previousVersion"].Move(
@@ -25299,9 +28475,14 @@ StudyLibrarySaveBounds(slState) {
 }
 
 StudyLibraryClose(slState, *) {
-    global CPStudyLibraryState, CPStudyCandidateState
+    global CPStudyLibraryState, CPStudyCandidateState, CPStudyReaderState
     if !IsObject(slState)
         return
+    ; Keep an open Reader (including unsaved edits) alive when its Library
+    ; closes. Windows would otherwise destroy owned windows with the owner.
+    if IsObject(CPStudyReaderState)
+        && CPStudyReaderState.Get("returnToDesktopLibrary", 0) = slState
+        StudyReaderDetachDesktopOwner(CPStudyReaderState)
     slReturnToBigBox := slState.Get("returnToBigBox", false)
     slState["closed"] := true
     try SetTimer(slState["imageLayoutCallback"], 0)
@@ -25510,6 +28691,15 @@ OpenStandaloneStudyLibrary(*) {
     OpenStudyLibraryWindow(true)
 }
 
+StudyLibraryFocusOnOpen(slState) {
+    if !StudyLibraryStateAlive(slState)
+        return
+    ; Desktop keeps active table selection for the first mouse double-click.
+    ; Fullscreen starts on the Library selector and never detours via the table.
+    slControl := slState[StudyLibraryBigBoxPresentation(slState) ? "libraryDdl" : "list"]
+    StudyControllerSetFocus(slState["gui"].Hwnd, slControl.Hwnd)
+}
+
 OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
     global CPStudyLibraryState, studyLibraryDir, ui, iniPath, controlDarkMode
     global CPPreviousForegroundHwnd
@@ -25522,13 +28712,14 @@ OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
             StudyLibraryClose(CPStudyLibraryState)
         else {
         try {
-            CPStudyLibraryState["gui"].Show()
+            if StudyLibraryBigBoxPresentation(CPStudyLibraryState) {
+                CPStudyLibraryState["gui"].Show("NA")
+                StudyLibraryFocusOnOpen(CPStudyLibraryState)
+            } else
+                CPStudyLibraryState["gui"].Show()
             WinActivate("ahk_id " CPStudyLibraryState["gui"].Hwnd)
             StudyLibraryRefresh(CPStudyLibraryState)
-            ; A programmatically selected ListView row remains an inactive gray
-            ; selection until the table owns keyboard focus. Without this,
-            ; Windows consumes the first double-click merely to focus it.
-            CPStudyLibraryState["list"].Focus()
+            StudyLibraryFocusOnOpen(CPStudyLibraryState)
             CPControllerResetNavigation()
             return
         }
@@ -25566,7 +28757,6 @@ OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
     ; controls. These static surfaces are created first so all interactive
     ; controls remain above them in native child-window order.
     slBigBoxControls := Map()
-    slTableModeControls := Map()
     if slBigBoxPresentation {
         slBigBoxControls["accent"] := slGui.Add(
             "Text", "x0 y0 w10 h8 Disabled Background" slInitialColors["accent"], ""
@@ -25595,9 +28785,6 @@ OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
             "Text", "x50 y820 w1200 h42 Center",
             "D-pad / arrows  Navigate     A / Cross / Enter  Select     "
                 . "B / Circle / Esc  Back to dashboard"
-        )
-        slTableModeControls := StudyBigBoxTableModeCreate(
-            slGui, slInitialColors
         )
     }
 
@@ -25654,14 +28841,14 @@ OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
     slList.ModifyCol(slColumns.Length + 1, 0)
     slDetailTitle := slGui.Add("Text", "x468 y94 w638 h24 +0x200", "Select an explanation.")
     slDetailTitle.SetFont("s11 Bold")
-    slVersionLabel := slGui.Add("Text", "x468 y125 w58", "Version:")
+    slVersionLabel := slGui.Add("Text", "x468 y121 w58 h30 +0x200", "Version:")
     ; Keep the original list hidden as the version data model. The visible
-    ; read-only field and arrow buttons provide simpler navigation.
+    ; display label and arrow buttons provide simpler navigation.
     slVersionDdl := slGui.Add(
         "DropDownList", "x0 y0 w1 h1 Hidden 0x210", []
     )
-    slVersionView := slGui.Add(
-        "Edit", "x526 y121 w300 h30 ReadOnly", ""
+    slVersionView := StudyLibraryAddVersionDisplay(
+        slGui, "x526 y121 w300 h30"
     )
     slRemoveVersionButton := slGui.Add(
         "Button", "x526 y155 w154 h30 Disabled", "Remove version..."
@@ -25679,7 +28866,10 @@ OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
     slPicture := slGui.Add("Picture", "x472 y219 w1 h1 Hidden", "")
     slPreviousImage := slGui.Add("Button", "x468 y410 w34 h27", "‹")
     slNextImage := slGui.Add("Button", "x508 y410 w34 h27", "›")
-    slImageInfo := slGui.Add("Text", "x550 y414 w300", "No source screenshot selected.")
+    slImageInfo := slGui.Add("Text", "x550 y414 w300",
+        slBigBoxPresentation ? "No image" : "No source screenshot selected.")
+    if slBigBoxPresentation
+        slImageInfo.Opt("+0x201") ; SS_CENTER | SS_CENTERIMAGE
     slOpenImage := slGui.Add("Button", "x994 y410 w112 h27", "Open full image")
     slSourceLabel := slGui.Add("Text", "x468 y443 w638 h20", "Original Japanese")
     slSource := slGui.Add("Edit", "x468 y463 w638 h90 ReadOnly Multi VScroll")
@@ -25699,22 +28889,6 @@ OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
     slBigBoxReturnButton := slBigBoxPresentation
         ? slGui.Add("Button", "x956 y732 w180 h40", "Back to Dashboard")
         : 0
-    slTableModeNormalControls := []
-    if slBigBoxPresentation {
-        slTableModeNormalControls := [
-            slLibraryLabel, slLibraryDdl, slNewLibraryButton,
-            slSearch, slSearchButton, slRefreshButton,
-            slFilterButton, slColumnsButton, slEditDetailsButton,
-            slStudyButton, slAnkiButton, slCurrentChapterButton,
-            slCurrentChapterStatus, slDetailTitle, slVersionLabel,
-            slVersionView, slPreviousVersion, slNextVersion,
-            slRemoveVersionButton, slMetadata, slImageLabel, slImageFrame,
-            slPicture, slPreviousImage, slNextImage, slImageInfo, slOpenImage,
-            slSourceLabel, slSource, slStatus, slExportButton, slStorageButton,
-            slBigBoxReturnButton, slTableModeControls["enter"]
-        ]
-    }
-
     slState := Map(
         "gui", slGui,
         "database", studyLibraryDir "\study_library.db",
@@ -25774,10 +28948,6 @@ OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
         "bigBoxControls", slBigBoxControls,
         "bigBoxFontRatio", 0,
         "bigBoxLayoutScale", 1,
-        "tableModeSurface", "library",
-        "tableModeControls", slTableModeControls,
-        "tableModeNormalControls", slTableModeNormalControls,
-        "tableModeActive", false,
         "returnToBigBox", false,
         "groups", [],
         "detailTitle", slDetailTitle,
@@ -25801,6 +28971,7 @@ OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
         "nextImage", slNextImage,
         "imageInfo", slImageInfo,
         "openImage", slOpenImage,
+        "compactImageNavigation", slBigBoxPresentation,
         "imageArea", Map("x", 472, "y", 219, "w", 630, "h", 182),
         "media", [],
         "mediaIndex", 0,
@@ -25838,7 +29009,6 @@ OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
     CPStudyLibraryState := slState
     if slBigBoxPresentation {
         StudyBigBoxFocusFrameStart(slState)
-        StudyBigBoxTableModeBind(slState)
     }
 
     OnMessage(0x004E, slState["headerNotifyCallback"])
@@ -25877,6 +29047,7 @@ OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
     slGui.OnEvent("Escape", StudyLibraryClose.Bind(slState))
     slGui.OnEvent("Close", StudyLibraryClose.Bind(slState))
     slGui.OnEvent("ContextMenu", StudyLibraryContextMenu.Bind(slState))
+    StudyDesktopCreate(slState, "library")
 
     if slBigBoxPresentation {
         slBigBoxBounds := CPBigBoxMonitorBounds(CPPreviousForegroundHwnd)
@@ -25908,8 +29079,8 @@ OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
         try slSavedH := Integer(slSavedH)
         catch
             slSavedH := slDefaultH
-        slSavedW := Max(640, Min(slMaxW, slSavedW))
-        slSavedH := Max(440, Min(slMaxH, slSavedH))
+        slSavedW := Max(slState.Has("desktop") ? 960 : 640, Min(slMaxW, slSavedW))
+        slSavedH := Max(slState.Has("desktop") ? 700 : 440, Min(slMaxH, slSavedH))
         slGui.Show("Hide w" slSavedW " h" slSavedH)
         CPApplyOwnedDialogTheme(slGui)
     }
@@ -25943,6 +29114,7 @@ OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
             "NA x" slBigBoxBounds["x"] " y" slBigBoxBounds["y"]
                 . " w" slBigBoxBounds["w"] " h" slBigBoxBounds["h"]
         )
+        StudyLibraryFocusOnOpen(slState)
         try DllCall(
             "user32\RedrawWindow", "ptr", slGui.Hwnd,
             "ptr", 0, "ptr", 0,
@@ -25966,11 +29138,7 @@ OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
             StudyWindowRevealFinished(slGui, "Center")
     }
     WinActivate("ahk_id " slGui.Hwnd)
-    ; Give the populated table focus immediately so its initial selected row is
-    ; active and the first double-click reaches the ListView event handler.
-    slList.Focus()
-    if slBigBoxPresentation
-        StudyBigBoxFocusFrameUpdate(slState, slList.Hwnd)
+    StudyLibraryFocusOnOpen(slState)
     ; The Study Library has its own concise first-run introduction. Keeping its
     ; preference separate from the main setup guide also covers users who open
     ; the standalone Library before ever showing the control panel.
@@ -26324,6 +29492,7 @@ Hotkeys_ShowConflicts() {
     if (c.Count = 0) {
         if IsSet(hkConflictText)
             hkConflictText.Text := ""
+        CPDesktopSyncBindingConflicts(c)
         return 0
     }
     ; Tint conflicted rows and compose banner
@@ -26337,6 +29506,7 @@ Hotkeys_ShowConflicts() {
     }
     if IsSet(hkConflictText)
         hkConflictText.Text := "Conflicts: " . JoinWith(banner, "    ")
+    CPDesktopSyncBindingConflicts(c)
     return c.Count
 }
 
@@ -27021,6 +30191,19 @@ StudyControllerFocusedHwnd(rootHwnd) {
 StudyControllerSetFocus(rootHwnd, controlHwnd) {
     if !rootHwnd || !controlHwnd
         return false
+    ; The prompt editor keeps its keyboard caret/selection when the controller
+    ; returns from its actions, instead of native Focus selecting the whole text.
+    studyEditSelection := 0
+    try {
+        studyGui := GuiFromHwnd(rootHwnd)
+        if (studyGui.HasOwnProp("StudyPreserveEditSelection")
+            && studyGui.StudyPreserveEditSelection
+            && StudyControllerIsMultilineEdit(controlHwnd)
+            && !StudyControllerIsReadOnlyEdit(controlHwnd)) {
+            studyEditSelection := Buffer(8, 0)
+            SendMessage(0x00B0, studyEditSelection.Ptr, studyEditSelection.Ptr + 4, controlHwnd)
+        }
+    }
     ; Reveal the normal Windows keyboard-focus cue without repainting every
     ; child. The Study windows keep their desktop appearance and avoid the
     ; all-control flash that a full RedrawWindow pass can cause.
@@ -27031,6 +30214,9 @@ StudyControllerSetFocus(rootHwnd, controlHwnd) {
         studyCtrl := GuiCtrlFromHwnd(controlHwnd)
         if IsObject(studyCtrl) {
             studyCtrl.Focus()
+            if IsObject(studyEditSelection)
+                SendMessage(0x00B1, NumGet(studyEditSelection, 0, "uint"),
+                    NumGet(studyEditSelection, 4, "uint"), controlHwnd)
             StudyControllerClearReadOnlyEditSelection(controlHwnd)
             if StudyControllerSurfaceForWindow(rootHwnd, &studySurface)
                 StudyBigBoxFocusFrameUpdate(
@@ -27041,6 +30227,9 @@ StudyControllerSetFocus(rootHwnd, controlHwnd) {
     }
     try {
         ControlFocus("ahk_id " controlHwnd, "ahk_id " rootHwnd)
+        if IsObject(studyEditSelection)
+            SendMessage(0x00B1, NumGet(studyEditSelection, 0, "uint"),
+                NumGet(studyEditSelection, 4, "uint"), controlHwnd)
         StudyControllerClearReadOnlyEditSelection(controlHwnd)
         if StudyControllerSurfaceForWindow(rootHwnd, &studySurface)
             StudyBigBoxFocusFrameUpdate(studySurface["state"], controlHwnd)
@@ -27092,6 +30281,20 @@ StudyControllerIsReadOnlyMultilineEdit(hwnd) {
 
 StudyControllerScrollReadOnlyEdit(hwnd, direction) {
     if !StudyControllerIsReadOnlyMultilineEdit(hwnd)
+        return false
+    return StudyControllerScrollMultilineEdit(hwnd, direction)
+}
+
+StudyControllerIsMultilineEdit(hwnd) {
+    if StudyControllerControlClass(hwnd) != "Edit"
+        return false
+    try return (DllCall("user32\GetWindowLongPtr", "ptr", hwnd,
+        "int", -16, "ptr") & 0x0004) != 0
+    return false
+}
+
+StudyControllerScrollMultilineEdit(hwnd, direction) {
+    if !StudyControllerIsMultilineEdit(hwnd)
         return false
     studyBeforeLine := 0, studyAfterLine := 0
     try studyBeforeLine := SendMessage(
@@ -27229,6 +30432,35 @@ StudyControllerListViewCanMove(hwnd, direction) {
         : studyFocusedIndex < studyCount - 1
 }
 
+StudyControllerScrollTable(hwnd, direction, scale := 1) {
+    if (StudyControllerControlClass(hwnd) != "SysListView32"
+        || (direction != "Left" && direction != "Right"))
+        return false
+    studyScroll := Buffer(28, 0)
+    NumPut("uint", 28, studyScroll, 0)
+    NumPut("uint", 0x7, studyScroll, 4) ; SIF_RANGE | SIF_PAGE | SIF_POS
+    if !DllCall("user32\GetScrollInfo", "ptr", hwnd, "int", 0,
+        "ptr", studyScroll.Ptr, "int") ; SB_HORZ
+        return false
+    studyMin := NumGet(studyScroll, 8, "int")
+    studyMax := Max(studyMin, NumGet(studyScroll, 12, "int")
+        - Max(0, NumGet(studyScroll, 16, "uint") - 1))
+    studyPos := NumGet(studyScroll, 20, "int")
+    studyRemaining := direction = "Left"
+        ? studyPos - studyMin : studyMax - studyPos
+    if (studyRemaining <= 0)
+        return false
+    studyStep := Min(studyRemaining, Round(180 * Max(0.72, scale)))
+    try {
+        SendMessage(0x1014, direction = "Left" ? -studyStep : studyStep,
+            0, hwnd) ; LVM_SCROLL: pixels, preserves the selected row
+        ; Reaching the edge consumes this move. Only a subsequent move at the
+        ; edge can leave the table, just as Up/Down exits at the first/last row.
+        return true
+    }
+    return false
+}
+
 StudyControllerMoveFocus(rootHwnd, direction) {
     studyItems := StudyControllerFocusableHwnds(rootHwnd)
     if !studyItems.Length
@@ -27305,22 +30537,61 @@ StudyControllerMove(direction, targetHwnd, studySurface) {
     studyFocused := StudyControllerFocusedHwnd(targetHwnd)
     studyClass := StudyControllerControlClass(studyFocused)
 
-    if (targetHwnd = studyRoot
-        && StudyBigBoxTableModeActive(studySurface["state"])
-        && studyFocused = StudyBigBoxTableModeCurrentList(
-            studySurface["state"]
-        ).Hwnd
-        && (direction = "Left" || direction = "Right"))
-        return StudyBigBoxTableModeScroll(
-            studySurface["state"], direction = "Left" ? -1 : 1
-        )
-
     if (studyFocused && CPHwndIsCombo(studyFocused)
         && CPComboDropped(studyFocused)) {
         studyVk := direction = "Up" ? 0x26
             : direction = "Down" ? 0x28
             : direction = "Left" ? 0x25 : 0x27
         return StudyControllerSendControlKey(studyFocused, studyVk)
+    }
+    try {
+        studyGui := GuiFromHwnd(targetHwnd)
+        if studyGui.HasOwnProp("StudyLibraryManagementForm") {
+            studyManagement := studyGui.StudyLibraryManagementForm
+            if studyManagement.Has("list") && studyFocused = studyManagement["list"].Hwnd {
+                if direction = "Up" || direction = "Down" {
+                    if StudyControllerListViewCanMove(studyFocused, direction)
+                        return StudyControllerSendControlKey(studyFocused, direction = "Up" ? 0x26 : 0x28)
+                } else if StudyControllerScrollTable(studyFocused, direction, 1)
+                    return true
+                if direction = "Right" {
+                    StudyLibraryManagementListActions(studyManagement)
+                    return true
+                }
+                return StudyControllerMoveFocus(targetHwnd, direction)
+            }
+        }
+        if studyGui.HasOwnProp("StudyVocabularyPicker")
+            && studyFocused = studyGui.StudyVocabularyPicker["controls"]["list"].Hwnd
+            && (direction = "Up" || direction = "Down") {
+            if StudyControllerListViewCanMove(studyFocused, direction)
+                return StudyControllerSendControlKey(studyFocused, direction = "Up" ? 0x26 : 0x28)
+            ; The only action below the list is Back, across from the static hint.
+            if direction = "Down"
+                return StudyControllerSetFocus(targetHwnd, studyGui.StudyVocabularyPicker["controls"]["back"].Hwnd)
+            return StudyControllerMoveFocus(targetHwnd, direction)
+        }
+        studyLinkKey := studyFocused "|" direction
+        if studyGui.HasOwnProp("StudyDirectionalFocus")
+            && studyGui.StudyDirectionalFocus.Has(studyLinkKey) {
+            studyNeighbor := studyGui.StudyDirectionalFocus[studyLinkKey]
+            if CPHwndIsFocusable(studyNeighbor) {
+                ; Explicit editor neighbors apply only at the scroll boundary,
+                ; just like the normal spatial-navigation fallback below.
+                if StudyControllerIsMultilineEdit(studyFocused)
+                    && (direction = "Up" || direction = "Down")
+                    && StudyControllerScrollMultilineEdit(studyFocused, direction)
+                    return true
+                return StudyControllerSetFocus(targetHwnd, studyNeighbor)
+            }
+        }
+    }
+    if (targetHwnd = studyRoot && studyClass = "SysListView32"
+        && (direction = "Left" || direction = "Right")) {
+        if StudyControllerScrollTable(studyFocused, direction,
+            studySurface["state"].Get("bigBoxLayoutScale", 1))
+            return true
+        return StudyControllerMoveFocus(targetHwnd, direction)
     }
     if (targetHwnd = studyRoot && studyClass = "SysListView32"
         && (direction = "Up" || direction = "Down")) {
@@ -27332,10 +30603,9 @@ StudyControllerMove(direction, targetHwnd, studySurface) {
         ; table instead of trapping D-pad navigation inside the ListView.
         return StudyControllerMoveFocus(targetHwnd, direction)
     }
-    if (targetHwnd = studyRoot
-        && StudyControllerIsReadOnlyMultilineEdit(studyFocused)
+    if (StudyControllerIsMultilineEdit(studyFocused)
         && (direction = "Up" || direction = "Down")) {
-        if StudyControllerScrollReadOnlyEdit(studyFocused, direction)
+        if StudyControllerScrollMultilineEdit(studyFocused, direction)
             return true
         ; Once the viewer reaches its first/last visible line—or when all text
         ; already fits—continue to the nearest control in that direction.
@@ -27356,6 +30626,21 @@ StudyControllerActivate(targetHwnd, studySurface) {
     studyFocused := StudyControllerFocusedHwnd(targetHwnd)
     if !studyFocused
         return StudyControllerMoveFocus(targetHwnd, "Down")
+    try {
+        studyGui := GuiFromHwnd(targetHwnd)
+        if studyGui.HasOwnProp("StudyLibraryManagementForm") {
+            studyManagement := studyGui.StudyLibraryManagementForm
+            if studyManagement.Has("list") && studyFocused = studyManagement["list"].Hwnd {
+                StudyLibraryManagementListActions(studyManagement)
+                return true
+            }
+        }
+        if studyGui.HasOwnProp("StudyVocabularyPicker")
+            && studyFocused = studyGui.StudyVocabularyPicker["controls"]["list"].Hwnd {
+            StudyReaderVocabularyPickerChoose(studyGui.StudyVocabularyPicker)
+            return true
+        }
+    }
     if CPHwndIsCombo(studyFocused) {
         if !CPComboDropped(studyFocused)
             return StudyControllerBeginComboSelection(
@@ -27398,12 +30683,34 @@ StudyControllerCancel(targetHwnd, studySurface) {
     if (studyFocused && CPHwndIsCombo(studyFocused)
         && CPComboDropped(studyFocused))
         return StudyControllerCancelComboSelection(studyFocused)
+    try {
+        studyGui := GuiFromHwnd(targetHwnd)
+        if studyGui.HasOwnProp("StudyOwnedMessage") {
+            studyMessage := studyGui.StudyOwnedMessage
+            StudyLibraryOwnedMessageClose(studyMessage, studyMessage["result"])
+            return true
+        }
+        if studyGui.HasOwnProp("StudyLibraryManagementForm") {
+            StudyLibraryManagementClose(studyGui)
+            return true
+        }
+        if studyGui.HasOwnProp("StudyChapterForm") {
+            StudyLibraryCloseCurrentChapterDialog(studyGui.StudyChapterForm["libraryState"], studyGui)
+            return true
+        }
+        if studyGui.HasOwnProp("StudyAnkiPreview") {
+            StudyReaderCloseAnkiAddDialog(studyGui.StudyAnkiPreview)
+            return true
+        }
+        if studyGui.HasOwnProp("StudyVocabularyPicker") {
+            StudyReaderVocabularyPickerClose(studyGui.StudyVocabularyPicker)
+            return true
+        }
+    }
     if (targetHwnd != studySurface["hwnd"]) {
         StudyControllerSendKey("Esc")
         return true
     }
-    if StudyBigBoxTableModeActive(studySurface["state"])
-        return StudyBigBoxTableModeSet(studySurface["state"], false)
     switch studySurface["kind"] {
         case "library":
             StudyLibraryClose(studySurface["state"])
@@ -27470,11 +30777,21 @@ StudyControllerDispatchNavigation(command, targetHwnd) {
     if !StudyControllerSurfaceForWindow(targetHwnd, &studySurface)
         return false
     CPControllerLastNativeNavigationAt[command] := A_TickCount
+    if studySurface["kind"] = "library" && targetHwnd = studySurface["hwnd"]
+        StudyLibraryClearButtonHover(studySurface["state"])
+    try {
+        studyGui := GuiFromHwnd(targetHwnd)
+        if studyGui.HasOwnProp("StudyVocabularyPicker")
+            && studyGui.StudyVocabularyPicker.Get("pending", false) && command != "Cancel"
+            return true ; Keep the chosen row stable while its review is opening.
+    }
 
     ; Handle the custom menu state directly. These rows are lightweight Static
     ; controls; relying on Windows to forward synthetic key messages through the
     ; focused row is inconsistent across Windows versions and controller paths.
     if StudyControllerHandleChoicePopup(command, targetHwnd)
+        return true
+    if StudyLibraryDatePickerNavigate(command, targetHwnd)
         return true
 
     switch command {
@@ -27860,12 +31177,19 @@ CPSetControlsView(viewName, persist := true, *) {
         rbControlsKeyboard.Value := viewName = "keyboard" ? 1 : 0
     if IsSet(rbControlsController)
         rbControlsController.Value := viewName = "controller" ? 1 : 0
-    for ctrl in CPControlsKeyboardControls
-        try ctrl.Visible := viewName = "keyboard"
-    for ctrl in CPControlsControllerControls
-        try ctrl.Visible := viewName = "controller"
+    ; The modern layout reveals the new view atomically. Do not briefly show
+    ; the old headers or move the hidden view's controls over another page.
+    if !CPDesktopActive() {
+        for ctrl in CPControlsKeyboardControls
+            try ctrl.Visible := viewName = "keyboard"
+        for ctrl in CPControlsControllerControls
+            try ctrl.Visible := viewName = "controller"
+    }
     if persist
         IniWrite(viewName, iniPath, "controller_inputs", "view")
+    global tab
+    if CPDesktopActive() && tab.Value = 8
+        CPDesktopRelayout()
 }
 ; =====================================================================
 
@@ -27946,7 +31270,7 @@ AddModelValue(arr, key, combo, newModel) {
         return false
     for v in arr
         if (StrLower(v) = StrLower(newModel)) {
-            MsgBox("Already in the list: " newModel, "Add model")
+            CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Already in the list: " newModel, "Add model", "ok", "info")
             return false
         }
     arr.Push(newModel)            ; modifies the original array
@@ -27957,7 +31281,7 @@ AddModelValue(arr, key, combo, newModel) {
 }
 
 AddModel(arr, key, combo) {
-    newModel := Trim(CPThemedInputBox("Add model:", "Add", "", "", 360).Value)
+    newModel := Trim(CPThemedInputBox("Model ID", "Add model", "Enter the exact model ID supplied by the provider.", "", 420).Value)
     return AddModelValue(arr, key, combo, newModel)
 }
 
@@ -28016,6 +31340,9 @@ CPApplyOwnedDialogTheme(dlg) {
             }
             CPApplyThemeToControl(controlHwnd, controlDarkMode)
         }
+        studyDesktop := StudyDesktopContext(cpDialogHwnd)
+        if IsObject(studyDesktop)
+            StudyDesktopTheme(studyDesktop)
         if !DllCall("user32\IsWindow", "ptr", cpDialogHwnd, "int")
             return false
         DllCall(
@@ -28057,11 +31384,182 @@ CPThemedDialogFinish(cpDialogState, cpDialog, cpResult, *) {
     try cpDialog.Destroy()
 }
 
+CPDialogPresentation(ownerHwnd) {
+    global ui, CPBigBoxGui
+    if !ownerHwnd || !DllCall("user32\IsWindow", "ptr", ownerHwnd, "int")
+        return "classic"
+    root := DllCall("user32\GetAncestor", "ptr", ownerHwnd, "uint", 2, "ptr")
+    ; Follow the actual owner, not the current global mode: a desktop window
+    ; and a fullscreen Reader may coexist, including several nested dialogs.
+    Loop 16 {
+        try {
+            dialog := GuiFromHwnd(root)
+            if dialog.HasOwnProp("CPDialogPresentation")
+                return dialog.CPDialogPresentation
+            if IsObject(CPBigBoxGui) && root = CPBigBoxGui.Hwnd
+                return "fullscreen"
+        }
+        if StudyControllerSurfaceForWindow(root, &surface)
+            && surface["state"].Get("bigBoxPresentation", false)
+            return "fullscreen"
+        if CPDesktopActive() {
+            if IsObject(StudyDesktopContext(root))
+                return "desktop"
+            try {
+                if root = ui.Hwnd
+                    return "desktop"
+            }
+        }
+        root := DllCall("user32\GetWindow", "ptr", root, "uint", 4, "ptr")
+        if !root
+            break
+    }
+    return "classic"
+}
+
+CPDialogMessageSubtitle(buttons, icon) {
+    return buttons = "yesno" ? "Confirmation"
+        : icon = "error" ? "Error" : icon = "info" ? "Information" : "Please check"
+}
+
+CPDialogPopupColors(ownerHwnd) {
+    global controlDarkMode
+    if CPDialogPresentation(ownerHwnd) != "desktop"
+        return CPPalette(controlDarkMode)
+    colors := CPDesktopPalette()
+    return Map("window", colors["field"], "surface", colors["field"], "text", colors["text"],
+        "muted", colors["muted"], "border", colors["border"], "focus", colors["selected"],
+        "accentFocus", colors["selected"], "accentText", colors["text"])
+}
+
+CPDialogPopupFinishLayout(s) {
+    if !s.Get("modern", false)
+        return
+    s["gui"].BackColor := s["colors"]["surface"]
+    ; Windows 11 can provide the subtle outline/corners; older Windows keeps
+    ; the normal popup frame. Neither changes the menu's native hit testing.
+    corner := Buffer(4, 0), border := Buffer(4, 0)
+    NumPut("uint", 2, corner), NumPut("uint", CPColorRef(s["colors"]["border"]), border)
+    try DllCall("dwmapi\DwmSetWindowAttribute", "ptr", s["gui"].Hwnd, "uint", 33, "ptr", corner, "uint", 4)
+    try DllCall("dwmapi\DwmSetWindowAttribute", "ptr", s["gui"].Hwnd, "uint", 34, "ptr", border, "uint", 4)
+}
+
+CPDialogClampPopup(&x, &y, width, height, anchorTop, anchorHwnd := 0) {
+    monitor := anchorHwnd ? DllCall("user32\MonitorFromWindow", "ptr", anchorHwnd, "uint", 2, "ptr")
+        : DllCall("user32\MonitorFromPoint", "int64", (y << 32) | (x & 0xFFFFFFFF), "uint", 2, "ptr")
+    info := Buffer(40, 0), NumPut("uint", 40, info)
+    if !monitor || !DllCall("user32\GetMonitorInfoW", "ptr", monitor, "ptr", info)
+        return
+    left := NumGet(info, 20, "int"), top := NumGet(info, 24, "int")
+    right := NumGet(info, 28, "int"), bottom := NumGet(info, 32, "int")
+    x := Max(left, Min(x, right - width))
+    if y + height > bottom
+        y := anchorTop - height
+    y := Max(top, Min(y, bottom - height))
+}
+
+CPFullscreenMenuCreate(ownerHwnd, items, title := "Actions") {
+    g := Gui("+Owner" ownerHwnd " +OwnDialogs +AlwaysOnTop -Caption +ToolWindow -DPIScale", title)
+    g.SetFont("s12", "Segoe UI")
+    g.CPDialogPresentation := "fullscreen"
+    parent := Map("gui", GuiFromHwnd(ownerHwnd), "bigBoxPresentation", true, "libraryName", StudyLibraryConfiguredName())
+    s := StudyLibraryBigBoxFormState(g, parent, title, "Choose an action. Back closes this menu without making changes.")
+    s["closed"] := false, s["result"] := 0, s["items"] := [], s["page"] := 1
+    for index, item in items {
+        if item.Has("label") && !item.Get("separator", false)
+            s["items"].Push(Map("label", item["label"], "enabled", item.Get("enabled", true), "index", index))
+    }
+    s["pages"] := Max(1, Ceil(s["items"].Length / 6))
+    s["slots"] := []
+    Loop 6 {
+        row := g.AddButton("x0 y0 w10 h10", "")
+        s["slots"].Push(row)
+        StudyLibraryBigBoxFormAdd(s, "choice" A_Index, row, 0, (A_Index - 1) * 125, 1000, 110, "button")
+        row.OnEvent("Click", CPFullscreenMenuChoose.Bind(s, A_Index))
+    }
+    previous := g.AddButton("x0 y0 w10 h10", "Previous page")
+    next := g.AddButton("x0 y0 w10 h10", "Next page")
+    status := g.AddText("x0 y0 w10 h10 Center +0x200", "")
+    cancel := g.AddButton("x0 y0 w10 h10 Default", "Back")
+    StudyLibraryBigBoxFormAdd(s, "previous", previous, 0, 850, 240, 110, "button")
+    StudyLibraryBigBoxFormAdd(s, "page", status, 250, 850, 180, 110)
+    StudyLibraryBigBoxFormAdd(s, "next", next, 440, 850, 240, 110, "button")
+    StudyLibraryBigBoxFormAdd(s, "cancel", cancel, 760, 850, 240, 110, "button")
+    previous.OnEvent("Click", CPFullscreenMenuPage.Bind(s, -1))
+    next.OnEvent("Click", CPFullscreenMenuPage.Bind(s, 1))
+    cancel.OnEvent("Click", CPFullscreenMenuClose.Bind(s, 0))
+    g.OnEvent("Escape", CPFullscreenMenuClose.Bind(s, 0))
+    g.OnEvent("Close", CPFullscreenMenuClose.Bind(s, 0))
+    CPFullscreenMenuPage(s, 0, false)
+    return s
+}
+
+CPFullscreenMenuPage(s, delta, focus := true, *) {
+    if s["closed"]
+        return
+    s["page"] := Max(1, Min(s["pages"], s["page"] + delta))
+    first := 0
+    for slot, row in s["slots"] {
+        index := (s["page"] - 1) * 6 + slot
+        row.Visible := index <= s["items"].Length
+        row.Enabled := index <= s["items"].Length && s["items"][index]["enabled"]
+        row.Text := index <= s["items"].Length ? s["items"][index]["label"] : ""
+        if row.Enabled && !IsObject(first)
+            first := row
+    }
+    c := s["controls"]
+    c["previous"].Visible := c["next"].Visible := c["page"].Visible := s["pages"] > 1
+    c["previous"].Enabled := s["page"] > 1, c["next"].Enabled := s["page"] < s["pages"]
+    c["page"].Text := s["page"] " / " s["pages"]
+    s["initial"] := IsObject(first) ? first : c["cancel"]
+    if focus {
+        StudyControllerSetFocus(s["gui"].Hwnd, s["initial"].Hwnd)
+        StudyBigBoxFocusFrameUpdate(s, s["initial"].Hwnd)
+    }
+}
+
+CPFullscreenMenuChoose(s, slot, *) {
+    index := (s["page"] - 1) * 6 + slot
+    if index >= 1 && index <= s["items"].Length && s["items"][index]["enabled"]
+        CPFullscreenMenuClose(s, s["items"][index]["index"])
+}
+
+CPFullscreenMenuClose(s, result := 0, *) {
+    if s["closed"]
+        return
+    s["closed"] := true, s["result"] := result
+    StudyBigBoxFocusFrameStop(s)
+    try s["gui"].Destroy()
+}
+
+CPFullscreenMenu(ownerHwnd, items, title := "Actions") {
+    priorEnabled := DllCall("user32\IsWindowEnabled", "ptr", ownerHwnd), priorFocus := StudyControllerFocusedHwnd(ownerHwnd)
+    s := CPFullscreenMenuCreate(ownerHwnd, items, title)
+    try {
+        DllCall("user32\EnableWindow", "ptr", ownerHwnd, "int", 0)
+        StudyLibraryBigBoxFormShow(s, s["initial"])
+        while !s["closed"] && DllCall("user32\IsWindow", "ptr", ownerHwnd)
+            Sleep(25)
+    } finally {
+        CPFullscreenMenuClose(s, s["result"])
+        if DllCall("user32\IsWindow", "ptr", ownerHwnd) {
+            DllCall("user32\EnableWindow", "ptr", ownerHwnd, "int", priorEnabled)
+            if priorEnabled {
+                try WinActivate("ahk_id " ownerHwnd)
+                if priorFocus
+                    try StudyControllerSetFocus(ownerHwnd, priorFocus)
+            }
+        }
+        CPControllerResetNavigation()
+    }
+    return s["result"]
+}
+
 CPAdaptiveOwnedMessage(ownerHwnd, message, dialogTitle := ""
     , buttons := "ok", icon := "warning", dialogWidth := 520) {
     global controlDarkMode
 
-    if controlDarkMode
+    if controlDarkMode || CPDialogPresentation(ownerHwnd) != "classic"
         return CPThemedOwnedMessage(
             ownerHwnd, message, dialogTitle, buttons, icon, dialogWidth
         )
@@ -28081,6 +31579,14 @@ CPAdaptiveOwnedMessage(ownerHwnd, message, dialogTitle := ""
 CPThemedOwnedMessage(ownerHwnd, message, dialogTitle := ""
     , buttons := "ok", icon := "warning", dialogWidth := 520) {
     global controlDarkMode
+
+    presentation := CPDialogPresentation(ownerHwnd)
+    subtitle := CPDialogMessageSubtitle(buttons, icon)
+    if presentation = "desktop"
+        return StudyDesktopMessage(ownerHwnd, message, dialogTitle, buttons, subtitle, "Yes", "No")
+    if presentation = "fullscreen"
+        return StudyLibraryOwnedMessage(Map("gui", GuiFromHwnd(ownerHwnd), "bigBoxPresentation", true,
+            "libraryName", StudyLibraryConfiguredName()), message, dialogTitle, buttons, icon, dialogWidth, subtitle, "Yes", "No")
 
     cpOwnerValid := ownerHwnd
         && DllCall("user32\IsWindow", "ptr", ownerHwnd, "int")
@@ -28283,10 +31789,20 @@ CPThemedChoicePopupOnKeyDown(wParam, lParam, msg, hwnd) {
     }
 }
 
+CPThemedChoicePopupMouseMove(wParam, lParam, msg, hwnd) {
+    rows := CPThemedChoicePopupRowRegistry()
+    if !rows.Has(hwnd)
+        return
+    row := rows[hwnd], s := row["state"]
+    if s.Get("modern", false) && !s["closed"] && row["enabled"] && row["index"] != s["focusIndex"]
+        CPThemedChoicePopupFocus(s, row["index"])
+}
+
 CPThemedChoicePopupRegister(cpPopupState) {
     static cpKeyHandlerRegistered := false
     if !cpKeyHandlerRegistered {
         OnMessage(0x0100, CPThemedChoicePopupOnKeyDown) ; WM_KEYDOWN
+        OnMessage(0x0200, CPThemedChoicePopupMouseMove) ; WM_MOUSEMOVE
         cpKeyHandlerRegistered := true
     }
     cpPopupHwnd := cpPopupState["gui"].Hwnd
@@ -28363,6 +31879,16 @@ CPThemedChoicePopup(ownerHwnd, anchorHwnd, choices) {
     if !choices.Length
         return 0
 
+    if CPDialogPresentation(ownerHwnd) = "fullscreen" {
+        items := []
+        for choice in choices
+            items.Push(Map("label", choice))
+        title := "Actions"
+        try title := Trim(RegExReplace(GuiCtrlFromHwnd(anchorHwnd).Text, "[.…]+$", ""))
+        return CPFullscreenMenu(ownerHwnd, items, title != "" ? title : "Actions")
+    }
+
+    ; @SHARED_CHOICE_POPUP_CONTROLS_BEGIN@
     cpOwnerValid := ownerHwnd
         && DllCall("user32\IsWindow", "ptr", ownerHwnd, "int")
     cpPopupState := Map("closed", false, "result", 0)
@@ -28370,20 +31896,26 @@ CPThemedChoicePopup(ownerHwnd, anchorHwnd, choices) {
     if cpOwnerValid
         cpOptions .= " +Owner" ownerHwnd
     cpPopup := Gui(cpOptions)
-    cpPopup.MarginX := 3
-    cpPopup.MarginY := 3
-    cpColors := CPPalette(controlDarkMode)
+    cpModern := CPDialogPresentation(ownerHwnd) = "desktop"
+    cpPopup.MarginX := cpModern ? 8 : 3
+    cpPopup.MarginY := cpModern ? 8 : 3
+    cpColors := CPDialogPopupColors(ownerHwnd)
     cpPopup.BackColor := cpColors["window"]
-    cpPopup.SetFont("s10 c" cpColors["text"], "Segoe UI")
+    cpPopup.SetFont((cpModern ? "s11" : "s10") " c" cpColors["text"], "Segoe UI")
     cpPopupState["gui"] := cpPopup
     cpPopupState["colors"] := cpColors
     cpPopupState["rows"] := []
     cpPopupState["focusIndex"] := 1
+    cpPopupState["modern"] := cpModern
+    cpLongestLabel := 0
+    for cpChoiceText in choices
+        cpLongestLabel := Max(cpLongestLabel, StrLen(cpChoiceText))
+    cpMenuWidth := cpModern ? Max(280, Min(540, 36 + cpLongestLabel * 9)) : 250
     for cpChoiceIndex, cpChoiceText in choices {
         cpPosition := cpChoiceIndex = 1 ? "xm ym" : "xm y+1"
         cpChoiceRow := cpPopup.Add(
             "Text",
-            cpPosition " w250 h30 0x300 +Tabstop Border"
+            cpPosition " w" cpMenuWidth (cpModern ? " h40 0x380 +Tabstop" : " h30 0x300 +Tabstop Border")
                 . " Background" cpColors["surface"]
                 . " c" cpColors["text"],
             "  " cpChoiceText
@@ -28401,9 +31933,11 @@ CPThemedChoicePopup(ownerHwnd, anchorHwnd, choices) {
     cpPopup.OnEvent(
         "Close", CPThemedChoicePopupFinish.Bind(cpPopupState, cpPopup, 0)
     )
+    ; @SHARED_CHOICE_POPUP_CONTROLS_END@
 
     cpPopup.Show("Hide AutoSize")
     CPApplyOwnedDialogTheme(cpPopup)
+    CPDialogPopupFinishLayout(cpPopupState)
     ; CPApplyOwnedDialogTheme uses the normal window background for generic
     ; text controls. Restore the menu-row surfaces afterward.
     CPThemedChoicePopupResetRows(cpPopupState)
@@ -28430,6 +31964,8 @@ CPThemedChoicePopup(ownerHwnd, anchorHwnd, choices) {
     cpX := Max(cpVirtualX, Min(cpX, cpVirtualX + cpVirtualW - cpPopupW))
     if (cpY + cpPopupH > cpVirtualY + cpVirtualH)
         cpY := Max(cpVirtualY, cpAnchorTop - cpPopupH)
+    if cpModern
+        CPDialogClampPopup(&cpX, &cpY, cpPopupW, cpPopupH, cpAnchorTop, anchorHwnd ? anchorHwnd : ownerHwnd)
     cpPopup.Show("x" cpX " y" cpY)
     CPThemedChoicePopupRegister(cpPopupState)
     ; Register first, then repaint every row once while visible so WM_CTLCOLOR
@@ -28456,7 +31992,10 @@ CPThemedContextPopup(ownerHwnd, clientX, clientY, items) {
     global controlDarkMode
     if !items.Length
         return 0
+    if CPDialogPresentation(ownerHwnd) = "fullscreen"
+        return CPFullscreenMenu(ownerHwnd, items)
 
+    ; @SHARED_CONTEXT_POPUP_CONTROLS_BEGIN@
     cpOwnerValid := ownerHwnd
         && DllCall("user32\IsWindow", "ptr", ownerHwnd, "int")
     cpPopupState := Map(
@@ -28472,20 +32011,22 @@ CPThemedContextPopup(ownerHwnd, clientX, clientY, items) {
     if cpOwnerValid
         cpOptions .= " +Owner" ownerHwnd
     cpPopup := Gui(cpOptions)
-    cpPopup.MarginX := 4
-    cpPopup.MarginY := 4
-    cpPopup.SetFont("s9", "Segoe UI")
-    cpColors := CPPalette(controlDarkMode)
+    cpModern := CPDialogPresentation(ownerHwnd) = "desktop"
+    cpPopup.MarginX := cpModern ? 8 : 4
+    cpPopup.MarginY := cpModern ? 8 : 4
+    cpPopup.SetFont(cpModern ? "s11" : "s9", "Segoe UI")
+    cpColors := CPDialogPopupColors(ownerHwnd)
     cpPopup.BackColor := cpColors["surface"]
     cpPopupState["gui"] := cpPopup
     cpPopupState["colors"] := cpColors
+    cpPopupState["modern"] := cpModern
 
     cpLongestLabel := 0
     for cpItem in items {
         if cpItem.Has("label")
             cpLongestLabel := Max(cpLongestLabel, StrLen(cpItem["label"]))
     }
-    cpMenuWidth := Max(220, Min(390, 42 + cpLongestLabel * 8))
+    cpMenuWidth := cpModern ? Max(280, Min(540, 36 + cpLongestLabel * 9)) : Max(220, Min(390, 42 + cpLongestLabel * 8))
     cpHasPreviousRow := false
     for cpItemIndex, cpItem in items {
         if (cpItem.Has("separator") && cpItem["separator"]) {
@@ -28503,7 +32044,7 @@ CPThemedContextPopup(ownerHwnd, clientX, clientY, items) {
             continue
         cpEnabled := !cpItem.Has("enabled") || cpItem["enabled"]
         cpPosition := cpHasPreviousRow ? "xm y+1" : "xm y+4"
-        cpRowOptions := cpPosition " w" cpMenuWidth " h29 0x200"
+        cpRowOptions := cpPosition " w" cpMenuWidth (cpModern ? " h40 0x280" : " h29 0x200")
             . " Background" cpColors["surface"]
             . " c" (cpEnabled ? cpColors["text"] : cpColors["muted"])
         if cpEnabled
@@ -28523,8 +32064,10 @@ CPThemedContextPopup(ownerHwnd, clientX, clientY, items) {
             cpPopupState["disabledRows"].Push(cpChoiceRow)
         cpHasPreviousRow := true
     }
-    if !cpPopupState["rows"].Length
+    if !cpPopupState["rows"].Length {
+        cpPopup.Destroy()
         return 0
+    }
 
     cpPopup.OnEvent(
         "Escape", CPThemedChoicePopupFinish.Bind(cpPopupState, cpPopup, 0)
@@ -28532,8 +32075,10 @@ CPThemedContextPopup(ownerHwnd, clientX, clientY, items) {
     cpPopup.OnEvent(
         "Close", CPThemedChoicePopupFinish.Bind(cpPopupState, cpPopup, 0)
     )
+    ; @SHARED_CONTEXT_POPUP_CONTROLS_END@
     cpPopup.Show("Hide AutoSize")
     CPApplyOwnedDialogTheme(cpPopup)
+    CPDialogPopupFinishLayout(cpPopupState)
     CPThemedChoicePopupResetRows(cpPopupState)
     for cpSeparator in cpPopupState["separators"]
         try cpSeparator.Opt("+Background" cpColors["border"])
@@ -28553,6 +32098,8 @@ CPThemedContextPopup(ownerHwnd, clientX, clientY, items) {
     cpVirtualW := SysGet(78), cpVirtualH := SysGet(79)
     cpX := Max(cpVirtualX, Min(cpX, cpVirtualX + cpVirtualW - cpPopupW))
     cpY := Max(cpVirtualY, Min(cpY, cpVirtualY + cpVirtualH - cpPopupH))
+    if cpModern
+        CPDialogClampPopup(&cpX, &cpY, cpPopupW, cpPopupH, cpY)
 
     cpPopup.Show("x" cpX " y" cpY)
     CPThemedChoicePopupRegister(cpPopupState)
@@ -28574,6 +32121,116 @@ CPThemedContextPopup(ownerHwnd, clientX, clientY, items) {
     return cpPopupState["result"]
 }
 
+CPDialogDefaultOwner() {
+    global ui, CPBigBoxGui
+    ; An owned editor can be active while the main desktop is hidden. Only
+    ; attach to this script's known UI, never another application's window.
+    active := DllCall("user32\GetForegroundWindow", "ptr")
+    if active && CPDialogPresentation(active) != "classic"
+        return active
+    try {
+        if CPBigBoxDashboardVisible() && !DllCall("user32\IsWindowVisible", "ptr", ui.Hwnd)
+            return CPBigBoxGui.Hwnd
+    }
+    return ui.Hwnd
+}
+
+CPInputDialogCreate(owner, promptText, title, infoText := "", value := "") {
+    bigBox := CPDialogPresentation(owner) = "fullscreen"
+    g := Gui("+Owner" owner " +OwnDialogs +AlwaysOnTop"
+        . (bigBox ? " -Caption +ToolWindow -DPIScale" : ""), title)
+    g.MarginX := 0, g.MarginY := 0
+    g.SetFont("s11", "Segoe UI")
+    s := Map("gui", g, "owner", owner, "closed", false, "bigBoxPresentation", bigBox,
+        "result", {Result: "Cancel", Value: ""})
+    g.CPInputDialog := s
+    g.StudyPreserveEditSelection := true
+    ; Build fullscreen background/focus surfaces first so native controls sit
+    ; above them in child-window z-order, as in the other fullscreen forms.
+    if bigBox {
+        parent := Map("gui", GuiFromHwnd(owner), "bigBoxPresentation", true)
+        s["bigBoxForm"] := StudyLibraryBigBoxFormState(g, parent, title, "Enter a value, then confirm or cancel.", StudyLibraryConfiguredName())
+    }
+    c := Map(), s["controls"] := c
+    c["prompt"] := g.AddText("x40 y194 w600 h48 +0x80", promptText)
+    c["editor"] := g.AddEdit("x40 y256 w600 h36", value)
+    c["info"] := g.AddText("x40 y314 w600 h90 +0x80", infoText)
+    c["save"] := g.AddButton("x420 y434 w120 h34 Default", "OK")
+    c["cancel"] := g.AddButton("x552 y434 w120 h34", "Cancel")
+    c["save"].OnEvent("Click", CPInputDialogClose.Bind(s, true))
+    c["cancel"].OnEvent("Click", CPInputDialogClose.Bind(s, false))
+    g.OnEvent("Escape", CPInputDialogClose.Bind(s, false))
+    g.OnEvent("Close", CPInputDialogClose.Bind(s, false))
+    if bigBox {
+        f := s["bigBoxForm"]
+        f["shell"]["footer"].Text := "D-pad  Navigate     A / Cross  Select     Keyboard  Enter text     B / Circle / Esc  Cancel"
+        StudyLibraryBigBoxFormAdd(f, "prompt", c["prompt"], 0, 0, 1000, 130)
+        StudyLibraryBigBoxFormAdd(f, "editor", c["editor"], 0, 155, 1000, 100, "editor")
+        StudyLibraryBigBoxFormAdd(f, "info", c["info"], 0, 305, 1000, 280)
+        StudyLibraryBigBoxFormAdd(f, "save", c["save"], 620, 840, 180, 110, "button")
+        StudyLibraryBigBoxFormAdd(f, "cancel", c["cancel"], 820, 840, 180, 110, "button")
+    } else {
+        s["addButton"] := c["save"]
+        CPRegisterMutedControl(c["info"])
+        StudyDesktopDialogCreate(s, "input", title, "Enter a value, then confirm or cancel.", 680, 500)
+        c["prompt"].SetFont("s12 Bold")
+        for key in ["save", "cancel"]
+            StudyDesktopDialogFooter(s, c[key])
+        StudyDesktopTheme(s["desktop"])
+    }
+    return s
+}
+
+CPInputDialogLayout(s, w, h) {
+    c := s["controls"]
+    s["desktop"]["panels"].Push([24, 174, w - 48, h - 260, "panel"])
+    c["prompt"].Move(40, 194, w - 80, 48)
+    c["editor"].Move(40, 256, w - 80, 36)
+    c["info"].Move(40, 314, w - 80, h - 416)
+    c["save"].Move(w - 276, h - 50, 120, 34)
+    c["cancel"].Move(w - 144, h - 50, 120, 34)
+}
+
+CPInputDialogClose(s, accept := false, *) {
+    if s["closed"]
+        return
+    if accept
+        s["result"] := {Result: "OK", Value: s["controls"]["editor"].Value}
+    s["closed"] := true
+    if s.Has("bigBoxForm") {
+        s["bigBoxForm"]["closed"] := true
+        StudyBigBoxFocusFrameStop(s["bigBoxForm"])
+    }
+    try s["gui"].Destroy()
+}
+
+CPInputDialogRun(s, width := 760) {
+    owner := s["owner"], enabled := DllCall("user32\IsWindowEnabled", "ptr", owner)
+    previousFocus := StudyControllerFocusedHwnd(owner)
+    try {
+        DllCall("user32\EnableWindow", "ptr", owner, "int", 0)
+        if s["bigBoxPresentation"]
+            StudyLibraryBigBoxFormShow(s["bigBoxForm"], s["controls"]["editor"])
+        else
+            StudyDesktopDialogShow(s, Max(680, Min(1000, width)), 520, s["controls"]["editor"])
+        s["ready"] := true
+        while !s["closed"] && DllCall("user32\IsWindow", "ptr", owner)
+            Sleep(25)
+    } finally {
+        CPInputDialogClose(s)
+        if DllCall("user32\IsWindow", "ptr", owner) {
+            DllCall("user32\EnableWindow", "ptr", owner, "int", enabled)
+            if enabled {
+                try WinActivate("ahk_id " owner)
+                if previousFocus && CPHwndIsFocusable(previousFocus)
+                    try StudyControllerSetFocus(owner, previousFocus)
+            }
+        }
+        CPControllerResetNavigation()
+    }
+    return s["result"]
+}
+
 CPThemedInputBox(promptText, dialogTitle, infoText := "", initialValue := ""
     , dialogWidth := 420, ownerHwnd := 0) {
     global ui
@@ -28583,7 +32240,9 @@ CPThemedInputBox(promptText, dialogTitle, infoText := "", initialValue := ""
 
     inputOwner := ownerHwnd
     if !(inputOwner && DllCall("user32\IsWindow", "ptr", inputOwner, "int"))
-        inputOwner := ui.Hwnd
+        inputOwner := CPDialogDefaultOwner()
+    if CPDialogPresentation(inputOwner) != "classic"
+        return CPInputDialogRun(CPInputDialogCreate(inputOwner, promptText, dialogTitle, infoText, initialValue), dialogWidth + 240)
     dlg := Gui("+Owner" inputOwner " +AlwaysOnTop", dialogTitle)
     dlg.MarginX := 16
     dlg.MarginY := 14
@@ -28715,8 +32374,243 @@ CPApplyDialogCheckBoxTheme(checkCtrl) {
     try DllCall("user32\InvalidateRect", "ptr", checkCtrl.Hwnd, "ptr", 0, "int", 1)
 }
 
+CPModelDialogCreate(owner, provider, purpose, mode, catalog := 0, existingModels := 0) {
+    bigBox := CPDialogPresentation(owner) = "fullscreen", browser := mode = "browser"
+    providerLabel := StrLower(provider) = "gemini" ? "Gemini" : "OpenAI"
+    purposeLabels := Map("screenshot", "Screenshot Translation", "audio", "Audio Translation", "explanation", "Explanation")
+    purposeLabel := purposeLabels.Get(StrLower(purpose), "JRPG Translator")
+    title := (browser ? "Browse " : "Add ") providerLabel (browser ? " models" : " model")
+    g := Gui("+Owner" owner " +OwnDialogs +AlwaysOnTop"
+        . (bigBox ? " -Caption +ToolWindow -DPIScale" : ""), title)
+    g.MarginX := 0, g.MarginY := 0
+    g.SetFont("s11", "Segoe UI")
+    s := Map("gui", g, "owner", owner, "mode", mode, "closed", false, "refreshing", false,
+        "source", "online", "result", browser ? "" : "cancel", "bigBoxPresentation", bigBox)
+    g.CPModelDialog := s
+    if bigBox {
+        parent := Map("gui", GuiFromHwnd(owner), "bigBoxPresentation", true)
+        s["bigBoxForm"] := StudyLibraryBigBoxFormState(g, parent, title, purposeLabel, providerLabel, "AI PROVIDER")
+    }
+    c := Map(), s["controls"] := c
+    c["heading"] := g.AddText("x40 y194 w680 h28 +0x80", browser ? "Available models" : "Choose how to get the model ID")
+    if browser {
+        c["intro"] := g.AddText("x40 y232 w680 h42 +0x80", "Compatible with " purposeLabel ". Models already in your list are excluded.")
+        c["list"] := g.AddListBox("x40 y286 w680 h310 +0x100000 -0x100 -Border -E0x200")
+        c["statusLabel"] := g.AddText("x40 y626 w680 h24", "Catalog status")
+        c["status"] := g.AddEdit("x40 y660 w680 h72 ReadOnly Multi VScroll -Tabstop -Border -E0x200")
+        c["refresh"] := g.AddButton("x24 y746 w130 h34", "Refresh")
+    } else {
+        c["online"] := g.AddButton("x40 y244 w230 h52", "Browse online")
+        c["onlineHelp"] := g.AddText("x294 y250 w430 h64 +0x80", "Browse compatible models available to your configured API key.")
+        c["manual"] := g.AddButton("x40 y342 w230 h52", "Enter model ID")
+        c["manualHelp"] := g.AddText("x294 y348 w430 h64 +0x80", "Use an exact model ID you already know. No online lookup is needed.")
+        c["intro"] := g.AddText("x40 y432 w680 h44 +0x80", "Continue opens the selected option. No model is added yet.")
+    }
+    c["save"] := g.AddButton("x450 y746 w170 h34 Default", browser ? "Add model" : "Continue")
+    c["cancel"] := g.AddButton("x632 y746 w120 h34", "Cancel")
+    finish := CPModelDialogClose.Bind(s)
+    if browser {
+        s["existingModels"] := existingModels, s["catalog"] := catalog
+        c["save"].OnEvent("Click", ModelPickerAccept.Bind(c["list"], finish))
+        c["list"].OnEvent("DoubleClick", ModelPickerAccept.Bind(c["list"], finish))
+        c["refresh"].OnEvent("Click", ModelPickerRefresh.Bind(provider, purpose, existingModels, g, c["list"], c["status"], c["save"], c["refresh"], s))
+        ModelPickerPopulate(c["list"], c["status"], c["save"], catalog, existingModels)
+    } else {
+        c["online"].OnEvent("Click", CPModelDialogSelectSource.Bind(s, "online"))
+        c["manual"].OnEvent("Click", CPModelDialogSelectSource.Bind(s, "manual"))
+        c["save"].OnEvent("Click", (*) => finish.Call(s["source"]))
+    }
+    c["cancel"].OnEvent("Click", (*) => finish.Call(browser ? "" : "cancel"))
+    g.OnEvent("Escape", (*) => finish.Call(browser ? "" : "cancel"))
+    g.OnEvent("Close", (*) => finish.Call(browser ? "" : "cancel"))
+    if bigBox {
+        f := s["bigBoxForm"]
+        StudyLibraryBigBoxFormAdd(f, "heading", c["heading"], 0, 0, 1000, 65, "title")
+        if browser {
+            StudyLibraryBigBoxFormAdd(f, "intro", c["intro"], 0, 75, 1000, 90)
+            StudyLibraryBigBoxFormAdd(f, "list", c["list"], 0, 180, 1000, 445, "editor")
+            StudyLibraryBigBoxFormAdd(f, "statusLabel", c["statusLabel"], 0, 645, 1000, 55)
+            StudyLibraryBigBoxFormAdd(f, "status", c["status"], 0, 705, 1000, 110, "editor")
+            StudyLibraryBigBoxFormAdd(f, "refresh", c["refresh"], 0, 850, 210, 110, "button")
+        } else {
+            for i, key in ["online", "manual"] {
+                StudyLibraryBigBoxFormAdd(f, key, c[key], 0, 130 + (i - 1) * 250, 430, 145, "button")
+                StudyLibraryBigBoxFormAdd(f, key "Help", c[key "Help"], 470, 130 + (i - 1) * 250, 530, 160)
+            }
+            StudyLibraryBigBoxFormAdd(f, "intro", c["intro"], 0, 675, 1000, 120)
+        }
+        StudyLibraryBigBoxFormAdd(f, "save", c["save"], 590, 850, 220, 110, "button")
+        StudyLibraryBigBoxFormAdd(f, "cancel", c["cancel"], 830, 850, 170, 110, "button")
+    } else {
+        s["addButton"] := c["save"]
+        for key in (browser ? ["intro", "status"] : ["onlineHelp", "manualHelp", "intro"])
+            CPRegisterMutedControl(c[key])
+        StudyDesktopDialogCreate(s, browser ? "modelBrowser" : "modelSource", title, purposeLabel, 760, browser ? 720 : 560)
+        c["heading"].SetFont("s12 Bold")
+        if browser
+            c["statusLabel"].SetFont("s11 Bold")
+        for key in (browser ? ["save", "refresh", "cancel"] : ["save", "cancel"])
+            StudyDesktopDialogFooter(s, c[key])
+        StudyDesktopTheme(s["desktop"])
+    }
+    if !browser
+        CPModelDialogSelectSource(s, "online")
+    return s
+}
+
+CPModelDialogLayout(s, w, h) {
+    c := s["controls"], d := s["desktop"], cw := w - 80
+    c["heading"].Move(40, 194, cw, 28)
+    c["save"].Move(w - 326, h - 50, 170, 34), c["cancel"].Move(w - 144, h - 50, 120, 34)
+    if s["mode"] = "browser" {
+        d["panels"].Push([24, 174, w - 48, h - 404, "panel"], [24, h - 214, w - 48, 128, "panel"])
+        c["intro"].Move(40, 232, cw, 42)
+        c["list"].Move(40, 286, cw, h - 532)
+        c["statusLabel"].Move(40, h - 196, cw, 24)
+        c["status"].Move(40, h - 164, cw, 60)
+        c["refresh"].Move(24, h - 50, 130, 34)
+    } else {
+        d["panels"].Push([24, 174, w - 48, h - 260, "panel"])
+        for i, key in ["online", "manual"] {
+            y := 244 + (i - 1) * 98
+            c[key].Move(40, y, 230, 52), c[key "Help"].Move(294, y + 6, cw - 254, 64)
+        }
+        c["intro"].Move(40, 432, cw, h - 536)
+    }
+}
+
+CPModelDialogSelectSource(s, source, *) {
+    if s["closed"]
+        return
+    s["source"] := source
+    for key in ["online", "manual"] {
+        ctrl := s["controls"][key]
+        sourceLabel := key = "online" ? "Browse online" : "Enter model ID"
+        if s.Has("desktop") {
+            s["desktop"]["paint"][ctrl.Hwnd]["kind"] := "segment"
+            s["desktop"]["paint"][ctrl.Hwnd]["selected"] := key = source
+            DllCall("user32\InvalidateRect", "ptr", ctrl.Hwnd, "ptr", 0, "int", 0)
+        } else
+            ctrl.Text := sourceLabel (key = source ? "`nSelected" : "")
+    }
+}
+
+CPModelDialogClose(s, result := "", *) {
+    if s["closed"]
+        return
+    s["result"] := result, s["closed"] := true
+    if s.Has("bigBoxForm") {
+        s["bigBoxForm"]["closed"] := true
+        StudyBigBoxFocusFrameStop(s["bigBoxForm"])
+    }
+    try s["gui"].Destroy()
+}
+
+CPModelDialogNavigate(s, direction, *) {
+    if s["closed"]
+        return
+    c := s["controls"]
+    if s["mode"] = "browser" {
+        if direction = "Left" || direction = "Right" {
+            focused := StudyControllerFocusedHwnd(s["gui"].Hwnd)
+            if focused = c["list"].Hwnd {
+                SendMessage(0x114, direction = "Left" ? 0 : 1, 0, focused) ; WM_HSCROLL
+                return
+            }
+            footerControls := []
+            for key in ["refresh", "save", "cancel"]
+                if c[key].Enabled
+                    footerControls.Push(c[key])
+            for index, ctrl in footerControls {
+                if focused = ctrl.Hwnd {
+                    nextIndex := Mod(index - 1 + (direction = "Right" ? 1 : -1) + footerControls.Length, footerControls.Length) + 1
+                    StudyControllerSetFocus(s["gui"].Hwnd, footerControls[nextIndex].Hwnd)
+                    return
+                }
+            }
+        }
+        ModelPickerNavigate(direction, c["list"], c["save"], c["refresh"], c["cancel"])
+    } else
+        StudyControllerMoveFocus(s["gui"].Hwnd, direction)
+}
+
+CPModelDialogActivate(s, *) {
+    if s["closed"]
+        return
+    c := s["controls"]
+    if s["mode"] = "browser"
+        ModelPickerActivate(c["list"], c["save"], c["refresh"], c["cancel"], CPModelDialogClose.Bind(s))
+    else {
+        focused := StudyControllerFocusedHwnd(s["gui"].Hwnd)
+        for key in ["online", "manual", "save", "cancel"] {
+            if focused = c[key].Hwnd {
+                SendMessage(0xF5, 0, 0, focused)
+                return
+            }
+        }
+    }
+}
+
+CPModelDialogRun(s) {
+    owner := s["owner"], g := s["gui"], c := s["controls"]
+    priorEnabled := DllCall("user32\IsWindowEnabled", "ptr", owner), priorFocus := StudyControllerFocusedHwnd(owner)
+    modelHotIf := "ahk_id " g.Hwnd, keys := Map("$Up", "Up", "$Down", "Down", "$Left", "Left", "$Right", "Right")
+    HotIfWinActive(modelHotIf)
+    for key, direction in keys
+        Hotkey(key, CPModelDialogNavigate.Bind(s, direction), "On")
+    for key in ["$Enter", "$NumpadEnter"]
+        Hotkey(key, CPModelDialogActivate.Bind(s), "On")
+    HotIfWinActive()
+    initial := s["mode"] = "source" ? c["online"] : c["list"].Enabled ? c["list"] : c["refresh"]
+    try {
+        DllCall("user32\EnableWindow", "ptr", owner, "int", 0)
+        if s["bigBoxPresentation"]
+            StudyLibraryBigBoxFormShow(s["bigBoxForm"], initial)
+        else
+            StudyDesktopDialogShow(s, s["mode"] = "source" ? 800 : 900, s["mode"] = "source" ? 580 : 820, initial)
+        if s["mode"] = "browser" {
+            ; Fullscreen forms scale their fonts during layout. Measure after
+            ; that work, including subsequent resizes, not at construction DPI.
+            g.OnEvent("Size", CPModelDialogListMetrics.Bind(s))
+            CPModelDialogListMetrics(s)
+        }
+        s["ready"] := true
+        while !s["closed"] && DllCall("user32\IsWindow", "ptr", owner)
+            Sleep(25)
+    } finally {
+        CPModelDialogClose(s, s["result"])
+        HotIfWinActive(modelHotIf)
+        for key in keys
+            try Hotkey(key, "Off")
+        for key in ["$Enter", "$NumpadEnter"]
+            try Hotkey(key, "Off")
+        HotIfWinActive()
+        if DllCall("user32\IsWindow", "ptr", owner) {
+            DllCall("user32\EnableWindow", "ptr", owner, "int", priorEnabled)
+            if priorEnabled {
+                try WinActivate("ahk_id " owner)
+                if priorFocus && CPHwndIsFocusable(priorFocus)
+                    try StudyControllerSetFocus(owner, priorFocus)
+            }
+        }
+        CPControllerResetNavigation()
+    }
+    return s["result"]
+}
+
+CPModelDialogListMetrics(s, *) {
+    if s["closed"]
+        return
+    modelList := s["controls"]["list"]
+    if modelList.HasOwnProp("CPModelIds")
+        ModelPickerHorizontalExtent(modelList, modelList.CPModelIds)
+}
+
 AddModelSourceDialog(provider, purpose) {
     global ui
+    modelOwner := CPDialogDefaultOwner()
+    if CPDialogPresentation(modelOwner) != "classic"
+        return CPModelDialogRun(CPModelDialogCreate(modelOwner, provider, purpose, "source"))
     providerLabel := StrLower(provider) = "gemini" ? "Gemini" : "OpenAI"
     purposeName := StrLower(purpose)
     if (purposeName = "screenshot")
@@ -28788,7 +32682,7 @@ DeleteModel(arr, key, combo) {
             DbgCP("Model removed under [" key "]: " selText)
             return
         }
-    MsgBox("Not found in list: " selText, "Delete model")
+    CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Not found in list: " selText, "Delete model")
 }
 
 ; =========================
@@ -29385,7 +33279,9 @@ ModelPickerPopulate(modelListBox, modelStatus, modelAddButton, catalog, existing
     modelAddButton.Enabled := availableModels.Length > 0
 
     catalogSource := catalog["source"]
-    if (availableModels.Length = 0)
+    if (catalog["models"].Length = 0)
+        statusText := "No compatible models were returned for this provider and purpose."
+    else if (availableModels.Length = 0)
         statusText := "All compatible models in this catalog are already in the list."
     else if (catalogSource = "online")
         statusText := availableModels.Length " available models loaded online."
@@ -29397,11 +33293,21 @@ ModelPickerPopulate(modelListBox, modelStatus, modelAddButton, catalog, existing
     if catalog["warnings"].Length
         statusText .= " " catalog["warnings"][1]
     modelStatus.Text := statusText
+    ModelPickerHorizontalExtent(modelListBox, availableModels)
     return availableModels.Length
 }
 
+ModelPickerHorizontalExtent(modelListBox, models) {
+    modelListBox.CPModelIds := models.Clone()
+    ; Keep exact, potentially long IDs readable without changing selection.
+    extent := 0
+    for modelId in models
+        extent := Max(extent, StudyLibraryMeasureListText(modelListBox.Hwnd, modelId) + 24)
+    SendMessage(0x0194, extent, 0, modelListBox.Hwnd) ; LB_SETHORIZONTALEXTENT
+}
+
 ModelPickerAccept(modelListBox, finishPicker, *) {
-    if !ModelPickerControlAlive(modelListBox)
+    if !ModelPickerControlAlive(modelListBox) || !modelListBox.Enabled
         return
     chosenModel := Trim(modelListBox.Text)
     if (chosenModel = "") {
@@ -29456,7 +33362,7 @@ ModelPickerNavigate(direction, modelListBox, modelAddButton, refreshButton, canc
         if (direction = "Up" && modelListBox.Enabled)
             modelListBox.Focus()
         else if (direction = "Left")
-            modelAddButton.Focus()
+            (modelAddButton.Enabled ? modelAddButton : cancelButton).Focus()
         else if (direction = "Right")
             cancelButton.Focus()
         return
@@ -29467,7 +33373,7 @@ ModelPickerNavigate(direction, modelListBox, modelAddButton, refreshButton, canc
         else if (direction = "Left")
             refreshButton.Focus()
         else if (direction = "Right")
-            modelAddButton.Focus()
+            (modelAddButton.Enabled ? modelAddButton : refreshButton).Focus()
         return
     }
 
@@ -29503,9 +33409,9 @@ ModelPickerRefresh(provider, purpose, existingModels, pickerDialog, modelListBox
         refreshButton.Enabled := true
         if !refreshedCatalog["ok"] {
             modelStatus.Text := previousStatus
-            modelListBox.Enabled := true
+            modelListBox.Enabled := SendMessage(0x018B, 0, 0, modelListBox.Hwnd) > 0
             modelAddButton.Enabled := Trim(modelListBox.Text) != ""
-            MsgBox("The online model list could not be refreshed.`n`n" refreshedCatalog["error"], "Browse models", 48)
+            CPAdaptiveOwnedMessage(pickerDialog.Hwnd, "The online model list could not be refreshed.`n`n" refreshedCatalog["error"], "Browse models")
             return
         }
 
@@ -29526,6 +33432,9 @@ ModelPickerRefresh(provider, purpose, existingModels, pickerDialog, modelListBox
 
 OnlineModelPicker(provider, purpose, existingModels, catalog) {
     global ui
+    modelOwner := CPDialogDefaultOwner()
+    if CPDialogPresentation(modelOwner) != "classic"
+        return CPModelDialogRun(CPModelDialogCreate(modelOwner, provider, purpose, "browser", catalog, existingModels))
     providerName := StrLower(provider) = "gemini" ? "Gemini" : "OpenAI"
     purposeName := StrLower(purpose)
     if (purposeName = "screenshot")
@@ -29595,7 +33504,7 @@ AddModelInteractive(modelArray, modelKey, modelCombo, provider, purpose) {
 
     modelCatalog := ModelCatalogQueryWithFeedback(provider, purpose)
     if !modelCatalog["ok"] {
-        MsgBox("The online model list could not be loaded.`n`n" modelCatalog["error"], "Browse models", 48)
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "The online model list could not be loaded.`n`n" modelCatalog["error"], "Browse models")
         return false
     }
     selectedModel := OnlineModelPicker(provider, purpose, modelArray, modelCatalog)
@@ -30607,6 +34516,71 @@ CPOverlayAdjustOnExit(*) {
 ; =========================
 ; Unified profiles
 ; =========================
+CPStartupOverlayOptions() {
+    return ["None", "Translator only", "Explainer only", "Translator and Explainer"]
+}
+
+CPStartupOverlayPlan(studyMode := "", forceTranslator := false) {
+    global iniPath
+    return Map("translator", studyMode = "" && (forceTranslator
+            || Integer(IniRead(iniPath, "cfg", "openTranslatorOnLaunch", 0))),
+        "explainer", studyMode = ""
+            && Integer(IniRead(iniPath, "cfg", "openExplainerOnLaunch", 0)))
+}
+
+CPStartupOverlayIndex() {
+    global chkOpenTW, chkOpenEW
+    return 1 + (chkOpenTW.Value ? 1 : 0) + (chkOpenEW.Value ? 2 : 0)
+}
+
+CPStartupOverlaysSync() {
+    global ddlStartupOverlays
+    if IsSet(ddlStartupOverlays)
+        ddlStartupOverlays.Choose(CPStartupOverlayIndex())
+}
+
+CPSetStartupOverlays(index) {
+    global iniPath, chkOpenTW, chkOpenEW
+    if !IsInteger(index) || index < 1 || index > 4
+        throw ValueError("Choose a valid startup overlay combination.")
+    oldTranslator := IniRead(iniPath, "cfg", "openTranslatorOnLaunch", 0)
+    translator := (index - 1) & 1
+    explainer := ((index - 1) & 2) ? 1 : 0
+    IniWrite(translator, iniPath, "cfg", "openTranslatorOnLaunch")
+    try IniWrite(explainer, iniPath, "cfg", "openExplainerOnLaunch")
+    catch as ex {
+        IniWrite(oldTranslator, iniPath, "cfg", "openTranslatorOnLaunch")
+        throw ex
+    }
+    chkOpenTW.Value := translator
+    chkOpenEW.Value := explainer
+    CPStartupOverlaysSync()
+    ; Startup preferences do not open or close any running overlays.
+}
+
+CPStartupOverlaysChanged(ctrl, *) {
+    try CPSetStartupOverlays(ctrl.Value)
+    catch as ex {
+        CPStartupOverlaysSync()
+        MsgBox("Could not save startup overlays:`n" ex.Message, "Profiles", "OK Icon!")
+    }
+    CPBigBoxDashboardUpdateContent()
+}
+
+GameProfileSaveStartup(path) {
+    global chkOpenTW, chkOpenEW
+    IniWriteRetry(chkOpenTW.Value ? 1 : 0, path, "translator", "openOnLaunch")
+    IniWriteRetry(chkOpenEW.Value ? 1 : 0, path, "explainer", "openOnLaunch")
+}
+
+GameProfileApplyStartup(path) {
+    global chkOpenTW, chkOpenEW
+    ; Preserve compatibility with schema-1 profiles and missing old keys.
+    chkOpenTW.Value := GameProfileReadInt(path, "translator", "openOnLaunch", chkOpenTW.Value) ? 1 : 0
+    chkOpenEW.Value := GameProfileReadInt(path, "explainer", "openOnLaunch", chkOpenEW.Value) ? 1 : 0
+    CPStartupOverlaysSync()
+}
+
 GameProfileSafeName(name) {
     name := Trim(name)
     name := RegExReplace(name, '[\\/:*?"<>|]+', "_")
@@ -30764,7 +34738,7 @@ GameProfileSave(name, announce := true) {
         IniWriteRetry(fontName, path, "translator", "fontName")
         IniWriteRetry(fontSize, path, "translator", "fontSize")
         IniWriteRetry(fontBold ? 1 : 0, path, "translator", "fontBold")
-        IniWriteRetry(chkOpenTW.Value ? 1 : 0, path, "translator", "openOnLaunch")
+        GameProfileSaveStartup(path)
         IniWriteRetry(chkTop_TW.Value ? 1 : 0, path, "translator", "alwaysOnTop")
         GameProfileWriteBounds(path, "translator", GameProfileSnapshotBounds("Translator"))
 
@@ -30774,7 +34748,6 @@ GameProfileSave(name, announce := true) {
         IniWriteRetry(fontName_EW, path, "explainer", "fontName")
         IniWriteRetry(fontSize_EW, path, "explainer", "fontSize")
         IniWriteRetry(fontBold_EW ? 1 : 0, path, "explainer", "fontBold")
-        IniWriteRetry(chkOpenEW.Value ? 1 : 0, path, "explainer", "openOnLaunch")
         IniWriteRetry(chkTop_EW.Value ? 1 : 0, path, "explainer", "alwaysOnTop")
         GameProfileWriteBounds(path, "explainer", GameProfileSnapshotBounds("Explainer"))
 
@@ -30975,9 +34948,8 @@ GameProfileApply(name, announce := true) {
 
     chkGuess.Value := GameProfileReadInt(path, "screenshot", "highlightGuessed", chkGuess.Value) ? 1 : 0
     chkName.Value := GameProfileReadInt(path, "screenshot", "colorSpeaker", chkName.Value) ? 1 : 0
-    chkOpenTW.Value := GameProfileReadInt(path, "translator", "openOnLaunch", chkOpenTW.Value) ? 1 : 0
+    GameProfileApplyStartup(path)
     chkTop_TW.Value := GameProfileReadInt(path, "translator", "alwaysOnTop", chkTop_TW.Value) ? 1 : 0
-    chkOpenEW.Value := GameProfileReadInt(path, "explainer", "openOnLaunch", chkOpenEW.Value) ? 1 : 0
     chkTop_EW.Value := GameProfileReadInt(path, "explainer", "alwaysOnTop", chkTop_EW.Value) ? 1 : 0
 
     profileDpadNavigation := GameProfileReadInt(path, "controls", "dpadNavigation", -1)
@@ -31182,6 +35154,9 @@ GameProfileUpdateSummary(*) {
         txtGameProfileState.Value := "No profiles have been created yet."
     else
         txtGameProfileState.Value := "Selected: " name (name = active ? " (last saved or applied)" : "")
+    global tab
+    if CPDesktopActive() && tab.Value = 7
+        CPDesktopRelayout()
 }
 
 CreateGameProfile(*) {
@@ -31191,11 +35166,11 @@ CreateGameProfile(*) {
         return
     name := GameProfileSafeName(input.Value)
     if (name = "") {
-        MsgBox("Please enter a non-empty profile name.", "Profiles", "OK Icon!")
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Please enter a non-empty profile name.", "Profiles")
         return
     }
     path := GameProfilePath(name)
-    if FileExist(path) && MsgBox("Profile '" name "' already exists. Overwrite it?", "Profiles", "YesNo Icon!") != "Yes"
+    if FileExist(path) && CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Profile '" name "' already exists. Overwrite it?", "Profiles", "yesno") != "Yes"
         return
     if GameProfileSave(name)
         RefreshGameProfilesList(name)
@@ -31216,7 +35191,7 @@ ApplySelectedGameProfile(*) {
     global ddlGameProfile
     name := Trim(ddlGameProfile.Text)
     if (name = "") {
-        MsgBox("Select a profile first.", "Profiles", "OK Icon!")
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Select a profile first.", "Profiles")
         return
     }
     if GameProfileApply(name)
@@ -31228,7 +35203,7 @@ DeleteSelectedGameProfile(*) {
     name := Trim(ddlGameProfile.Text)
     if (name = "")
         return
-    if MsgBox("Delete profile '" name "'?`n`nPrompts, terminology files, and overlay settings will not be deleted.", "Profiles", "YesNo Icon!") != "Yes"
+    if CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Delete profile '" name "'?`n`nPrompts, terminology files, and overlay settings will not be deleted.", "Profiles", "yesno") != "Yes"
         return
     path := GameProfilePath(name)
     try FileDelete(path)
@@ -31489,7 +35464,7 @@ CPRegisterMutedControl(txtHint)
 
 ; Keep the hint and the two help texts wrapping nicely when the window is resized
 ; v2 Size event passes (gui, minMax, w, h)
-ui.OnEvent("Size", (gui, minMax, w, h) => (
+ui.OnEvent("Size", (gui, minMax, w, h) => CPDesktopActive() ? 0 : (
     ; keep ~20px margins on both sides for the big tip
     txtHint.Move(, , Max(260, w - 40))
   , (IsSet(txtGuessHelp) ? (
@@ -31515,6 +35490,12 @@ chkTop_TW.OnEvent("Click", CPScreenshotPreferenceChanged.Bind("alwaysOnTop"))
 
 
 ; --- Tab 2: AUDIO TRANSLATION
+; Keep the original page controls (including labels) for reversible migration.
+CPDesktopShotControls := []
+for cpShotCtrl in ui {
+    if cpShotCtrl.Hwnd != tab.Hwnd
+        CPDesktopShotControls.Push(cpShotCtrl)
+}
 tab.UseTab(2)
 ui.Add("Text", "xm y+4 w0 h0")  ; spacer
 
@@ -31581,6 +35562,15 @@ btnAudioTest.OnEvent("Click", TestAudioInput)
 ddlSpeaker.OnEvent("Change", SpeakerChanged)
 
 ; --- Tab 3: TRANSLATION WINDOW
+; Preserve the original audio page, including its labels, for classic mode.
+CPDesktopAudioControls := []
+for cpAudioCtrl in ui {
+    if cpAudioCtrl.Hwnd != tab.Hwnd && !ArrayIndexOf(CPDesktopShotControls, cpAudioCtrl)
+        CPDesktopAudioControls.Push(cpAudioCtrl)
+}
+cpBeforeOverlay := Map()
+for cpOverlayCtrl in ui
+    cpBeforeOverlay[cpOverlayCtrl.Hwnd] := true
 tab.UseTab(3)
 ui.Add("Text", "xm y+4 w0 h0")  ; spacer
 twLabelX := pad + 16
@@ -31638,6 +35628,14 @@ RefreshPromptProfilesList(promptProfile)
 
 
 ; --- Explanation: Provider + Models (independent from Screenshot Translation)
+for cpOverlayCtrl in ui {
+    if !cpBeforeOverlay.Has(cpOverlayCtrl.Hwnd)
+        CPDesktopOverlayLegacy[3].Push(cpOverlayCtrl)
+}
+cpBeforeOverlay := 0
+cpBeforeExplanation := Map()
+for cpExplanationCtrl in ui
+    cpBeforeExplanation[cpExplanationCtrl.Hwnd] := true
 tab.UseTab(4)
 ui.Add("Text", "xm y+4 w0 h0")  ; spacer
 ui.Add("Text", "xm y+6 w90", "AI Provider:")
@@ -31745,6 +35743,16 @@ btnEGem_Del.OnEvent("Click", (*) => DeleteModel(model_gemini_explain, "gemini_ex
 
 
 ; --- Tab 5: EXPLANATION WINDOW  (UI only, not wired yet)
+; Keep the complete original Explanation form for the reversible classic view.
+CPDesktopExplanationControls := []
+for cpExplanationCtrl in ui {
+    if !cpBeforeExplanation.Has(cpExplanationCtrl.Hwnd)
+        CPDesktopExplanationControls.Push(cpExplanationCtrl)
+}
+cpBeforeExplanation := 0
+cpBeforeOverlay := Map()
+for cpOverlayCtrl in ui
+    cpBeforeOverlay[cpOverlayCtrl.Hwnd] := true
 tab.UseTab(5)
 ui.Add("Text", "xm y+4 w0 h0")  ; spacer
 ; Layout parity with "Translation Window" (Tab 3), distinct control names (EW_*)
@@ -31796,7 +35804,13 @@ udFSize_EW.OnEvent("Change",   (*) => FontSizeCommit_EW(edFSize_EW))
 chkFontBold_EW.OnEvent("Click", FontBoldChanged_EW)
 
 ; --- Tab 6: TERMINOLOGY OVERRIDES
+for cpOverlayCtrl in ui {
+    if !cpBeforeOverlay.Has(cpOverlayCtrl.Hwnd)
+        CPDesktopOverlayLegacy[5].Push(cpOverlayCtrl)
+}
+cpBeforeOverlay := 0
 tab.UseTab(6)
+cpOrganizeBefore := CPDesktopExistingControls()
 ui.Add("Text", "xm y+4 w0 h0")  ; spacer
 
 ; --- Help text (what these two glossaries do & how to use them)
@@ -31849,7 +35863,9 @@ ddlENG.OnEvent("Change", (*) => GlossaryChanged("en"))
 RefreshGlossaryProfilesList(jp2enGlossaryProfile, en2enGlossaryProfile)
 
 ; --- Tab 7: PROFILES
+CPDesktopCaptureOrganizeControls(6, cpOrganizeBefore)
 tab.UseTab(7)
+cpOrganizeBefore := CPDesktopExistingControls()
 ui.Add("Text", "xm y+4 w0 h0")
 lblGameProfilesTitle := ui.Add("Text", "xm y+10 w760", "Profiles")
 lblGameProfilesTitle.SetFont("Bold")
@@ -31868,6 +35884,13 @@ btnGameProfileApply := ui.Add("Button", "x+6 w80", "Apply")
 btnGameProfileDelete := ui.Add("Button", "x+6 w80", "Delete")
 
 txtGameProfileState := ui.Add("Text", "xm y+18 w760", "")
+ui.Add("Text", "xm y+18 w200", "Startup overlays:")
+ddlStartupOverlays := ui.Add("DropDownList", "x+m w330 0x210", CPStartupOverlayOptions())
+CPStartupOverlaysSync()
+ddlStartupOverlays.OnEvent("Change", CPStartupOverlaysChanged)
+txtStartupOverlayHelp := ui.Add("Text", "xm y+8 w760 cGray"
+    , "Changes the current setup. Use Save Current to store it in the selected Profile. Takes effect on the next tool start, including LaunchBox / Big Box; already open overlays are unchanged.")
+CPRegisterMutedControl(txtStartupOverlayHelp)
 txtGameProfileDetails := ui.Add("Text", "xm y+18 w760 cGray"
     , "Saved settings include overlay appearance and placement, startup choices, capture target, both prompts, terminology profiles, and the active Study Library. Screenshot output processing follows the selected prompt automatically.")
 CPRegisterMutedControl(txtGameProfileDetails)
@@ -31880,7 +35903,9 @@ btnGameProfileDelete.OnEvent("Click", DeleteSelectedGameProfile)
 RefreshGameProfilesList()
 
 ; --- Tab 10: PATHS
+CPDesktopCaptureOrganizeControls(7, cpOrganizeBefore)
 tab.UseTab(10)
+cpOrganizeBefore := CPDesktopExistingControls()
 ui.Add("Text", "xm y+4 w0 h0")  ; spacer
 tPython := ui.Add("Text",  "xm y+6", "Python (.exe)")
 ePython := ui.Add("Edit",  "x+m w560", pythonExe)
@@ -31928,7 +35953,9 @@ TooltipBind(cbDebug, "Write diagnostic logs for the Control Panel, overlays, and
 cbDebug.OnEvent("Click", CPOnDebugModeToggle)
 
 ; --- Tab 8: CONTROLS
+CPDesktopCaptureOrganizeControls(10, cpOrganizeBefore)
 tab.UseTab(8)
+cpOrganizeBefore := CPDesktopExistingControls()
 ui.Add("Text", "xm y+4 w0 h0")
 
 ; Push-like radio buttons make the two input methods feel like views of one
@@ -32023,6 +36050,7 @@ CPSetControlsView(savedControlsView, false)
 CPControllerSetEnabled(Integer(IniRead(iniPath, "controller_inputs", "enabled", 0)) != 0, false)
 CPControllerSetDpadNavigationEnabled(Integer(IniRead(iniPath, "controller_inputs", "dpad_navigation", 1)) != 0, false)
 
+CPDesktopCaptureOrganizeControls(8, cpOrganizeBefore)
 tab.UseTab()
 FixAllEditableCombos()
 
@@ -32123,6 +36151,7 @@ ddlPrompt.OnEvent("Change", (*) => (UpdateVars(), SaveAll()))
 
 ; --- Tab 9: API KEYS
 tab.UseTab(9)
+cpOrganizeBefore := CPDesktopExistingControls()
 ui.Add("Text", "xm y+4 w0 h0")  ; spacer
 
 ; Recommended section: keep secrets outside the app's plain-text .env file.
@@ -32474,8 +36503,11 @@ OpenEnvFolder(*) {
 }
 
 ; Create the visible tab bar last so it stays above the native page host.
+CPDesktopCaptureOrganizeControls(9, cpOrganizeBefore)
+cpOrganizeBefore := 0
 tab.UseTab()
 CPCreateCustomTabBar()
+CPDesktopCreate()
 CPRefreshThemeBrushes()
 
 ui.OnEvent("Close",  ClosePanel)
@@ -32593,15 +36625,14 @@ if (CP_STUDY_START_MODE = "library")
 else if (CP_STUDY_START_MODE = "reader")
     SetTimer(OpenStandaloneStudyReader, -100)
 
-; A front end can explicitly request the Translator on a cold background start.
-; This keeps the control panel hidden while still giving the game its overlay.
-if (CP_STUDY_START_MODE = ""
-    && (CP_START_TRANSLATOR
-        || Integer(IniRead(iniPath, "cfg", "openTranslatorOnLaunch", 0)))) {
+; Apply the Profile above before reading its independent overlay startup choices.
+; --open-translator remains an explicit command-line opt-in for custom launchers;
+; the LaunchBox / Big Box plugin does not send it or override these preferences.
+startupOverlays := CPStartupOverlayPlan(CP_STUDY_START_MODE, CP_START_TRANSLATOR)
+if startupOverlays["translator"] {
     SetTimer(LaunchOverlay, -100)
 }
-if (CP_STUDY_START_MODE = ""
-    && Integer(IniRead(iniPath, "cfg", "openExplainerOnLaunch", 0))) {
+if startupOverlays["explainer"] {
     SetTimer(LaunchExplainerOverlay, -200)
 }
 
@@ -32789,6 +36820,7 @@ ToggleModelControls(){
     ddlIMG_GM.Enabled := geminiEnabled
     btnIMG_GM_Add.Enabled := geminiEnabled
     btnIMG_GM_Del.Enabled := geminiEnabled
+    CPDesktopSyncModel()
 }
 ToggleAudioControls(){
     global ddlAProv, ddlTR, ddlA_GM
@@ -32801,6 +36833,7 @@ ToggleAudioControls(){
     ddlA_GM.Enabled := !isOpenAI
     btnA_GM_Add.Enabled := !isOpenAI
     btnA_GM_Del.Enabled := !isOpenAI
+    CPDesktopSyncAudioModel()
 }
 ; NEW: Explanation tab toggles
 ToggleExplanationControls(){
@@ -32815,6 +36848,7 @@ ToggleExplanationControls(){
     ddlEGem.Enabled := geminiEnabled
     btnEGem_Add.Enabled := geminiEnabled
     btnEGem_Del.Enabled := geminiEnabled
+    CPDesktopSyncExplanationModel()
 }
 
 ; NEW: force-sync Explanation dropdowns from INI (defensive against any later repaint)
@@ -32939,6 +36973,7 @@ SetAudioTestStatus(message) {
     gAudioInputStatus := message
     try txtAudioTestStatus.Text := "Test status: " message
     CPBigBoxUpdateAudioInput()
+    CPDesktopRefreshAudio()
 }
 
 TestAudioInput(*) {
@@ -32955,6 +36990,7 @@ AudioInputJobControls() {
     for control in [ddlSpeaker, btnSpRef, btnAudioTest]
         try control.Enabled := !AudioInputJobBusy()
     CPBigBoxUpdateAudioInput()
+    CPDesktopRefreshAudio()
 }
 
 AudioInputJobStart(mode) {
@@ -33265,6 +37301,2101 @@ CPMeasureWrappedTextHeight(ctrl, width) {
 }
 
 ResizeUI(gui, minMax, w, h){
+    if CPDesktopActive()
+        return CPDesktopLayout(gui, minMax, w, h)
+    return CPDesktopClassicResize(gui, minMax, w, h)
+}
+
+; The desktop shell reuses the original native controls and their event handlers.
+; Geometry is always derived from an immutable baseline, never the last resize.
+CPDesktopActive() {
+    global CPDesktop
+    return IsSet(CPDesktop) && CPDesktop.Get("ready", false) && CPDesktop.Get("modern", false)
+}
+
+CPDesktopCreate() {
+    global ui, tab, iniPath, CPDesktop, CPDesktopShotControls, CPTabButtons
+    global CP_CANVAS_MIN_W, CP_CANVAS_MIN_H, CPPreferredViewportW, CPPreferredViewportH, defGuiW, defGuiH
+    CPDesktop := Map("ready", false, "modern", Integer(IniRead(iniPath, "cfg_control", "modernLayout", 1)) != 0,
+        "advanced", false, "multi", false, "audioHelpOpen", false, "explanationStartupOpen", false,
+        "base", Map(), "chrome", Map(), "shot", Map(), "audioPage", Map(), "explanationPage", Map(),
+        "overlayPages", Map(3, Map(), 5, Map()), "lastOverlayPage", 3,
+        "organizePages", Map(6, Map(), 7, Map(), 8, Map(), 9, Map(), 10, Map()),
+        "organizePanels", Map(), "organizeStops", [], "lastSettingsPage", 8,
+        "bindingConflicts", Map(),
+        "paint", Map(), "surfaces", Map(), "brushes", Map(), "iconFonts", Map(), "combos", Map(),
+        "hover", 0, "width", 0, "height", 0, "headerH", 72, "logo", Map(),
+        "classicW", CP_CANVAS_MIN_W, "classicH", CP_CANVAS_MIN_H)
+    CPDesktop["captionStyle"] := DllCall("user32\GetWindowLongPtr", "ptr", ui.Hwnd, "int", -16, "ptr") & 0xC00000
+    CPDesktop["compositedStyle"] := DllCall("user32\GetWindowLongPtr", "ptr", ui.Hwnd, "int", -20, "ptr") & 0x02000000
+    for ctrl in ui {
+        ctrl.GetPos(&x, &y, &w, &h)
+        CPDesktop["base"][ctrl.Hwnd] := [ctrl, x, y, w, h, ctrl.Text]
+    }
+    tab.UseTab(1)
+    shot := CPDesktop["shot"]
+    for spec in [["ai", "AI settings"], ["provider", "Provider"], ["model", "Model"], ["prompt", "Prompt"],
+        ["capture", "Capture && translate"], ["captureHelp", "Translate immediately, or collect several screenshots before translating them together."],
+        ["format", "Formatting"], ["guessHelp", "Show inferred subjects and pronouns in italics."],
+        ["nameHelp", "Use the color set in Translation Window."], ["png", "Maximum PNG size (KB)"],
+        ["advancedHelp", "Startup choices apply the next time the tool opens. Existing captures are not deleted now."],
+        ["multiHelp", "Take a screenshot for each part of a dialogue, then choose Translate captures to send them together."]] {
+        ctrl := ui.Add("Text", "x0 y0 w100 h24 Hidden", spec[2])
+        shot[spec[1]] := ctrl
+        if InStr(spec[1], "Help")
+            CPRegisterMutedControl(ctrl)
+    }
+    for key in ["ai", "capture", "format"]
+        shot[key].SetFont("s13 Bold")
+    shot["models"] := ui.Add("Button", "x0 y0 w110 h30 Hidden", "Manage…")
+    shot["models"].OnEvent("Click", CPDesktopModelMenu)
+    shot["prompts"] := ui.Add("Button", "x0 y0 w110 h30 Hidden", "Manage…")
+    shot["prompts"].OnEvent("Click", CPDesktopPromptMenu)
+    shot["advanced"] := ui.Add("Button", "x0 y0 w300 h32 Hidden", "+  Startup && advanced capture")
+    shot["advanced"].OnEvent("Click", CPDesktopToggleAdvanced)
+    shot["multi"] := ui.AddButton("x0 y0 w320 h28 Hidden", "Using multiple screenshots")
+    shot["multi"].OnEvent("Click", CPDesktopToggleMulti)
+    for key in ["aiPanel", "capturePanel", "formatPanel"] {
+        shot[key] := ui.AddText("x0 y0 w100 h100 Hidden +0xD +0x04000000") ; SS_OWNERDRAW
+        CPDesktopRegisterPaint(shot[key], "panel", "window")
+    }
+    CPDesktopCreateAudioPage()
+    CPDesktopCreateExplanationPage()
+    CPDesktopCreateOverlayPages()
+    CPDesktopCreateOrganizePages()
+    tab.UseTab()
+    chrome := CPDesktop["chrome"]
+    chrome["brand"] := ui.Add("Text", "x20 y16 w240 h28 Hidden +0x200", "JRPG Translator")
+    chrome["brand"].SetFont("s14 Bold")
+    chrome["section"] := ui.Add("Text", "x24 y86 w150 h24 Hidden", "TRANSLATE")
+    CPRegisterMutedControl(chrome["section"])
+    chrome["organize"] := ui.AddText("x24 y300 w150 h24 Hidden", "ORGANIZE")
+    CPRegisterMutedControl(chrome["organize"])
+    chrome["profileLabel"] := ui.AddText("x0 y0 w60 h24 Hidden +0x200", "Profile")
+    CPRegisterMutedControl(chrome["profileLabel"])
+    chrome["title"] := ui.Add("Text", "x220 y20 w600 h38 Hidden", "Screenshot Translation")
+    chrome["title"].SetFont("s20 Bold")
+    chrome["subtitle"] := ui.Add("Text", "x220 y66 w600 h24 Hidden", "")
+    CPRegisterMutedControl(chrome["subtitle"])
+    for spec in [["study", "Study Library", (*) => OpenStudyLibraryWindow()],
+        ["screenshot", "Screenshot", (*) => CPDesktopNavigate(1)],
+        ["audioPage", "Audio", (*) => CPDesktopNavigate(2)],
+        ["explanation", "Explanation", (*) => CPDesktopNavigate(4)],
+        ["overlays", "Overlay windows", CPDesktopOverlayMenu],
+        ["profiles", "Profiles", (*) => CPDesktopNavigate(7)],
+        ["settings", "Settings", CPDesktopSettingsMenu],
+        ["profile", "Current settings", (*) => CPDesktopNavigate(7)],
+        ["appearance", "Appearance…", CPDesktopAppearance],
+        ["classic", "Use classic layout", CPDesktopToggleLayout],
+        ["translator", "Translator: Closed", CPDesktopToggleOverlay.Bind("Translator")],
+        ["explainer", "Explainer: Closed", CPDesktopToggleOverlay.Bind("Explainer")],
+        ["audio", "Audio: Off", ToggleAudioFromButton],
+        ["options", "Window options…", CPDesktopAppearance],
+        ["minimize", "Minimize", CPDesktopWindowAction.Bind("minimize")],
+        ["maximize", "Maximize", CPDesktopWindowAction.Bind("maximize")],
+        ["close", "Close", CPDesktopWindowAction.Bind("close")]] {
+        ctrl := ui.Add("Button", "x0 y0 w160 h32 Hidden", spec[2])
+        ctrl.OnEvent("Click", spec[3])
+        chrome[spec[1]] := ctrl
+    }
+    for key in ["headerPanel", "sidebarPanel", "footerPanel"] {
+        chrome[key] := ui.AddText("x0 y0 w100 h100 Hidden +0xD +0x04000000")
+        CPDesktopRegisterPaint(chrome[key], key = "sidebarPanel" ? "sidebar" : "bar", "window")
+    }
+    for key, ctrl in chrome
+        CPRegisterCanvasFixedControl(ctrl, true, true)
+    for key in ["screenshot", "audioPage", "explanation", "overlays", "study", "profiles", "settings"]
+        CPDesktopRegisterPaint(chrome[key], "nav", "sidebar")
+    for key, code in Map("screenshot", 0xE722, "audioPage", 0xE767, "explanation", 0xE8F2,
+        "overlays", 0xE737, "study", 0xE8F1, "profiles", 0xE77B, "settings", 0xE713)
+        CPDesktop["paint"][chrome[key].Hwnd]["icon"] := Chr(code)
+    for key in ["translator", "explainer", "audio", "options", "profile"]
+        CPDesktopRegisterPaint(chrome[key], "button", "bar")
+    for key in ["minimize", "maximize", "close"] {
+        CPDesktopRegisterPaint(chrome[key], "caption", "bar")
+        CPDesktop["paint"][chrome[key].Hwnd]["action"] := key
+    }
+    for key in ["models", "prompts", "advanced", "multi"]
+        CPDesktopRegisterPaint(shot[key], "link", "panel")
+    global btnST, btnTS, btnSTO, btnCapPick, btnPrEdit, chkGuess, chkName, chkDel, chkOpenTW, chkTop_TW
+    global ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt
+    for ctrl in [ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt] {
+        CPDesktop["combos"][ctrl.Hwnd] := Map("ctrl", ctrl,
+            "height", SendMessage(0x0154, -1, 0, ctrl.Hwnd)) ; CB_GETITEMHEIGHT
+        CPPrepareStudyCombo(ctrl.Hwnd)
+    }
+    for ctrl in [btnST, btnTS, btnSTO, btnCapPick, btnPrEdit]
+        CPDesktopRegisterPaint(ctrl, ctrl = btnST ? "primary" : (ctrl = btnPrEdit ? "link" : "button"), "panel")
+    for ctrl in [chkGuess, chkName, chkDel, chkOpenTW, chkTop_TW]
+        CPDesktop["surfaces"][ctrl.Hwnd] := "panel"
+    for key, ctrl in shot {
+        if ctrl.Type = "Text" && !CPDesktop["paint"].Has(ctrl.Hwnd)
+            CPDesktop["surfaces"][ctrl.Hwnd] := "panel"
+    }
+    for key in ["section", "organize"]
+        CPDesktop["surfaces"][chrome[key].Hwnd] := "sidebar"
+    for key in ["brand", "profileLabel"]
+        CPDesktop["surfaces"][chrome[key].Hwnd] := "bar"
+    for key in ["title", "subtitle"]
+        CPDesktop["surfaces"][chrome[key].Hwnd] := "window"
+    OnExit(CPDesktopDestroyBrushes)
+    OnMessage(0x14, CPDesktopPaintBackground) ; WM_ERASEBKGND
+    OnMessage(0x84, CPDesktopHitTest) ; WM_NCHITTEST: native drag/double-click/system menu
+    OnMessage(0x200, CPDesktopCaptionHover)
+    OnMessage(0x2A3, CPDesktopCaptionLeave)
+    CPDesktopLoadLogo()
+    CPDesktop["ready"] := true
+    CPDesktopSyncBindingConflicts(Hotkeys_FindConflicts())
+    CPDesktopApplyFrame()
+    tab.OnEvent("Change", CPDesktopRelayout)
+    SetTimer(CPDesktopRefreshStatus, 1000)
+    if CPDesktopActive() {
+        CPPreferredViewportW := defGuiW := 1120
+        CPPreferredViewportH := defGuiH := 760
+    }
+}
+
+CPDesktopRelayout(*) {
+    global ui
+    if !CPDesktopActive()
+        return
+    ui.GetClientPos(,, &w, &h)
+    if w > 0 && h > 0
+        CPDesktopLayout(ui, 0, w, h)
+}
+
+CPDesktopPlace(ctrl, x, y, w, h, shown := true) {
+    global CPDesktop
+    ctrl.Move(Round(x), Round(y), Round(w), Round(h))
+    if CPDesktopActive() && CPDesktop["paint"].Has(ctrl.Hwnd) && ctrl.Type = "Text"
+        shown := false ; Geometry only: panels are painted on the parent, below all native controls.
+    ctrl.Visible := shown
+}
+
+CPDesktopFooterControls() {
+    global btnOv, btnOvClose, btnAudio, btnExplainerLaunch, btnExplainerClose, bClose
+    global chkTop, chkDarkMode, txtControlOpacity, slControlOpacity, lblControlOpacityPct
+    return [btnOv, btnOvClose, btnAudio, btnExplainerLaunch, btnExplainerClose, bClose,
+        chkTop, chkDarkMode, txtControlOpacity, slControlOpacity, lblControlOpacityPct]
+}
+
+CPDesktopLayout(gui, minMax, w, h) {
+    global ui, tab, tabNames, CPDesktop, CPDesktopShotControls, CPDesktopAudioControls, CPDesktopExplanationControls, CPTabButtons, CPTabBarFill, CPFooterFill, sepAction
+    global CPDesktopOverlayLegacy
+    global CPDesktopOrganizeLegacy
+    global CPCanvasFixedYHwnds, CP_CANVAS_MIN_W, CP_CANVAS_MIN_H, CPPanelLastLayoutW, CPPanelLastLayoutH
+    static busy := false
+    if busy || minMax = -1 || w <= 0 || h <= 0
+        return
+    busy := true
+    visible := DllCall("user32\IsWindowVisible", "ptr", ui.Hwnd, "int")
+    if visible
+        SendMessage(0xB, 0, 0, ui.Hwnd)
+    try {
+        restore := CPCanvasResetForLayout(false)
+        CPDesktop["width"] := w, CPDesktop["height"] := h
+        headerH := CPDesktop["headerH"], headerShift := headerH - 56
+        side := 184, top := headerH + 88, foot := 58
+        CPDesktop["side"] := side
+        CPDesktop["virtualW"] := Max(820, w)
+        ; Unmigrated pages retain their original form layout inside the shell.
+        extentW := 820, extentH := 600
+        for hwnd, entry in CPDesktop["base"] {
+            ctrl := entry[1]
+            if CPCanvasFixedYHwnds.Has(hwnd)
+                continue
+            ctrl.Move(entry[2] + side + 16, entry[3] + 116 + headerShift, entry[4], entry[5])
+            if DllCall("user32\GetWindowLongPtr", "ptr", hwnd, "int", -16, "ptr") & 0x10000000 {
+                extentW := Max(extentW, entry[2] + entry[4] + side + 36)
+                extentH := Max(extentH, entry[3] + entry[5] + 116 + headerShift + foot + 20)
+            }
+        }
+        ; A Tab (not Tab3) hosts visibility, not child coordinates. Keep the
+        ; native header outside the viewport; the sidebar is its visible proxy.
+        tab.Move(-4000, -4000, 1, 1)
+        tab.Opt("-Tabstop")
+        CPTabBarFill.Move(0, 0, Max(w, 820), top)
+        ; These hidden geometry anchors still define the scrolling viewport.
+        ; The native header is offscreen, so opaque sibling covers are not needed.
+        CPTabBarFill.Visible := false
+        CPFooterFill.Move(0, Max(top + 100, h - foot), Max(w, 820), foot)
+        CPFooterFill.Visible := false
+        sepAction.Move(0, Max(top + 100, h - foot), Max(w, 820), 1)
+        sepAction.Visible := false ; Geometry anchor, not the classic etched separator.
+        for ctrl in CPDesktopFooterControls()
+            ctrl.Visible := false
+        chrome := CPDesktop["chrome"]
+        for key, ctrl in chrome
+            ctrl.Visible := key != "appearance" && key != "classic"
+        chrome["title"].Text := tabNames[tab.Value]
+        subtitles := ["Translate game text from a capture.", "Translate spoken dialogue while you play.",
+            "Adjust the Translator overlay's appearance and behavior.", "Turn game text into useful study material.",
+            "Adjust the Explainer overlay's appearance and behavior.", "Keep names and terminology consistent.",
+            "Save and reuse settings for each game.", "Configure keyboard shortcuts and controller bindings.",
+            "Manage credentials for your AI providers.", "Choose the tools and folders used by JRPG Translator."]
+        chrome["subtitle"].Text := subtitles[Min(tab.Value, subtitles.Length)]
+        if tab.Value = 3 || tab.Value = 5 {
+            chrome["title"].Text := "Overlay windows"
+            chrome["subtitle"].Text := "Adjust the " (tab.Value = 3 ? "Translator" : "Explainer") " window's appearance and placement."
+            CPDesktop["lastOverlayPage"] := tab.Value
+        }
+        if tab.Value >= 6 && tab.Value != 7 {
+            chrome["title"].Text := "Settings"
+            CPDesktop["lastSettingsPage"] := tab.Value
+        }
+        CPDesktopPlace(chrome["headerPanel"], 0, 0, w, headerH)
+        CPDesktopPlace(chrome["sidebarPanel"], 0, headerH, side, Max(1, h - foot - headerH))
+        CPDesktopPlace(chrome["footerPanel"], 0, h - foot, w, foot)
+        brandX := CPDesktop["logo"].Get("image", 0) ? 92 : 20 ; 20-px gap after the 52-px logo.
+        CPDesktopPlace(chrome["brand"], brandX, (headerH - 30) / 2, Min(240, Max(80, w - 406 - brandX)), 30)
+        CPDesktopPlace(chrome["profileLabel"], w - 390, (headerH - 26) / 2, 54, 26)
+        CPDesktopPlace(chrome["profile"], w - 332, (headerH - 34) / 2, 182, 34)
+        for index, key in ["minimize", "maximize", "close"]
+            CPDesktopPlace(chrome[key], w - 132 + (index - 1) * 40, (headerH - 36) / 2, 36, 36)
+        chrome["maximize"].Text := DllCall("user32\IsZoomed", "ptr", ui.Hwnd) ? "Restore" : "Maximize"
+        CPDesktopPlace(chrome["title"], side + 24, 76 + headerShift, Max(560, w - side - 48), 34)
+        CPDesktopPlace(chrome["subtitle"], side + 24, 114 + headerShift, Max(560, w - side - 48), 24)
+        CPDesktopPlace(chrome["section"], 24, 84 + headerShift, side - 40, 20)
+        navH := h < 580 ? 34 : 40
+        for index, key in ["screenshot", "audioPage", "explanation", "overlays"]
+            CPDesktopPlace(chrome[key], 12, 114 + headerShift + (index - 1) * navH, side - 24, navH - 4)
+        organizeY := 114 + headerShift + 4 * navH + 24
+        CPDesktopPlace(chrome["organize"], 24, organizeY, side - 40, 20)
+        for index, key in ["study", "profiles", "settings"]
+            CPDesktopPlace(chrome[key], 12, organizeY + 30 + (index - 1) * navH, side - 24, navH - 4)
+        footerY := Max(top + 112, h - 45)
+        for index, key in ["translator", "explainer", "audio"]
+            CPDesktopPlace(chrome[key], 20 + (index - 1) * 142, footerY, 130, 32)
+        CPDesktopPlace(chrome["options"], w - 172, footerY, 152, 32)
+        for key, ctrl in CPDesktop["shot"]
+            ctrl.Visible := tab.Value = 1
+        for key, ctrl in CPDesktop["audioPage"]
+            ctrl.Visible := tab.Value = 2
+        for key, ctrl in CPDesktop["explanationPage"]
+            ctrl.Visible := tab.Value = 4
+        for page, overlayPage in CPDesktop["overlayPages"]
+            for key, ctrl in overlayPage
+                ctrl.Visible := tab.Value = page
+        for page, organizePage in CPDesktop["organizePages"]
+            for key, ctrl in organizePage
+                ctrl.Visible := tab.Value = page
+        if tab.Value = 1 {
+            for ctrl in CPDesktopShotControls
+                ctrl.Visible := false
+            extentW := Max(820, w)
+            extentH := CPDesktopLayoutScreenshot(extentW) + foot + 20
+        } else if tab.Value = 2 {
+            for ctrl in CPDesktopAudioControls
+                ctrl.Visible := false
+            extentW := Max(820, w)
+            extentH := CPDesktopLayoutAudio(extentW) + foot + 20
+        } else if tab.Value = 4 {
+            for ctrl in CPDesktopExplanationControls
+                ctrl.Visible := false
+            extentW := Max(820, w)
+            extentH := CPDesktopLayoutExplanation(extentW) + foot + 20
+        } else if tab.Value = 3 || tab.Value = 5 {
+            for ctrl in CPDesktopOverlayLegacy[tab.Value]
+                ctrl.Visible := false
+            extentW := Max(820, w)
+            extentH := CPDesktopLayoutOverlay(tab.Value, extentW) + foot + 20
+        } else if CPDesktopOrganizeLegacy.Has(tab.Value) {
+            for ctrl in CPDesktopOrganizeLegacy[tab.Value]
+                ctrl.Visible := false
+            extentW := Max(820, w)
+            extentH := CPDesktopLayoutOrganize(tab.Value, extentW) + foot + 20
+        }
+        CP_CANVAS_MIN_W := extentW
+        CP_CANVAS_MIN_H := Max(600, extentH)
+        CPRenderCustomTabBar(true)
+        CPDesktopTheme()
+        CPDesktopRefreshStatus(true)
+        CPUpdateComboArrowOverlays()
+        CPCanvasFinishLayout(w, h, restore, false)
+        CPClipScrollableControlsToViewport(false)
+        CPMaintainFooterZOrder()
+        CPDesktopRaiseChrome()
+        CPPanelLastLayoutW := Round(w), CPPanelLastLayoutH := Round(h)
+    } finally {
+        if visible {
+            SendMessage(0xB, 1, 0, ui.Hwnd)
+            DllCall("user32\RedrawWindow", "ptr", ui.Hwnd, "ptr", 0, "ptr", 0, "uint", 0x185)
+        }
+        busy := false
+    }
+}
+
+CPDesktopLayoutScreenshot(w) {
+    global CPDesktop, CPDesktopShotControls, ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt, btnPrEdit, btnCapPick
+    global btnST, btnTS, btnSTO, chkGuess, chkName, chkDel, chkOpenTW, chkTop_TW, eCapMax
+    s := CPDesktop["shot"], panelX := CPDesktop["side"] + 24
+    panelW := Min(1040, w - panelX - 24), x := panelX + 20, contentW := panelW - 40
+    right := x + contentW, columnGap := 20, wide := contentW >= 760
+    CPDesktop["contentW"] := panelW
+    aiY := CPDesktop["headerH"] + 96, aiH := wide ? 166 : 236
+    CPDesktopPlace(s["aiPanel"], panelX, aiY, panelW, aiH)
+    CPDesktopPlace(s["ai"], x, aiY + 18, contentW, 26)
+    providerW := wide ? 140 : 172
+    modelX := x + providerW + 16
+    modelW := wide ? Floor((contentW - providerW - 32) * 0.43) : contentW - providerW - 16
+    promptX := wide ? modelX + modelW + 16 : x
+    promptY := wide ? aiY + 54 : aiY + 138
+    promptW := wide ? right - promptX : contentW
+    CPDesktopPlace(s["provider"], x, aiY + 54, providerW, 22)
+    CPDesktopPlace(ddlProv, x, aiY + 78, providerW, 30)
+    CPDesktopPlace(s["model"], modelX, aiY + 54, modelW, 22)
+    CPDesktopPlace(ddlIMG, modelX, aiY + 78, modelW, 30)
+    CPDesktopPlace(ddlIMG_GM, modelX, aiY + 78, modelW, 30)
+    CPDesktopSyncModel()
+    s["models"].Text := "Manage models…"
+    CPDesktopPlace(s["models"], modelX, aiY + 116, 140, 28)
+    CPDesktopPlace(s["prompt"], promptX, promptY, promptW, 22)
+    CPDesktopPlace(ddlPrompt, promptX, promptY + 24, promptW, 30)
+    btnPrEdit.Text := "Edit prompt…"
+    CPDesktopPlace(btnPrEdit, promptX, promptY + 62, 108, 28)
+    CPDesktopPlace(s["prompts"], promptX + 116, promptY + 62, 88, 28)
+    captureY := aiY + aiH + 16
+    multi := CPDesktop["multi"], capturePanelH := multi ? 218 : 178
+    CPDesktopPlace(s["capturePanel"], panelX, captureY, panelW, capturePanelH)
+    CPDesktopPlace(s["capture"], x, captureY + 18, contentW - 164, 26)
+    btnCapPick.Text := "Change capture…"
+    CPDesktopPlace(btnCapPick, right - 154, captureY + 18, 154, 34)
+    CPDesktopPlace(s["captureHelp"], x, captureY + 46, contentW - 170, 24)
+    primaryW := Min(192, Floor((contentW - 24) / 3))
+    secondaryW := Min(160, Floor((contentW - primaryW - 24) / 2))
+    btnST.Text := "Capture && translate"
+    btnST.SetFont("Norm")
+    btnTS.Text := "Take screenshot"
+    btnSTO.Text := "Translate captures"
+    CPDesktopPlace(btnST, x, captureY + 84, primaryW, 38)
+    CPDesktopPlace(btnTS, x + primaryW + 12, captureY + 84, secondaryW, 38)
+    CPDesktopPlace(btnSTO, x + primaryW + secondaryW + 24, captureY + 84, secondaryW, 38)
+    s["multi"].Text := (multi ? "▾" : "▸") "  Using multiple screenshots"
+    CPDesktopPlace(s["multi"], x, captureY + 132, 310, 28)
+    CPDesktopPlace(s["multiHelp"], x + 14, captureY + 164, contentW - 14, 42, multi)
+    formatY := captureY + capturePanelH + 16
+    expanded := CPDesktop["advanced"], formatH := expanded ? 352 : 206
+    CPDesktopPlace(s["formatPanel"], panelX, formatY, panelW, formatH)
+    CPDesktopPlace(s["format"], x, formatY + 18, contentW, 26)
+    CPDesktopPlace(chkGuess, x, formatY + 56, contentW, 26)
+    CPDesktopPlace(s["guessHelp"], x + 24, formatY + 83, contentW - 24, 22)
+    CPDesktopPlace(chkName, x, formatY + 112, contentW, 26)
+    CPDesktopPlace(s["nameHelp"], x + 24, formatY + 139, contentW - 24, 22)
+    s["advanced"].Text := (expanded ? "▾" : "▸") "  Startup && advanced capture"
+    CPDesktopPlace(s["advanced"], x, formatY + 170, 330, 28)
+    half := Floor((contentW - columnGap) / 2)
+    chkOpenTW.Text := "Open Translator on startup"
+    chkTop_TW.Text := "Translator always on top"
+    CPDesktopPlace(chkOpenTW, x, formatY + 212, half, 26, expanded)
+    CPDesktopPlace(chkTop_TW, x + half + columnGap, formatY + 212, half, 26, expanded)
+    CPDesktopPlace(chkDel, x, formatY + 256, half, 26, expanded)
+    CPDesktopPlace(s["png"], x + half + columnGap, formatY + 258, half - 80, 26, expanded)
+    CPDesktopPlace(eCapMax, right - 72, formatY + 254, 72, 30, expanded)
+    CPDesktopPlace(s["advancedHelp"], x, formatY + 300, contentW, 42, expanded)
+    ; Tighten section spacing in short windows, without shrinking readable text
+    ; or native hit targets. Longer/expanded pages retain vertical scrolling.
+    pageControls := CPDesktopShotControls.Clone()
+    for key, ctrl in s
+        pageControls.Push(ctrl)
+    bottom := 0
+    for ctrl in pageControls {
+        if !(DllCall("user32\GetWindowLongPtr", "ptr", ctrl.Hwnd, "int", -16, "ptr") & 0x10000000)
+            continue
+        ctrl.GetPos(, &cy,, &ch)
+        bottom := Max(bottom, cy + ch)
+    }
+    return bottom
+}
+
+CPDesktopSyncModel(*) {
+    global CPDesktop, tab, ddlProv, ddlIMG, ddlIMG_GM
+    if !CPDesktopActive() || tab.Value != 1
+        return
+    gemini := StrLower(Trim(ddlProv.Text)) = "gemini"
+    ddlIMG.Visible := !gemini
+    ddlIMG_GM.Visible := gemini
+    CPDesktopOrderTabStops()
+    CPUpdateComboArrowOverlays()
+}
+
+CPDesktopExistingControls() {
+    global ui
+    result := Map()
+    for ctrl in ui
+        result[ctrl.Hwnd] := true
+    return result
+}
+
+CPDesktopCaptureOrganizeControls(page, before) {
+    global ui, CPDesktopOrganizeLegacy
+    for ctrl in ui
+        if !before.Has(ctrl.Hwnd)
+            CPDesktopOrganizeLegacy[page].Push(ctrl)
+}
+
+CPDesktopOrganizeLabel(page, key, caption, heading := false) {
+    global ui, CPDesktop
+    ctrl := ui.AddText("x0 y0 w100 h24 Hidden +0x80", caption)
+    CPDesktop["organizePages"][page][key] := ctrl
+    CPDesktop["surfaces"][ctrl.Hwnd] := "panel"
+    if heading
+        ctrl.SetFont("s13 Bold")
+    else if InStr(key, "Help")
+        CPRegisterMutedControl(ctrl)
+    return ctrl
+}
+
+CPDesktopOrganizeButton(page, key, caption, callback, kind := "button", surface := "panel") {
+    global ui, CPDesktop
+    ctrl := ui.AddButton("x0 y0 w160 h34 Hidden", caption)
+    ctrl.OnEvent("Click", callback)
+    CPDesktop["organizePages"][page][key] := ctrl
+    CPDesktopRegisterPaint(ctrl, kind, surface)
+    return ctrl
+}
+
+CPDesktopCreateOrganizePages() {
+    global ui, tab, CPDesktop, hotkeyActions, hotkeyLabels
+    global ddlGameProfile, ddlStartupOverlays, txtGameProfileState
+    global btnGameProfileAdd, btnGameProfileSave, btnGameProfileApply, btnGameProfileDelete
+    global chkUseTerminologyOverrides, ddlENG, ddlJPG, btnENG_Edit, btnENG_New, btnENG_Del, btnJPG_Edit, btnJPG_New, btnJPG_Del
+    global hkEdits, hkBtnChg, hkBtnDis, hkBtnDef, hkConflictText
+    global CPControllerBindingEdits, CPControllerAssignButtons, CPControllerDisableButtons
+    global cbControllerInputsEnabled, cbControllerDpadNavigationEnabled, txtControllerStatus
+    global cbApiInApp, eGemini, eOpenAI, btnSaveEnv, btnDelEnv, btnOpenEnvVars, btnAbout
+    global ePython, eOverlay, eImg, eAudio, eExplain, bPy, bOvSel, bImgSel, bAud, bExplainSel, btnSavePaths, cbDirectModelOutput, cbDebug
+    titles := Map(6, [["rules", "Terminology overrides"], ["local", "Local corrections"], ["model", "Model instructions"]],
+        7, [["saved", "Saved profiles"], ["startup", "Startup overlays"], ["included", "What a profile includes"]],
+        8, [["bindings", "Input bindings"], ["controller", "Controller options"]],
+        9, [["windows", "Windows environment variables"], ["keys", "In-app API keys"], ["about", "About JRPG Translator"]],
+        10, [["paths", "Tool paths"], ["advanced", "Advanced options"]])
+    for page, headings in titles {
+        tab.UseTab(page)
+        CPDesktop["organizePanels"][page] := []
+        for spec in headings {
+            CPDesktopOrganizeLabel(page, spec[1], spec[2], true)
+            key := spec[1] "Panel"
+            ctrl := ui.AddText("x0 y0 w100 h100 Hidden +0xD +0x04000000")
+            CPDesktop["organizePages"][page][key] := ctrl
+            CPDesktopRegisterPaint(ctrl, "panel", "window")
+            CPDesktop["organizePanels"][page].Push(key)
+        }
+        if page != 7 {
+            for spec in [["controlsTab", "Controls", 8], ["termsTab", "Terminology", 6], ["apiTab", "API keys", 9], ["pathsTab", "Paths", 10]] {
+                ctrl := CPDesktopOrganizeButton(page, spec[1], spec[2], CPDesktopNavigate.Bind(spec[3]), "segment", "window")
+                CPDesktop["paint"][ctrl.Hwnd]["selected"] := page = spec[3]
+            }
+            CPDesktopOrganizeButton(page, "appearance", "Window options…", CPDesktopAppearance, "link", "window")
+            CPDesktopOrganizeButton(page, "classic", "Use classic layout", CPDesktopToggleLayout, "link", "window")
+        }
+    }
+    tab.UseTab(7)
+    for spec in [["profile", "Profile"], ["savedHelp", "Choose a profile, then Apply to load it. Save current updates the selected profile with your current settings."],
+        ["startupHelp", "Choose which overlays open on the next tool start, including LaunchBox / Big Box. Already open windows are unchanged. Use Save current to store this choice in your profile."],
+        ["includedHelp", "Translation and explanation prompts; capture target and formatting; terminology; overlay appearance, placement and startup; D-pad navigation; the selected Study Library and configured Anki mappings."],
+        ["globalHelp", "AI providers and models, audio input and output language, keyboard shortcuts and controller action bindings remain global. Applying a profile does not change them."]]
+        CPDesktopOrganizeLabel(7, spec[1], spec[2])
+    tab.UseTab(6)
+    for spec in [["rulesHelp", "Keep recurring names and terms consistent. Each glossary has its own profile; changes apply to the next screenshot translation."],
+        ["localHelp", "Target language → target language. Replace matching output locally after translation. These rules are not sent to the model. Example: Esuteru → Estelle."],
+        ["modelHelp", "Japanese → target language. Send exact mappings with the prompt. The model may ignore or misapply a rule. Example: エステル → Estelle."]]
+        CPDesktopOrganizeLabel(6, spec[1], spec[2])
+    tab.UseTab(8)
+    CPDesktopOrganizeButton(8, "keyboard", "Keyboard", CPSetControlsView.Bind("keyboard", true), "segment")
+    CPDesktopOrganizeButton(8, "gamepad", "Controller", CPSetControlsView.Bind("controller", true), "segment")
+    CPDesktopOrganizeLabel(8, "bindingsHelp", "")
+    CPDesktopOrganizeLabel(8, "controllerHelp", "The game still receives action-binding button presses. Turn off D-pad navigation if another app also sends arrow keys. A / Cross and B / Circle remain available.")
+    for action in hotkeyActions
+        CPDesktopOrganizeLabel(8, "action_" action, hotkeyLabels[action])
+    tab.UseTab(9)
+    CPDesktopOrganizeLabel(9, "windowsHelp", "Keep keys outside the app's .env file. In Windows User variables, add GEMINI_API_KEY and/or OPENAI_API_KEY, then restart JRPG Translator. Environment variables are not an encrypted secret vault.")
+    CPDesktopOrganizeLabel(9, "keysHelp", "Optional: save keys as plain text in Settings\.env. Turning off in-app entry does not delete an existing .env file; use Delete .env to remove it.")
+    CPDesktopOrganizeLabel(9, "gemini", "Gemini API key")
+    CPDesktopOrganizeLabel(9, "openai", "OpenAI API key")
+    CPDesktopOrganizeLabel(9, "aboutHelp", "Version information, guides, project links and bug reports.")
+    tab.UseTab(10)
+    CPDesktopOrganizeLabel(10, "pathsHelp", "Change these only when using a custom installation. Browse to each executable or script, then Save paths to apply your changes.")
+    for spec in [["python", "Python executable"], ["overlay", "Overlay executable"], ["image", "Screenshot translator script"], ["audio", "Audio translator script"], ["explain", "Explainer script"]]
+        CPDesktopOrganizeLabel(10, spec[1], spec[2])
+    CPDesktopOrganizeLabel(10, "directHelp", "Direct output bypasses screenshot translation extraction and displays the model response unchanged.")
+    CPDesktopOrganizeLabel(10, "debugHelp", "Debug mode writes diagnostic logs for the control panel, overlays and live audio translator.")
+    for ctrl in [ddlGameProfile, ddlStartupOverlays, ddlENG, ddlJPG] {
+        CPDesktop["combos"][ctrl.Hwnd] := Map("ctrl", ctrl, "height", SendMessage(0x0154, -1, 0, ctrl.Hwnd))
+        CPPrepareStudyCombo(ctrl.Hwnd)
+    }
+    for ctrl in [txtGameProfileState, chkUseTerminologyOverrides, hkConflictText, txtControllerStatus,
+        cbControllerInputsEnabled, cbControllerDpadNavigationEnabled, cbApiInApp, cbDirectModelOutput, cbDebug]
+        CPDesktop["surfaces"][ctrl.Hwnd] := "panel"
+    for ctrl in [eGemini, eOpenAI, ePython, eOverlay, eImg, eAudio, eExplain]
+        CPDesktop["surfaces"][ctrl.Hwnd] := "field"
+    for ctrl in [btnGameProfileAdd, btnGameProfileSave, btnGameProfileApply, btnGameProfileDelete,
+        btnENG_Edit, btnENG_New, btnENG_Del, btnJPG_Edit, btnJPG_New, btnJPG_Del,
+        btnSaveEnv, btnDelEnv, btnOpenEnvVars, btnAbout, bPy, bOvSel, bImgSel, bAud, bExplainSel, btnSavePaths] {
+        primary := ctrl = btnGameProfileApply || ctrl = btnSaveEnv || ctrl = btnSavePaths
+        CPDesktopRegisterPaint(ctrl, primary ? "primary" : "button", "panel")
+    }
+    for action in hotkeyActions {
+        for ctrl in [hkEdits[action], CPControllerBindingEdits[action]]
+            CPDesktop["surfaces"][ctrl.Hwnd] := "field"
+        for ctrl in [hkBtnChg[action], hkBtnDis[action], hkBtnDef[action], CPControllerAssignButtons[action], CPControllerDisableButtons[action]]
+            CPDesktopRegisterPaint(ctrl, "button", "panel")
+    }
+}
+
+CPDesktopOrganizeHelp(ctrl, x, y, w) {
+    global ui
+    scale := GetWindowDPI(ui.Hwnd) / 96
+    height := Max(24, Ceil(CPMeasureWrappedTextHeight(ctrl, w * scale) / scale) + 4)
+    CPDesktopPlace(ctrl, x, y, w, height)
+    return y + height
+}
+
+CPDesktopSyncBindingConflicts(conflicts) {
+    global CPDesktop, hkEdits, tab, CPControlsCurrentView
+    if !IsSet(CPDesktop) || !CPDesktop.Get("ready", false)
+        return
+    CPDesktop["bindingConflicts"] := Map()
+    for shortcut, actions in conflicts
+        for action in actions
+            CPDesktop["bindingConflicts"][hkEdits[action].Hwnd] := true
+    if CPDesktopActive() && tab.Value = 8 && CPControlsCurrentView = "keyboard"
+        CPDesktopRelayout()
+}
+
+CPDesktopLayoutOrganize(page, w) {
+    global CPDesktop, CPTabVisiblePages
+    p := CPDesktop["organizePages"][page], panelX := CPDesktop["side"] + 24
+    panelW := Min(1040, w - panelX - 24), x := panelX + 20, contentW := panelW - 40
+    CPDesktop["contentW"] := panelW
+    y := CPDesktop["headerH"] + 96, stops := []
+    if page != 7 {
+        nextX := panelX
+        for key in ["controlsTab", "termsTab", "apiTab", "pathsTab"] {
+            shown := key != "pathsTab" || ArrayIndexOf(CPTabVisiblePages, 10)
+            CPDesktopPlace(p[key], nextX, y, key = "pathsTab" ? 100 : 132, 36, shown)
+            if shown {
+                nextX += key = "pathsTab" ? 108 : 140
+                stops.Push(p[key])
+            }
+        }
+        y += 52
+    }
+    switch page {
+        case 7: bottom := CPDesktopLayoutProfiles(p, panelX, y, panelW, stops)
+        case 6: bottom := CPDesktopLayoutTerminology(p, panelX, y, panelW, stops)
+        case 8: bottom := CPDesktopLayoutBindings(p, panelX, y, panelW, stops)
+        case 9: bottom := CPDesktopLayoutApiKeys(p, panelX, y, panelW, stops)
+        case 10: bottom := CPDesktopLayoutPaths(p, panelX, y, panelW, stops)
+    }
+    if page != 7 {
+        CPDesktopPlace(p["appearance"], panelX, bottom + 12, 164, 30)
+        CPDesktopPlace(p["classic"], panelX + 184, bottom + 12, 168, 30)
+        stops.Push(p["appearance"], p["classic"])
+        bottom += 44
+    }
+    CPDesktop["organizeStops"] := stops
+    CPDesktopOrderTabStops()
+    return bottom
+}
+
+CPDesktopLayoutProfiles(p, px, y, pw, stops) {
+    global ddlGameProfile, ddlStartupOverlays, txtGameProfileState
+    global btnGameProfileAdd, btnGameProfileSave, btnGameProfileApply, btnGameProfileDelete
+    x := px + 20, cw := pw - 40, start := y
+    CPDesktopPlace(p["saved"], x, y + 18, cw, 28)
+    y := CPDesktopOrganizeHelp(p["savedHelp"], x, y + 56, cw) + 16
+    CPDesktopPlace(p["profile"], x, y, cw, 24)
+    CPDesktopPlace(ddlGameProfile, x, y + 28, cw - 152, 34)
+    btnGameProfileAdd.Text := "New profile…"
+    CPDesktopPlace(btnGameProfileAdd, x + cw - 140, y + 28, 140, 34)
+    y := CPDesktopOrganizeHelp(txtGameProfileState, x, y + 76, cw) + 12
+    btnGameProfileApply.Text := "Apply profile", btnGameProfileSave.Text := "Save current", btnGameProfileDelete.Text := "Delete profile…"
+    for index, ctrl in [btnGameProfileApply, btnGameProfileSave, btnGameProfileDelete]
+        CPDesktopPlace(ctrl, x + (index - 1) * 156, y, 144, 36)
+    CPDesktopPlace(p["savedPanel"], px, start, pw, y + 56 - start)
+    stops.Push(ddlGameProfile, btnGameProfileAdd, btnGameProfileApply, btnGameProfileSave, btnGameProfileDelete)
+    start := y + 72
+    CPDesktopPlace(p["startup"], x, start + 18, cw, 28)
+    CPDesktopPlace(ddlStartupOverlays, x, start + 58, Min(420, cw), 34)
+    y := CPDesktopOrganizeHelp(p["startupHelp"], x, start + 108, cw) + 20
+    CPDesktopPlace(p["startupPanel"], px, start, pw, y - start)
+    stops.Push(ddlStartupOverlays)
+    start := y + 16
+    CPDesktopPlace(p["included"], x, start + 18, cw, 28)
+    y := CPDesktopOrganizeHelp(p["includedHelp"], x, start + 58, cw) + 12
+    y := CPDesktopOrganizeHelp(p["globalHelp"], x, y, cw) + 20
+    CPDesktopPlace(p["includedPanel"], px, start, pw, y - start)
+    return y
+}
+
+CPDesktopLayoutTerminology(p, px, y, pw, stops) {
+    global chkUseTerminologyOverrides, ddlENG, ddlJPG, btnENG_Edit, btnENG_New, btnENG_Del, btnJPG_Edit, btnJPG_New, btnJPG_Del
+    x := px + 20, cw := pw - 40, start := y
+    CPDesktopPlace(p["rules"], x, y + 18, cw, 28)
+    CPDesktopPlace(chkUseTerminologyOverrides, x, y + 58, cw, 28)
+    y := CPDesktopOrganizeHelp(p["rulesHelp"], x, y + 98, cw) + 20
+    CPDesktopPlace(p["rulesPanel"], px, start, pw, y - start)
+    stops.Push(chkUseTerminologyOverrides)
+    for spec in [["local", ddlENG, btnENG_Edit, btnENG_New, btnENG_Del], ["model", ddlJPG, btnJPG_Edit, btnJPG_New, btnJPG_Del]] {
+        key := spec[1], start := y + 16
+        CPDesktopPlace(p[key], x, start + 18, cw, 28)
+        y := CPDesktopOrganizeHelp(p[key "Help"], x, start + 58, cw) + 14
+        CPDesktopPlace(spec[2], x, y, cw, 34)
+        y += 48
+        for index, ctrl in [spec[3], spec[4], spec[5]]
+            CPDesktopPlace(ctrl, x + (index - 1) * 156, y, 144, 34)
+        y += 54
+        CPDesktopPlace(p[key "Panel"], px, start, pw, y - start)
+        stops.Push(spec[2], spec[3], spec[4], spec[5])
+    }
+    return y
+}
+
+CPDesktopLayoutBindings(p, px, y, pw, stops) {
+    global CPDesktop, CPControlsCurrentView, hotkeyActions, hkEdits, hkBtnChg, hkBtnDis, hkBtnDef, hkConflictText
+    global CPControllerBindingEdits, CPControllerAssignButtons, CPControllerDisableButtons
+    global cbControllerInputsEnabled, cbControllerDpadNavigationEnabled, txtControllerStatus
+    x := px + 20, cw := pw - 40, start := y, gamepad := CPControlsCurrentView = "controller"
+    CPDesktopPlace(p["bindings"], x, y + 18, cw, 28)
+    for index, key in ["keyboard", "gamepad"] {
+        CPDesktop["paint"][p[key].Hwnd]["selected"] := (key = "gamepad") = gamepad
+        CPDesktopPlace(p[key], x + (index - 1) * 152, y + 58, 140, 34)
+        stops.Push(p[key])
+    }
+    p["bindingsHelp"].Text := gamepad ? "Assign direct controller buttons to actions. Enable action bindings in Controller options below."
+        : "Keyboard shortcuts also work with controller-to-keyboard tools. Change a binding, disable it, or restore its default."
+    y := CPDesktopOrganizeHelp(p["bindingsHelp"], x, y + 108, cw) + 16
+    stacked := cw < 800, actionW := 238, buttonsW := gamepad ? 182 : 278
+    for action in hotkeyActions {
+        actionLabel := p["action_" action]
+        bindingEdit := gamepad ? CPControllerBindingEdits[action] : hkEdits[action]
+        buttons := gamepad ? [CPControllerAssignButtons[action], CPControllerDisableButtons[action]]
+            : [hkBtnChg[action], hkBtnDis[action], hkBtnDef[action]]
+        CPDesktopPlace(actionLabel, x, y, stacked ? cw : actionW - 12, 28)
+        rowY := stacked ? y + 30 : y, editX := stacked ? x : x + actionW
+        editW := cw - (stacked ? 0 : actionW) - buttonsW - 12
+        CPDesktopPlace(bindingEdit, editX, rowY, editW, 32)
+        stops.Push(bindingEdit)
+        for index, ctrl in buttons {
+            CPDesktopPlace(ctrl, editX + editW + 12 + (index - 1) * 96, rowY, 86, 32)
+            stops.Push(ctrl)
+        }
+        y := rowY + 46
+    }
+    if !gamepad {
+        y := CPDesktopOrganizeHelp(hkConflictText, x, y, cw) + 6
+    }
+    CPDesktopPlace(p["bindingsPanel"], px, start, pw, y + 8 - start)
+    y += 8
+    ; A zero-height geometry anchor keeps an inactive card out of parent paint.
+    CPDesktopPlace(p["controllerPanel"], px, y, pw, 0)
+    for key in ["controller", "controllerHelp"]
+        p[key].Visible := gamepad
+    if gamepad {
+        start := y + 16
+        CPDesktopPlace(p["controller"], x, start + 18, cw, 28)
+        y := CPDesktopOrganizeHelp(txtControllerStatus, x, start + 58, cw) + 8
+        for ctrl in [cbControllerInputsEnabled, cbControllerDpadNavigationEnabled] {
+            CPDesktopPlace(ctrl, x, y, cw, 30)
+            stops.Push(ctrl)
+            y += 42
+        }
+        y := CPDesktopOrganizeHelp(p["controllerHelp"], x, y, cw) + 20
+        CPDesktopPlace(p["controllerPanel"], px, start, pw, y - start)
+    }
+    return y
+}
+
+CPDesktopLayoutApiKeys(p, px, y, pw, stops) {
+    global cbApiInApp, eGemini, eOpenAI, btnSaveEnv, btnDelEnv, btnOpenEnvVars, btnAbout
+    x := px + 20, cw := pw - 40, start := y
+    CPDesktopPlace(p["windows"], x, y + 18, cw, 28)
+    y := CPDesktopOrganizeHelp(p["windowsHelp"], x, y + 58, cw) + 14
+    btnOpenEnvVars.Text := "Open environment variables…"
+    CPDesktopPlace(btnOpenEnvVars, x, y, 280, 36)
+    y += 56
+    CPDesktopPlace(p["windowsPanel"], px, start, pw, y - start)
+    stops.Push(btnOpenEnvVars)
+    start := y + 16
+    CPDesktopPlace(p["keys"], x, start + 18, cw, 28)
+    y := CPDesktopOrganizeHelp(p["keysHelp"], x, start + 58, cw) + 14
+    CPDesktopPlace(cbApiInApp, x, y, cw, 28)
+    y += 44
+    for spec in [["gemini", eGemini], ["openai", eOpenAI]] {
+        CPDesktopPlace(p[spec[1]], x, y, cw, 24)
+        CPDesktopPlace(spec[2], x, y + 28, cw, 34)
+        y += 80
+    }
+    CPDesktopPlace(btnSaveEnv, x, y, 144, 36)
+    CPDesktopPlace(btnDelEnv, x + 156, y, 144, 36)
+    y += 56
+    CPDesktopPlace(p["keysPanel"], px, start, pw, y - start)
+    stops.Push(cbApiInApp, eGemini, eOpenAI, btnSaveEnv, btnDelEnv)
+    start := y + 16
+    CPDesktopPlace(p["about"], x, start + 18, cw, 28)
+    y := CPDesktopOrganizeHelp(p["aboutHelp"], x, start + 58, cw) + 14
+    CPDesktopPlace(btnAbout, x, y, 144, 36)
+    y += 56
+    CPDesktopPlace(p["aboutPanel"], px, start, pw, y - start)
+    stops.Push(btnAbout)
+    return y
+}
+
+CPDesktopLayoutPaths(p, px, y, pw, stops) {
+    global ePython, eOverlay, eImg, eAudio, eExplain, bPy, bOvSel, bImgSel, bAud, bExplainSel, btnSavePaths, cbDirectModelOutput, cbDebug
+    x := px + 20, cw := pw - 40, start := y
+    CPDesktopPlace(p["paths"], x, y + 18, cw, 28)
+    y := CPDesktopOrganizeHelp(p["pathsHelp"], x, y + 58, cw) + 14
+    for spec in [["python", ePython, bPy], ["overlay", eOverlay, bOvSel], ["image", eImg, bImgSel], ["audio", eAudio, bAud], ["explain", eExplain, bExplainSel]] {
+        CPDesktopPlace(p[spec[1]], x, y, cw, 24)
+        CPDesktopPlace(spec[2], x, y + 28, cw - 108, 34)
+        CPDesktopPlace(spec[3], x + cw - 96, y + 28, 96, 34)
+        stops.Push(spec[2], spec[3])
+        y += 80
+    }
+    CPDesktopPlace(btnSavePaths, x, y, 144, 36)
+    y += 56
+    CPDesktopPlace(p["pathsPanel"], px, start, pw, y - start)
+    stops.Push(btnSavePaths)
+    start := y + 16
+    CPDesktopPlace(p["advanced"], x, start + 18, cw, 28)
+    CPDesktopPlace(cbDirectModelOutput, x, start + 58, cw, 28)
+    y := CPDesktopOrganizeHelp(p["directHelp"], x + 24, start + 94, cw - 24) + 14
+    CPDesktopPlace(cbDebug, x, y, cw, 28)
+    y := CPDesktopOrganizeHelp(p["debugHelp"], x + 24, y + 36, cw - 24) + 20
+    CPDesktopPlace(p["advancedPanel"], px, start, pw, y - start)
+    stops.Push(cbDirectModelOutput, cbDebug)
+    return y
+}
+
+CPDesktopCreateAudioPage() {
+    global ui, tab, CPDesktop, ddlAProv, ddlA_GM, ddlTR, ddlAudioTarget, ddlSpeaker, btnSpRef, btnAudioTest
+    tab.UseTab(2)
+    a := CPDesktop["audioPage"]
+    for spec in [["ai", "AI settings"], ["provider", "Provider"], ["model", "Model"], ["language", "Output language"],
+        ["input", "Audio input"], ["inputHelp", "Capture game sound from a Windows output device."],
+        ["check", "Input check"], ["result", ""], ["troubleshootHelp", "Play sound in your game, then test the selected output device. The test is local; no AI request is made.`nIf it stays silent, check the device or try a different audio driver in your emulator. Device checks time out after 30 seconds."],
+        ["session", "Live translation"], ["sessionHelp", ""]] {
+        a[spec[1]] := ui.AddText("x0 y0 w100 h24 Hidden +0x80", spec[2]) ; SS_NOPREFIX
+        CPDesktop["surfaces"][a[spec[1]].Hwnd] := "panel"
+        if InStr(spec[1], "Help")
+            CPRegisterMutedControl(a[spec[1]])
+    }
+    for key in ["ai", "input", "session"]
+        a[key].SetFont("s13 Bold")
+    a["check"].SetFont("Bold")
+    a["models"] := ui.AddButton("x0 y0 w140 h28 Hidden", "Manage models…")
+    a["models"].OnEvent("Click", CPDesktopAudioModelMenu)
+    a["troubleshoot"] := ui.AddButton("x0 y0 w280 h28 Hidden", "Audio testing && troubleshooting")
+    a["troubleshoot"].OnEvent("Click", CPDesktopToggleAudioHelp)
+    a["power"] := ui.AddButton("x0 y0 w208 h38 Hidden", "Start audio translation")
+    a["power"].OnEvent("Click", ToggleAudioFromButton)
+    for key in ["models", "troubleshoot"]
+        CPDesktopRegisterPaint(a[key], "link", "panel")
+    CPDesktopRegisterPaint(a["power"], "primary", "panel")
+    for ctrl in [btnSpRef, btnAudioTest]
+        CPDesktopRegisterPaint(ctrl, "button", "panel")
+    for key in ["aiPanel", "inputPanel", "sessionPanel"] {
+        a[key] := ui.AddText("x0 y0 w100 h100 Hidden +0xD +0x04000000")
+        CPDesktopRegisterPaint(a[key], "panel", "window")
+    }
+    for ctrl in [ddlAProv, ddlA_GM, ddlTR, ddlAudioTarget, ddlSpeaker] {
+        CPDesktop["combos"][ctrl.Hwnd] := Map("ctrl", ctrl, "height", SendMessage(0x0154, -1, 0, ctrl.Hwnd))
+        CPPrepareStudyCombo(ctrl.Hwnd)
+    }
+}
+
+CPDesktopLayoutAudio(w) {
+    global CPDesktop, ui, ddlAProv, ddlA_GM, ddlTR, ddlAudioTarget, ddlSpeaker, btnSpRef, btnAudioTest
+    a := CPDesktop["audioPage"], panelX := CPDesktop["side"] + 24
+    panelW := Min(1040, w - panelX - 24), x := panelX + 20, contentW := panelW - 40
+    right := x + contentW, wide := contentW >= 760
+    CPDesktop["contentW"] := panelW
+    aiY := CPDesktop["headerH"] + 96, aiH := wide ? 166 : 236
+    CPDesktopPlace(a["aiPanel"], panelX, aiY, panelW, aiH)
+    CPDesktopPlace(a["ai"], x, aiY + 18, contentW, 26)
+    providerW := wide ? 140 : 172, languageW := wide ? 200 : contentW
+    modelX := x + providerW + 16
+    modelW := contentW - providerW - 16 - (wide ? languageW + 16 : 0)
+    languageX := wide ? right - languageW : x, languageY := aiY + (wide ? 54 : 138)
+    CPDesktopPlace(a["provider"], x, aiY + 54, providerW, 22)
+    CPDesktopPlace(ddlAProv, x, aiY + 78, providerW, 30)
+    CPDesktopPlace(a["model"], modelX, aiY + 54, modelW, 22)
+    CPDesktopPlace(ddlA_GM, modelX, aiY + 78, modelW, 30)
+    CPDesktopPlace(ddlTR, modelX, aiY + 78, modelW, 30)
+    CPDesktopPlace(a["models"], modelX, aiY + 116, 140, 28)
+    CPDesktopPlace(a["language"], languageX, languageY, languageW, 22)
+    CPDesktopPlace(ddlAudioTarget, languageX, languageY + 24, languageW, 30)
+    CPDesktopSyncAudioModel()
+
+    inputY := aiY + aiH + 16, expanded := CPDesktop["audioHelpOpen"]
+    dpiScale := GetWindowDPI(ui.Hwnd) / 96
+    helpH := Max(64, Ceil(CPMeasureWrappedTextHeight(a["troubleshootHelp"], (contentW - 14) * dpiScale) / dpiScale) + 6)
+    inputH := expanded ? 232 + helpH + 12 : 234
+    CPDesktopPlace(a["inputPanel"], panelX, inputY, panelW, inputH)
+    CPDesktopPlace(a["input"], x, inputY + 18, contentW, 26)
+    CPDesktopPlace(a["inputHelp"], x, inputY + 48, contentW, 22)
+    CPDesktopPlace(ddlSpeaker, x, inputY + 80, contentW - 252, 30)
+    btnSpRef.Text := "Refresh devices"
+    btnAudioTest.Text := "Test audio"
+    CPDesktopPlace(btnSpRef, right - 240, inputY + 78, 124, 34)
+    CPDesktopPlace(btnAudioTest, right - 104, inputY + 78, 104, 34)
+    CPDesktopPlace(a["check"], x, inputY + 126, contentW, 22)
+    CPDesktopPlace(a["result"], x, inputY + 152, contentW, 44)
+    a["troubleshoot"].Text := (expanded ? "▾" : "▸") "  Audio testing && troubleshooting"
+    CPDesktopPlace(a["troubleshoot"], x, inputY + 198, 320, 28)
+    CPDesktopPlace(a["troubleshootHelp"], x + 14, inputY + 232, contentW - 14, helpH, expanded)
+
+    sessionY := inputY + inputH + 16
+    CPDesktopPlace(a["sessionPanel"], panelX, sessionY, panelW, 124)
+    CPDesktopPlace(a["session"], x, sessionY + 18, contentW, 26)
+    CPDesktopPlace(a["power"], x, sessionY + 62, 208, 38)
+    CPDesktopPlace(a["sessionHelp"], x + 224, sessionY + 60, contentW - 224, 48)
+    CPDesktopRefreshAudio()
+    return sessionY + 124
+}
+
+CPDesktopSyncAudioModel(*) {
+    global CPDesktop, tab, ddlAProv, ddlA_GM, ddlTR
+    if !CPDesktopActive() || tab.Value != 2
+        return
+    gemini := StrLower(Trim(ddlAProv.Text)) = "gemini"
+    ddlA_GM.Visible := gemini
+    ddlTR.Visible := !gemini
+    CPDesktopOrderTabStops()
+    CPUpdateComboArrowOverlays()
+}
+
+CPDesktopToggleAudioHelp(*) {
+    global CPDesktop
+    CPDesktop["audioHelpOpen"] := !CPDesktop["audioHelpOpen"]
+    CPDesktopRelayout()
+}
+
+CPDesktopRefreshAudio(*) {
+    global CPDesktop, gAudioInputStatus
+    if !CPDesktopActive() || !CPDesktop.Has("audioPage")
+        return
+    a := CPDesktop["audioPage"], busy := AudioInputJobBusy(), running := AudioIsRunning()
+    result := !IsSet(gAudioInputStatus) || gAudioInputStatus = "Not tested."
+        ? "Not tested yet. Play game audio, then select Test audio." : gAudioInputStatus
+    for key, value in Map("result", result, "check", busy ? "Checking input…" : "Input check",
+        "power", running ? "Stop audio translation" : "Start audio translation",
+        "sessionHelp", running ? "On. Changes to the AI, language or input apply when you restart translation."
+            : "Off. Start to translate spoken dialogue using the selected AI, language and input.") {
+        if a[key].Text != value
+            a[key].Text := value
+    }
+}
+
+CPDesktopAudioModelMenu(*) {
+    global ddlAProv, ddlA_GM, ddlTR, model_gemini_audio, model_openai_audio
+    gemini := StrLower(Trim(ddlAProv.Text)) = "gemini"
+    models := gemini ? model_gemini_audio : model_openai_audio
+    key := gemini ? "gemini_audio" : "openai_audio", combo := gemini ? ddlA_GM : ddlTR
+    popup := Menu()
+    popup.Add("Add model…", (*) => AddModelInteractive(models, key, combo, gemini ? "gemini" : "openai", "audio"))
+    popup.Add("Remove selected model…", (*) => DeleteModel(models, key, combo))
+    popup.Show()
+}
+
+CPDesktopCreateExplanationPage() {
+    global ui, tab, CPDesktop, ddlEProv, ddlEGem, ddlEOpenAI, ddlEPr, btnEPrEdit, btnExplainNow, btnOpenStudyLibrary
+    global saveLibraryChk, saveLibraryScreenshotsChk, saveExplChk, chkOpenEW, chkTop_EW
+    tab.UseTab(4)
+    expPage := CPDesktop["explanationPage"]
+    for spec in [["ai", "AI settings"], ["provider", "Provider"], ["model", "Model"], ["prompt", "Prompt"],
+        ["action", "Create an explanation"],
+        ["actionHelp", "Explain the latest Japanese text from screenshot translation. No new screenshot is taken."],
+        ["saving", "Save explanations"],
+        ["libraryHelp", "Keep explanations for later study, grouped by the active Profile (or Unsorted when none is active)."],
+        ["screenshotsHelp", "Keep the original game images alongside saved Library entries."],
+        ["plainTextHelp", "Also save text files in Settings\Explanations and its Profile subfolders, independently of the Library."],
+        ["startupHelp", "Startup choices apply the next time the tool or Explainer opens; they do not change an open overlay."]] {
+        expPage[spec[1]] := ui.AddText("x0 y0 w100 h24 Hidden +0x80", spec[2])
+        CPDesktop["surfaces"][expPage[spec[1]].Hwnd] := "panel"
+        if InStr(spec[1], "Help")
+            CPRegisterMutedControl(expPage[spec[1]])
+    }
+    for key in ["ai", "action", "saving"]
+        expPage[key].SetFont("s13 Bold")
+    for spec in [["models", "Manage models…", CPDesktopExplanationModelMenu],
+        ["prompts", "Manage…", CPDesktopExplanationPromptMenu],
+        ["startup", "Startup options", CPDesktopToggleExplanationStartup]] {
+        expPage[spec[1]] := ui.AddButton("x0 y0 w160 h28 Hidden", spec[2])
+        expPage[spec[1]].OnEvent("Click", spec[3])
+        CPDesktopRegisterPaint(expPage[spec[1]], "link", "panel")
+    }
+    CPDesktopRegisterPaint(btnEPrEdit, "link", "panel")
+    CPDesktopRegisterPaint(btnExplainNow, "primary", "panel")
+    CPDesktopRegisterPaint(btnOpenStudyLibrary, "button", "panel")
+    for ctrl in [saveLibraryChk, saveLibraryScreenshotsChk, saveExplChk, chkOpenEW, chkTop_EW]
+        CPDesktop["surfaces"][ctrl.Hwnd] := "panel"
+    for key in ["aiPanel", "actionPanel", "savingPanel"] {
+        expPage[key] := ui.AddText("x0 y0 w100 h100 Hidden +0xD +0x04000000")
+        CPDesktopRegisterPaint(expPage[key], "panel", "window")
+    }
+    for ctrl in [ddlEProv, ddlEGem, ddlEOpenAI, ddlEPr] {
+        CPDesktop["combos"][ctrl.Hwnd] := Map("ctrl", ctrl, "height", SendMessage(0x0154, -1, 0, ctrl.Hwnd))
+        CPPrepareStudyCombo(ctrl.Hwnd)
+    }
+}
+
+CPDesktopLayoutExplanation(w) {
+    global CPDesktop, ui, ddlEProv, ddlEGem, ddlEOpenAI, ddlEPr, btnEPrEdit, btnExplainNow, btnOpenStudyLibrary
+    global saveLibraryChk, saveLibraryScreenshotsChk, saveExplChk, chkOpenEW, chkTop_EW
+    expPage := CPDesktop["explanationPage"], panelX := CPDesktop["side"] + 24
+    panelW := Min(1040, w - panelX - 24), x := panelX + 20, contentW := panelW - 40
+    right := x + contentW, wide := contentW >= 760, scale := GetWindowDPI(ui.Hwnd) / 96
+    CPDesktop["contentW"] := panelW
+    aiY := CPDesktop["headerH"] + 96, aiH := wide ? 166 : 236
+    CPDesktopPlace(expPage["aiPanel"], panelX, aiY, panelW, aiH)
+    CPDesktopPlace(expPage["ai"], x, aiY + 18, contentW, 26)
+    providerW := wide ? 140 : 172, modelX := x + providerW + 16
+    modelW := wide ? Floor((contentW - providerW - 32) * 0.43) : contentW - providerW - 16
+    promptX := wide ? modelX + modelW + 16 : x
+    promptY := aiY + (wide ? 54 : 138), promptW := wide ? right - promptX : contentW
+    CPDesktopPlace(expPage["provider"], x, aiY + 54, providerW, 22)
+    CPDesktopPlace(ddlEProv, x, aiY + 78, providerW, 30)
+    CPDesktopPlace(expPage["model"], modelX, aiY + 54, modelW, 22)
+    CPDesktopPlace(ddlEGem, modelX, aiY + 78, modelW, 30)
+    CPDesktopPlace(ddlEOpenAI, modelX, aiY + 78, modelW, 30)
+    CPDesktopPlace(expPage["models"], modelX, aiY + 116, 140, 28)
+    CPDesktopPlace(expPage["prompt"], promptX, promptY, promptW, 22)
+    CPDesktopPlace(ddlEPr, promptX, promptY + 24, promptW, 30)
+    btnEPrEdit.Text := "Edit prompt…"
+    CPDesktopPlace(btnEPrEdit, promptX, promptY + 62, 108, 28)
+    CPDesktopPlace(expPage["prompts"], promptX + 116, promptY + 62, 88, 28)
+    CPDesktopSyncExplanationModel()
+
+    actionY := aiY + aiH + 16
+    actionHelpH := Max(22, Ceil(CPMeasureWrappedTextHeight(expPage["actionHelp"], contentW * scale) / scale) + 4)
+    actionH := 48 + actionHelpH + 16 + 38 + 20
+    CPDesktopPlace(expPage["actionPanel"], panelX, actionY, panelW, actionH)
+    CPDesktopPlace(expPage["action"], x, actionY + 18, contentW, 26)
+    CPDesktopPlace(expPage["actionHelp"], x, actionY + 48, contentW, actionHelpH)
+    btnExplainNow.Text := "Explain latest text"
+    btnOpenStudyLibrary.Text := "Open Study Library"
+    CPDesktopPlace(btnExplainNow, x, actionY + 48 + actionHelpH + 16, 184, 38)
+    CPDesktopPlace(btnOpenStudyLibrary, x + 196, actionY + 48 + actionHelpH + 16, 180, 38)
+
+    savingY := actionY + actionH + 16, rowY := savingY + 56
+    CPDesktopPlace(expPage["saving"], x, savingY + 18, contentW, 26)
+    saveLibraryChk.Text := "Save to Study Library"
+    saveLibraryScreenshotsChk.Text := "Include source screenshots"
+    saveLibraryScreenshotsChk.Enabled := saveLibraryChk.Value
+    for spec in [[saveLibraryChk, "libraryHelp"], [saveLibraryScreenshotsChk, "screenshotsHelp"], [saveExplChk, "plainTextHelp"]] {
+        help := expPage[spec[2]], helpW := contentW - 24
+        helpH := Max(22, Ceil(CPMeasureWrappedTextHeight(help, helpW * scale) / scale) + 4)
+        CPDesktopPlace(spec[1], x, rowY, contentW, 26)
+        CPDesktopPlace(help, x + 24, rowY + 27, helpW, helpH)
+        rowY += 27 + helpH + 12
+    }
+    expanded := CPDesktop["explanationStartupOpen"]
+    expPage["startup"].Text := (expanded ? "▾" : "▸") "  Startup options"
+    CPDesktopPlace(expPage["startup"], x, rowY, 240, 28)
+    rowY += 42
+    half := Floor((contentW - 20) / 2)
+    chkOpenEW.Text := "Open Explainer on startup"
+    chkTop_EW.Text := "Explainer always on top"
+    CPDesktopPlace(chkOpenEW, x, rowY, half, 26, expanded)
+    CPDesktopPlace(chkTop_EW, x + half + 20, rowY, half, 26, expanded)
+    startupHelpH := Max(22, Ceil(CPMeasureWrappedTextHeight(expPage["startupHelp"], contentW * scale) / scale) + 4)
+    CPDesktopPlace(expPage["startupHelp"], x, rowY + 34, contentW, startupHelpH, expanded)
+    bottom := expanded ? rowY + 34 + startupHelpH + 20 : rowY + 2
+    CPDesktopPlace(expPage["savingPanel"], panelX, savingY, panelW, bottom - savingY)
+    return bottom
+}
+
+CPDesktopSyncExplanationModel(*) {
+    global tab, ddlEProv, ddlEGem, ddlEOpenAI
+    if !CPDesktopActive() || tab.Value != 4
+        return
+    gemini := StrLower(Trim(ddlEProv.Text)) = "gemini"
+    ddlEGem.Visible := gemini
+    ddlEOpenAI.Visible := !gemini
+    CPDesktopOrderTabStops()
+    CPUpdateComboArrowOverlays()
+}
+
+CPDesktopToggleExplanationStartup(*) {
+    global CPDesktop
+    CPDesktop["explanationStartupOpen"] := !CPDesktop["explanationStartupOpen"]
+    CPDesktopRelayout()
+}
+
+CPDesktopExplanationModelMenu(*) {
+    global ddlEProv, ddlEGem, ddlEOpenAI, model_gemini_explain, model_openai_explain
+    gemini := StrLower(Trim(ddlEProv.Text)) = "gemini"
+    models := gemini ? model_gemini_explain : model_openai_explain
+    key := gemini ? "gemini_explain" : "openai_explain", combo := gemini ? ddlEGem : ddlEOpenAI
+    popup := Menu()
+    popup.Add("Add model…", (*) => AddModelInteractive(models, key, combo, gemini ? "gemini" : "openai", "explanation"))
+    popup.Add("Remove selected model…", (*) => DeleteModel(models, key, combo))
+    popup.Show()
+}
+
+CPDesktopExplanationPromptMenu(*) {
+    popup := Menu()
+    popup.Add("New prompt…", NewExplainPromptProfile)
+    popup.Add("Delete selected prompt…", DeleteExplainPromptProfile)
+    popup.Show()
+}
+
+; Both overlay pages share one presentation; their original controls retain
+; separate values, persistence keys, and live overlay callbacks.
+CPDesktopOverlayBindings(page) {
+    global slTrans, lblTransPct, ddlFont, edFSize, udFSize, chkFontBold, txtFontSizeHint, btnMoveResize, txtMoveResize
+    global slTrans_EW, lblTransPct_EW, ddlFont_EW, edFSize_EW, udFSize_EW, chkFontBold_EW, txtFontSizeHint_EW, btnMoveResize_EW, txtMoveResize_EW
+    if page != 3 && page != 5
+        throw ValueError("Unknown desktop overlay page.")
+    ew := page = 5
+    return Map("title", ew ? "Explainer" : "Translator", "opacity", ew ? slTrans_EW : slTrans,
+        "percent", ew ? lblTransPct_EW : lblTransPct, "font", ew ? ddlFont_EW : ddlFont,
+        "size", ew ? edFSize_EW : edFSize, "spinner", ew ? udFSize_EW : udFSize,
+        "sizeHint", ew ? txtFontSizeHint_EW : txtFontSizeHint, "bold", ew ? chkFontBold_EW : chkFontBold,
+        "position", ew ? btnMoveResize_EW : btnMoveResize, "positionHelp", ew ? txtMoveResize_EW : txtMoveResize)
+}
+
+CPDesktopCreateOverlayPages() {
+    global ui, tab, CPDesktop
+    for page in [3, 5] {
+        tab.UseTab(page)
+        overlayPage := CPDesktop["overlayPages"][page], bindings := CPDesktopOverlayBindings(page)
+        for spec in [["appearance", "Appearance"], ["opacity", "Opacity"],
+            ["opacityHelp", "Opacity affects the whole overlay, including its text."],
+            ["bgLabel", "Window color"], ["txtLabel", "Text color"],
+            ["type", "Typography"], ["font", "Font"], ["size", "Size (pt)"],
+            ["typeHelp", "Font and text styling apply to this overlay only."], ["position", "Position && size"]] {
+            overlayPage[spec[1]] := ui.AddText("x0 y0 w100 h24 Hidden", spec[2])
+            CPDesktop["surfaces"][overlayPage[spec[1]].Hwnd] := "panel"
+            if InStr(spec[1], "Help")
+                CPRegisterMutedControl(overlayPage[spec[1]])
+        }
+        for key in ["appearance", "type", "position"]
+            overlayPage[key].SetFont("s13 Bold")
+        for spec in [["translator", "Translator", 3], ["explainer", "Explainer", 5]] {
+            overlayPage[spec[1]] := ui.AddButton("x0 y0 w144 h36 Hidden", spec[2])
+            overlayPage[spec[1]].OnEvent("Click", CPDesktopNavigate.Bind(spec[3]))
+            CPDesktopRegisterPaint(overlayPage[spec[1]], "segment", "window")
+            CPDesktop["paint"][overlayPage[spec[1]].Hwnd]["selected"] := page = spec[3]
+        }
+        colorKeys := page = 3 ? ["bg", "txt", "name"] : ["bg", "txt"]
+        if page = 3 {
+            overlayPage["nameLabel"] := ui.AddText("x0 y0 w100 h24 Hidden", "Speaker name")
+            CPDesktop["surfaces"][overlayPage["nameLabel"].Hwnd] := "panel"
+        }
+        for key in colorKeys {
+            overlayPage[key] := ui.AddButton("x0 y0 w160 h38 Hidden", "")
+            overlayPage[key].OnEvent("Click", CPDesktopPickOverlayColor.Bind(page, key))
+            CPDesktopRegisterPaint(overlayPage[key], "color", "panel")
+            CPRegisterColorSwatch(overlayPage[key], StrLower(bindings["title"]) ":" key)
+        }
+        for key in ["appearancePanel", "typePanel", "positionPanel"] {
+            overlayPage[key] := ui.AddText("x0 y0 w100 h100 Hidden +0xD +0x04000000")
+            CPDesktopRegisterPaint(overlayPage[key], "panel", "window")
+        }
+        for key in ["opacity", "percent", "bold", "positionHelp"]
+            CPDesktop["surfaces"][bindings[key].Hwnd] := "panel"
+        CPDesktop["surfaces"][bindings["size"].Hwnd] := "field"
+        CPDesktopRegisterPaint(bindings["position"], "button", "panel")
+        combo := bindings["font"]
+        CPDesktop["combos"][combo.Hwnd] := Map("ctrl", combo, "height", SendMessage(0x0154, -1, 0, combo.Hwnd))
+        CPPrepareStudyCombo(combo.Hwnd)
+    }
+}
+
+CPDesktopLayoutOverlay(page, w) {
+    global CPDesktop, ui
+    overlayPage := CPDesktop["overlayPages"][page], bindings := CPDesktopOverlayBindings(page)
+    panelX := CPDesktop["side"] + 24, panelW := Min(1040, w - panelX - 24)
+    x := panelX + 20, contentW := panelW - 40, right := x + contentW, scale := GetWindowDPI(ui.Hwnd) / 96
+    CPDesktop["contentW"] := panelW
+    selectorY := CPDesktop["headerH"] + 96
+    CPDesktopPlace(overlayPage["translator"], panelX, selectorY, 144, 36)
+    CPDesktopPlace(overlayPage["explainer"], panelX + 152, selectorY, 144, 36)
+    appearanceY := selectorY + 52
+    CPDesktopPlace(overlayPage["appearancePanel"], panelX, appearanceY, panelW, 246)
+    CPDesktopPlace(overlayPage["appearance"], x, appearanceY + 18, contentW, 26)
+    CPDesktopPlace(overlayPage["opacity"], x, appearanceY + 56, contentW - 64, 22)
+    CPDesktopPlace(bindings["percent"], right - 56, appearanceY + 56, 56, 22)
+    CPDesktopPlace(bindings["opacity"], x, appearanceY + 80, contentW, 34)
+    colorKeys := page = 3 ? ["bg", "txt", "name"] : ["bg", "txt"]
+    colorW := Floor((contentW - 16 * (colorKeys.Length - 1)) / colorKeys.Length)
+    for index, key in colorKeys {
+        colorX := x + (index - 1) * (colorW + 16)
+        CPDesktopPlace(overlayPage[key "Label"], colorX, appearanceY + 132, colorW, 22)
+        CPDesktopPlace(overlayPage[key], colorX, appearanceY + 158, colorW, 38)
+    }
+    CPDesktopPlace(overlayPage["opacityHelp"], x, appearanceY + 210, contentW, 22)
+
+    typeY := appearanceY + 262, fontW := contentW - 276, sizeX := x + fontW + 16
+    CPDesktopPlace(overlayPage["typePanel"], panelX, typeY, panelW, 158)
+    CPDesktopPlace(overlayPage["type"], x, typeY + 18, contentW, 26)
+    CPDesktopPlace(overlayPage["font"], x, typeY + 54, fontW, 22)
+    CPDesktopPlace(bindings["font"], x, typeY + 78, fontW, 30)
+    CPDesktopPlace(overlayPage["size"], sizeX, typeY + 54, 120, 22)
+    CPDesktopPlace(bindings["size"], sizeX, typeY + 78, 78, 30)
+    CPDesktopPlace(bindings["spinner"], sizeX + 60, typeY + 78, 18, 30)
+    CPDesktopPlace(bindings["sizeHint"], sizeX + 84, typeY + 78, 36, 30, false)
+    CPDesktopPlace(bindings["bold"], sizeX + 132, typeY + 80, 128, 26)
+    CPDesktopPlace(overlayPage["typeHelp"], x, typeY + 122, contentW, 22)
+
+    positionY := typeY + 174, helpW := contentW - 204
+    helpH := Max(38, Ceil(CPMeasureWrappedTextHeight(bindings["positionHelp"], helpW * scale) / scale) + 4)
+    CPDesktopPlace(overlayPage["positionPanel"], panelX, positionY, panelW, 56 + helpH + 20)
+    CPDesktopPlace(overlayPage["position"], x, positionY + 18, contentW, 26)
+    bindings["position"].Text := "Move / resize…"
+    CPDesktopPlace(bindings["position"], x, positionY + 56, 184, 38)
+    CPDesktopPlace(bindings["positionHelp"], x + 204, positionY + 56, helpW, helpH)
+    CPDesktopOrderTabStops()
+    CPDesktopRefreshOverlayColors()
+    return positionY + 56 + helpH + 20
+}
+
+CPDesktopPickOverlayColor(page, field, *) {
+    if page = 3
+        PickAndApply(field)
+    else
+        PickAndApply_EW(field)
+    CPDesktopRefreshOverlayColors()
+}
+
+CPDesktopRefreshOverlayColors(*) {
+    global CPDesktop
+    if !CPDesktopActive()
+        return
+    for page, overlayPage in CPDesktop["overlayPages"] {
+        title := page = 3 ? "Translator" : "Explainer"
+        for field in (page = 3 ? ["bg", "txt", "name"] : ["bg", "txt"]) {
+            ctrl := overlayPage[field], pref := CPOverlayPreference(title, field), color := pref["value"]
+            paint := CPDesktop["paint"][ctrl.Hwnd]
+            if paint.Get("color", "") != color {
+                paint["color"] := color
+                ctrl.Text := pref["title"] ": #" StrUpper(color)
+                ctrl.Redraw()
+            }
+        }
+    }
+}
+
+; Desktop-only paint roles. Native buttons retain their HWND, Click handlers,
+; keyboard activation and accessibility text; only their rendering changes.
+CPDesktopRegisterPaint(ctrl, kind, surface) {
+    global CPDesktop
+    style := DllCall("user32\GetWindowLongPtr", "ptr", ctrl.Hwnd, "int", -16, "ptr")
+    CPDesktop["paint"][ctrl.Hwnd] := Map("ctrl", ctrl, "kind", kind, "surface", surface,
+        "nativeType", style & 0xF, "selected", false)
+}
+
+CPDesktopApplyFrame() {
+    global CPDesktop, ui
+    ; Remove only the caption. Keep the native sizing frame, system menu and
+    ; min/max styles so Windows still handles edge resize, snapping and Alt+F4.
+    style := DllCall("user32\GetWindowLongPtr", "ptr", ui.Hwnd, "int", -16, "ptr")
+    caption := CPDesktopActive() ? 0 : CPDesktop["captionStyle"]
+    DllCall("user32\SetWindowLongPtr", "ptr", ui.Hwnd, "int", -16, "ptr", (style & ~0xC00000) | caption, "ptr")
+    ; Buffer the native controls and their painted panels together. Restore only
+    ; our bit in classic mode; preserve opacity, topmost and other window flags.
+    exStyle := DllCall("user32\GetWindowLongPtr", "ptr", ui.Hwnd, "int", -20, "ptr")
+    composited := CPDesktopActive() ? 0x02000000 : CPDesktop["compositedStyle"]
+    DllCall("user32\SetWindowLongPtr", "ptr", ui.Hwnd, "int", -20, "ptr", (exStyle & ~0x02000000) | composited, "ptr")
+    DllCall("user32\SetWindowPos", "ptr", ui.Hwnd, "ptr", 0,
+        "int", 0, "int", 0, "int", 0, "int", 0, "uint", 0x37) ; FRAMECHANGED, no move/size/activate/z-order
+}
+
+CPDesktopHitTest(wParam, lParam, msg, hwnd) {
+    global CPDesktop, ui
+    if !CPDesktopActive()
+        return
+    c := CPDesktop["chrome"]
+    if hwnd = c["brand"].Hwnd || hwnd = c["profileLabel"].Hwnd
+        return -1 ; Let the header underneath these labels handle dragging.
+    if hwnd != ui.Hwnd
+        return
+    nativeHit := DllCall("user32\DefWindowProcW", "ptr", hwnd, "uint", msg,
+        "uptr", wParam, "ptr", lParam, "ptr")
+    if nativeHit != 1
+        return nativeHit ; Preserve resize edges, corners and scrollbars.
+    pt := Buffer(8)
+    NumPut("int", (lParam << 48) >> 48, "int", (lParam << 32) >> 48, pt)
+    DllCall("user32\ScreenToClient", "ptr", hwnd, "ptr", pt)
+    if NumGet(pt, 4, "int") >= Round(CPDesktop["headerH"] * GetWindowDPI(hwnd) / 96)
+        return
+    child := DllCall("user32\ChildWindowFromPointEx", "ptr", hwnd,
+        "int64", NumGet(pt, 0, "int64"), "uint", 7, "ptr")
+    if child != hwnd && child != c["brand"].Hwnd && child != c["profileLabel"].Hwnd
+        return 1 ; Profile and window buttons remain normal interactive controls.
+    return 2 ; HTCAPTION: native dragging, double-click maximize and right-click menu.
+}
+
+CPDesktopWindowAction(action, *) {
+    global ui
+    if action = "minimize"
+        ui.Minimize()
+    else if action = "maximize" {
+        if DllCall("user32\IsZoomed", "ptr", ui.Hwnd)
+            ui.Restore()
+        else
+            ui.Maximize()
+        CPDesktopRelayout()
+    } else if action = "close"
+        PostMessage(0x10, 0, 0, ui.Hwnd) ; Use the same close/unsaved-settings handler as Alt+F4.
+}
+
+CPDesktopCaptionHover(wParam, lParam, msg, hwnd) {
+    global CPDesktop
+    if !CPDesktopActive() || !CPDesktop["paint"].Has(hwnd)
+        return
+    spec := CPDesktop["paint"][hwnd]
+    if spec["kind"] != "caption" || CPDesktop["hover"] = hwnd
+        return
+    previous := CPDesktop["hover"]
+    CPDesktop["hover"] := hwnd
+    if previous
+        try GuiCtrlFromHwnd(previous).Redraw()
+    spec["ctrl"].Redraw()
+    track := Buffer(A_PtrSize = 8 ? 24 : 16, 0)
+    NumPut("uint", track.Size, "uint", 2, "ptr", hwnd, track) ; TME_LEAVE
+    DllCall("user32\TrackMouseEvent", "ptr", track)
+}
+
+CPDesktopCaptionLeave(wParam, lParam, msg, hwnd) {
+    global CPDesktop
+    if !CPDesktopActive() || CPDesktop["hover"] != hwnd
+        return
+    CPDesktop["hover"] := 0
+    try GuiCtrlFromHwnd(hwnd).Redraw()
+}
+
+CPDesktopDrawCaptionGlyph(dc, action, l, t, r, b, scale, hex, frameHwnd := 0) {
+    global ui
+    cx := Round((l + r) / 2), cy := Round((t + b) / 2), half := Round(5 * scale)
+    pen := DllCall("gdi32\CreatePen", "int", 0, "int", Max(1, Round(scale)), "uint", CPColorRef(hex), "ptr")
+    oldPen := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", pen, "ptr")
+    oldBrush := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", DllCall("gdi32\GetStockObject", "int", 5, "ptr"), "ptr")
+    if action = "minimize" {
+        DllCall("gdi32\MoveToEx", "ptr", dc, "int", cx - half, "int", cy, "ptr", 0)
+        DllCall("gdi32\LineTo", "ptr", dc, "int", cx + half, "int", cy)
+    } else if action = "close" {
+        DllCall("gdi32\MoveToEx", "ptr", dc, "int", cx - half, "int", cy - half, "ptr", 0)
+        DllCall("gdi32\LineTo", "ptr", dc, "int", cx + half, "int", cy + half)
+        DllCall("gdi32\MoveToEx", "ptr", dc, "int", cx + half, "int", cy - half, "ptr", 0)
+        DllCall("gdi32\LineTo", "ptr", dc, "int", cx - half, "int", cy + half)
+    } else {
+        offset := DllCall("user32\IsZoomed", "ptr", frameHwnd ? frameHwnd : ui.Hwnd) ? Round(2 * scale) : 0
+        if offset {
+            DllCall("gdi32\MoveToEx", "ptr", dc, "int", cx - half + offset, "int", cy - half - offset, "ptr", 0)
+            DllCall("gdi32\LineTo", "ptr", dc, "int", cx + half + offset, "int", cy - half - offset)
+            DllCall("gdi32\LineTo", "ptr", dc, "int", cx + half + offset, "int", cy + half - offset)
+        }
+        DllCall("gdi32\Rectangle", "ptr", dc, "int", cx - half, "int", cy - half, "int", cx + half, "int", cy + half)
+    }
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldPen)
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldBrush)
+    DllCall("gdi32\DeleteObject", "ptr", pen)
+}
+
+CPDesktopIsCombo(hwnd) {
+    global CPDesktop
+    study := StudyDesktopContext(hwnd)
+    if IsObject(study) && study["combos"].Has(hwnd)
+        return true
+    return CPDesktopActive() && CPDesktop.Has("combos") && CPDesktop["combos"].Has(hwnd)
+}
+
+CPDesktopLayoutComboEdit(hwnd) {
+    ctrl := GuiCtrlFromHwnd(hwnd)
+    if ctrl.Type != "ComboBox"
+        return
+    info := Buffer(A_PtrSize = 8 ? 64 : 52, 0)
+    NumPut("uint", info.Size, info)
+    if !DllCall("user32\GetComboBoxInfo", "ptr", hwnd, "ptr", info)
+        return
+    editHwnd := NumGet(info, A_PtrSize = 8 ? 48 : 44, "ptr")
+    if !editHwnd
+        return
+    rect := Buffer(16)
+    DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", rect)
+    scale := GetWindowDPI(hwnd) / 96, w := NumGet(rect, 8, "int"), h := NumGet(rect, 12, "int")
+    ; Leave room for the rounded outline and chevron. Preserve the real Edit
+    ; child so IME, selection, typing and native history navigation still work.
+    editH := Min(h - Round(8 * scale), NumGet(info, 16, "int") - NumGet(info, 8, "int"))
+    ctrl.Opt("+0x02000000") ; WS_CLIPCHILDREN: don't paint over its text/caret.
+    DllCall("user32\SetWindowPos", "ptr", editHwnd, "ptr", 0, "int", Round(11 * scale),
+        "int", Max(1, Floor((h - editH) / 2)), "int", Max(1, w - Round(43 * scale)),
+        "int", Max(1, editH), "uint", 0x14)
+}
+
+CPDesktopPaintCombo(hwnd, dc) {
+    global CPDesktop
+    if !dc
+        return
+    colors := CPDesktopPalette(), scale := GetWindowDPI(hwnd) / 96
+    rect := Buffer(16)
+    DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", rect)
+    w := NumGet(rect, 8, "int"), h := NumGet(rect, 12, "int")
+    saved := DllCall("gdi32\SaveDC", "ptr", dc, "int")
+    DllCall("user32\FillRect", "ptr", dc, "ptr", rect, "ptr", CPDesktopBrush(colors["panel"]))
+    focus := DllCall("user32\GetFocus", "ptr")
+    focused := focus = hwnd || (focus && DllCall("user32\GetParent", "ptr", focus, "ptr") = hwnd)
+    border := colors[focused ? "link" : "border"]
+    pen := DllCall("gdi32\CreatePen", "int", 0, "int", Max(1, Round(scale)), "uint", CPColorRef(border), "ptr")
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", pen)
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", CPDesktopBrush(colors["field"]))
+    DllCall("gdi32\RoundRect", "ptr", dc, "int", 1, "int", 1, "int", w - 1, "int", h - 1,
+        "int", Round(8 * scale), "int", Round(8 * scale))
+    enabled := DllCall("user32\IsWindowEnabled", "ptr", hwnd)
+    NumPut("int", Round(11 * scale), "int", 0, "int", w - Round(32 * scale), "int", h, rect)
+    if GuiCtrlFromHwnd(hwnd).Type != "ComboBox"
+        CPDesktopComboText(dc, hwnd, GuiCtrlFromHwnd(hwnd).Text, rect, colors[enabled ? "text" : "muted"])
+    ; One integrated chevron, no separate square native arrow button.
+    arrowPen := DllCall("gdi32\CreatePen", "int", 0, "int", Max(1, Round(scale)), "uint", CPColorRef(colors["muted"]), "ptr")
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", arrowPen)
+    ax := w - Round(17 * scale), ay := Round(h / 2), delta := Round(3 * scale)
+    DllCall("gdi32\MoveToEx", "ptr", dc, "int", ax - delta, "int", ay - delta / 2, "ptr", 0)
+    DllCall("gdi32\LineTo", "ptr", dc, "int", ax, "int", ay + delta / 2)
+    DllCall("gdi32\LineTo", "ptr", dc, "int", ax + delta, "int", ay - delta / 2)
+    DllCall("gdi32\RestoreDC", "ptr", dc, "int", saved)
+    DllCall("gdi32\DeleteObject", "ptr", pen)
+    DllCall("gdi32\DeleteObject", "ptr", arrowPen)
+}
+
+CPDesktopComboText(dc, hwnd, text, rect, hex) {
+    font := SendMessage(0x31, 0, 0, hwnd)
+    oldFont := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", font, "ptr")
+    DllCall("gdi32\SetBkMode", "ptr", dc, "int", 1)
+    DllCall("gdi32\SetTextColor", "ptr", dc, "uint", CPColorRef(hex))
+    DllCall("user32\DrawTextW", "ptr", dc, "wstr", text, "int", -1, "ptr", rect, "uint", 0x8824)
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldFont)
+}
+
+CPDesktopDrawComboItem(data) {
+    hwnd := NumGet(data, A_PtrSize = 8 ? 24 : 20, "ptr")
+    if !CPDesktopIsCombo(hwnd)
+        return false
+    dc := NumGet(data, A_PtrSize = 8 ? 32 : 24, "ptr"), off := A_PtrSize = 8 ? 40 : 28
+    colors := CPDesktopPalette(), state := NumGet(data, 16, "uint")
+    rect := Buffer(16)
+    DllCall("ntdll\RtlMoveMemory", "ptr", rect, "ptr", data + off, "uptr", 16)
+    DllCall("user32\FillRect", "ptr", dc, "ptr", rect, "ptr", CPDesktopBrush(colors[(state & 1) ? "selected" : "field"]))
+    item := NumGet(data, 8, "int"), text := ""
+    if item >= 0 {
+        count := SendMessage(0x149, item, 0, hwnd)
+        if count >= 0 {
+            value := Buffer((count + 1) * 2, 0)
+            SendMessage(0x148, item, value.Ptr, hwnd)
+            text := StrGet(value, "UTF-16")
+        }
+    }
+    NumPut("int", NumGet(rect, 0, "int") + Round(11 * GetWindowDPI(hwnd) / 96), rect, 0)
+    CPDesktopComboText(dc, hwnd, text, rect, colors[(state & 6) ? "muted" : "text"])
+    return true
+}
+
+CPDesktopPalette() {
+    global controlDarkMode
+    return controlDarkMode
+        ? Map("window", "202127", "panel", "2B2E38", "sidebar", "262932", "bar", "23262E",
+            "field", "242730", "border", "424753", "text", "ECEEF3", "muted", "ABB5C6",
+            "accent", "187DB7", "link", "56C4F5", "selected", "334153", "pressed", "176899")
+        : Map("window", "F4F5F8", "panel", "FFFFFF", "sidebar", "E9ECF2", "bar", "F9FAFC",
+            "field", "F8F9FC", "border", "C8CED9", "text", "242B37", "muted", "596779",
+            "accent", "0875B5", "link", "096AA3", "selected", "D6E8F5", "pressed", "075B8D")
+}
+
+CPDesktopLogoPath() {
+    static bundledPath := ""
+    assetPath := A_ScriptDir "\assets\desktop-logo.png"
+    if FileExist(assetPath)
+        return assetPath
+    if A_IsCompiled {
+        if bundledPath != "" && FileExist(bundledPath)
+            return bundledPath
+        try {
+            assetDir := A_Temp "\JRPG_Translator_Assets"
+            DirCreate(assetDir)
+            ; GDI+ retains a read handle while the logo is loaded. Give each
+            ; process its own extraction so concurrent Reader/Library processes
+            ; cannot block one another by overwriting a shared temporary file.
+            bundledPath := assetDir "\desktop-logo-" DllCall("GetCurrentProcessId", "uint") ".png"
+            FileInstall("assets\desktop-logo.png", bundledPath, true)
+            return bundledPath
+        }
+    }
+    return ""
+}
+
+CPDesktopLoadLogo() {
+    global CPDesktop
+    logo := CPDesktop["logo"]
+    if logo.Get("image", 0)
+        return
+    path := CPDesktopLogoPath()
+    if path = ""
+        return ; Missing artwork must never prevent opening the control center.
+    if A_IsCompiled && path != A_ScriptDir "\assets\desktop-logo.png"
+        logo["temporaryPath"] := path
+    try {
+        logo["module"] := DllCall("LoadLibrary", "str", "gdiplus.dll", "ptr")
+        startup := Buffer(A_PtrSize = 8 ? 24 : 16, 0), token := 0
+        NumPut("uint", 1, startup)
+        if DllCall("gdiplus\GdiplusStartup", "ptr*", &token, "ptr", startup, "ptr", 0)
+            throw Error("Cannot initialize logo renderer")
+        logo["token"] := token
+        bitmap := 0
+        if DllCall("gdiplus\GdipCreateBitmapFromFile", "wstr", path, "ptr*", &bitmap)
+            throw Error("Cannot load desktop logo")
+        logo["image"] := bitmap
+        logo["bounds"] := CPDesktopLogoBounds(bitmap)
+    } catch {
+        CPDesktopDisposeLogo()
+    }
+}
+
+CPDesktopLogoBounds(bitmap) {
+    width := 0, height := 0
+    DllCall("gdiplus\GdipGetImageWidth", "ptr", bitmap, "uint*", &width)
+    DllCall("gdiplus\GdipGetImageHeight", "ptr", bitmap, "uint*", &height)
+    if width < 1 || height < 1
+        throw Error("Empty desktop logo")
+    rect := Buffer(16, 0), data := Buffer(A_PtrSize = 8 ? 32 : 24, 0)
+    NumPut("int", width, "int", height, rect, 8)
+    if DllCall("gdiplus\GdipBitmapLockBits", "ptr", bitmap, "ptr", rect,
+        "uint", 1, "int", 0x26200A, "ptr", data) ; read-only 32bpp ARGB
+        return [0, 0, width, height]
+    left := width, top := height, right := -1, bottom := -1
+    try {
+        stride := NumGet(data, 8, "int"), pixels := NumGet(data, 16, "ptr")
+        Loop height {
+            rowY := A_Index - 1, row := pixels + rowY * stride
+            Loop width {
+                colX := A_Index - 1
+                if NumGet(row + colX * 4, 3, "uchar") <= 8
+                    continue
+                left := Min(left, colX), top := Min(top, rowY), bottom := rowY
+                scanX := width - 1
+                while scanX > colX && NumGet(row + scanX * 4, 3, "uchar") <= 8
+                    scanX -= 1
+                right := Max(right, scanX)
+                break
+            }
+        }
+    } finally {
+        DllCall("gdiplus\GdipBitmapUnlockBits", "ptr", bitmap, "ptr", data)
+    }
+    ; Ignore empty/near-invisible margin noise at draw time, with a small safety
+    ; margin around the visible glow. The supplied PNG stays byte-for-byte intact.
+    if right < left
+        return [0, 0, width, height]
+    left := Max(0, left - 2), top := Max(0, top - 2)
+    return [left, top, Min(width - 1, right + 2) - left + 1, Min(height - 1, bottom + 2) - top + 1]
+}
+
+CPDesktopPaintLogo(dc, scale) {
+    global CPDesktop
+    logo := CPDesktop["logo"]
+    if !logo.Get("image", 0) || !dc
+        return false
+    bounds := logo["bounds"], size := 52 * scale
+    ratio := size / Max(bounds[3], bounds[4])
+    w := Round(bounds[3] * ratio), h := Round(bounds[4] * ratio)
+    x := Round(20 * scale + (size - w) / 2)
+    y := Round((CPDesktop["headerH"] * scale - h) / 2)
+    graphics := 0
+    if DllCall("gdiplus\GdipCreateFromHDC", "ptr", dc, "ptr*", &graphics)
+        return false
+    try {
+        DllCall("gdiplus\GdipSetInterpolationMode", "ptr", graphics, "int", 7) ; high-quality bicubic
+        DllCall("gdiplus\GdipSetPixelOffsetMode", "ptr", graphics, "int", 4) ; half-pixel sampling
+        return DllCall("gdiplus\GdipDrawImageRectRectI", "ptr", graphics, "ptr", logo["image"],
+            "int", x, "int", y, "int", w, "int", h,
+            "int", bounds[1], "int", bounds[2], "int", bounds[3], "int", bounds[4],
+            "int", 2, "ptr", 0, "ptr", 0, "ptr", 0) = 0 ; UnitPixel, preserve alpha
+    } finally {
+        DllCall("gdiplus\GdipDeleteGraphics", "ptr", graphics)
+    }
+}
+
+CPDesktopDisposeLogo() {
+    global CPDesktop
+    if !IsSet(CPDesktop) || !CPDesktop.Has("logo")
+        return
+    logo := CPDesktop["logo"]
+    if logo.Get("image", 0)
+        DllCall("gdiplus\GdipDisposeImage", "ptr", logo["image"])
+    if logo.Get("token", 0)
+        DllCall("gdiplus\GdiplusShutdown", "ptr", logo["token"])
+    if logo.Get("module", 0)
+        DllCall("FreeLibrary", "ptr", logo["module"])
+    if logo.Get("temporaryPath", "") != ""
+        try FileDelete(logo["temporaryPath"]) ; Only our own per-process extraction, after releasing the image.
+    logo.Clear()
+}
+
+CPDesktopBrush(hex) {
+    global CPDesktop
+    if !CPDesktop["brushes"].Has(hex)
+        CPDesktop["brushes"][hex] := DllCall("gdi32\CreateSolidBrush", "uint", CPColorRef(hex), "ptr")
+    return CPDesktop["brushes"][hex]
+}
+
+CPDesktopDestroyBrushes(*) {
+    global CPDesktop
+    try OnMessage(0x14, CPDesktopPaintBackground, 0)
+    try OnMessage(0x84, CPDesktopHitTest, 0)
+    try OnMessage(0x200, CPDesktopCaptionHover, 0)
+    try OnMessage(0x2A3, CPDesktopCaptionLeave, 0)
+    if !(IsSet(CPDesktop) && CPDesktop.Has("brushes"))
+        return
+    for hex, brush in CPDesktop["brushes"]
+        DllCall("gdi32\DeleteObject", "ptr", brush)
+    CPDesktop["brushes"].Clear()
+    for height, font in CPDesktop["iconFonts"]
+        DllCall("gdi32\DeleteObject", "ptr", font)
+    CPDesktop["iconFonts"].Clear()
+    CPDesktopDisposeLogo()
+}
+
+CPDesktopRedrawViewport(updateNow := true) {
+    global CPDesktop, ui
+    ; Redraw only the scrolled content, never the logo/header, sidebar or footer.
+    ; Windows clips descendant invalidation to this same rectangle.
+    scale := GetWindowDPI(ui.Hwnd) / 96
+    rect := Buffer(16, 0)
+    DllCall("user32\GetClientRect", "ptr", ui.Hwnd, "ptr", rect)
+    NumPut("int", Round(CPDesktop["side"] * scale), rect, 0)
+    NumPut("int", Round((CPDesktop["headerH"] + 88) * scale), rect, 4)
+    NumPut("int", Round((CPDesktop["height"] - 58) * scale), rect, 12)
+    flags := 0x85 | (updateNow ? 0x100 : 0) ; INVALIDATE|ERASE|ALLCHILDREN [+UPDATENOW]
+    DllCall("user32\RedrawWindow", "ptr", ui.Hwnd, "ptr", rect, "ptr", 0, "uint", flags)
+}
+
+CPDesktopPaintBackground(dc, lParam, msg, hwnd) {
+    global CPDesktop, ui, tab
+    if !CPDesktopActive() || hwnd != ui.Hwnd || !dc
+        return
+    colors := CPDesktopPalette(), scale := GetWindowDPI(hwnd) / 96
+    client := Buffer(16)
+    DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", client)
+    DllCall("user32\FillRect", "ptr", dc, "ptr", client, "ptr", CPDesktopBrush(colors["window"]))
+    for key in ["headerPanel", "sidebarPanel", "footerPanel"] {
+        ctrl := CPDesktop["chrome"][key]
+        CPDesktopPaintPanel(dc, ctrl, colors[key = "sidebarPanel" ? "sidebar" : "bar"], scale, false)
+    }
+    CPDesktopPaintLogo(dc, scale)
+    if tab.Value >= 1 && tab.Value <= 10 {
+        saved := DllCall("gdi32\SaveDC", "ptr", dc, "int")
+        DllCall("gdi32\IntersectClipRect", "ptr", dc, "int", Round(CPDesktop.Get("side", 184) * scale),
+            "int", Round((CPDesktop["headerH"] + 88) * scale), "int", NumGet(client, 8, "int"),
+            "int", Round((CPDesktop["height"] - 58) * scale))
+        if tab.Value >= 6 {
+            panels := CPDesktop["organizePanels"][tab.Value]
+            pageControls := CPDesktop["organizePages"][tab.Value]
+        } else if tab.Value = 3 || tab.Value = 5 {
+            panels := ["appearancePanel", "typePanel", "positionPanel"]
+            pageControls := CPDesktop["overlayPages"][tab.Value]
+        } else {
+            panels := tab.Value = 1 ? ["aiPanel", "capturePanel", "formatPanel"]
+                : tab.Value = 2 ? ["aiPanel", "inputPanel", "sessionPanel"] : ["aiPanel", "actionPanel", "savingPanel"]
+            pageControls := CPDesktop[tab.Value = 1 ? "shot" : tab.Value = 2 ? "audioPage" : "explanationPage"]
+        }
+        for key in panels
+            CPDesktopPaintPanel(dc, pageControls[key], colors["panel"], scale)
+        DllCall("gdi32\RestoreDC", "ptr", dc, "int", saved)
+    }
+    return 1
+}
+
+CPDesktopPaintPanel(dc, ctrl, hex, scale, rounded := true) {
+    ctrl.GetPos(&x, &y, &w, &h)
+    brush := CPDesktopBrush(hex)
+    oldBrush := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", brush, "ptr")
+    oldPen := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", DllCall("gdi32\GetStockObject", "int", 8, "ptr"), "ptr") ; NULL_PEN
+    radius := rounded ? Round(12 * scale) : 0
+    DllCall("gdi32\RoundRect", "ptr", dc, "int", Round(x * scale), "int", Round(y * scale),
+        "int", Round((x + w) * scale), "int", Round((y + h) * scale), "int", radius, "int", radius)
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldBrush)
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldPen)
+}
+
+CPDesktopControlColor(dc, hwnd) {
+    global CPDesktop, controlDarkMode
+    if !CPDesktop["surfaces"].Has(hwnd)
+        return 0
+    colors := CPDesktopPalette(), hex := colors[CPDesktop["surfaces"][hwnd]]
+    if CPDesktop["bindingConflicts"].Has(hwnd)
+        hex := controlDarkMode ? "613744" : "FFE1E5"
+    DllCall("gdi32\SetBkMode", "ptr", dc, "int", 2)
+    DllCall("gdi32\SetBkColor", "ptr", dc, "uint", CPColorRef(hex))
+    DllCall("gdi32\SetTextColor", "ptr", dc, "uint", CPColorRef(colors[CPIsMutedControl(hwnd) ? "muted" : "text"]))
+    return CPDesktopBrush(hex)
+}
+
+CPDesktopDrawItem(data, drawState := 0) {
+    global CPDesktop
+    if !IsObject(drawState)
+        drawState := CPDesktop
+    kindId := NumGet(data, 0, "uint")
+    if kindId = 3
+        return CPDesktopDrawComboItem(data)
+    if kindId != 4 && kindId != 5 ; ODT_BUTTON / ODT_STATIC
+        return false
+    hwnd := NumGet(data, A_PtrSize = 8 ? 24 : 20, "ptr")
+    if !drawState["paint"].Has(hwnd)
+        return false
+    paint := drawState["paint"][hwnd], kind := paint["kind"], ctrl := paint["ctrl"]
+    dc := NumGet(data, A_PtrSize = 8 ? 32 : 24, "ptr"), off := A_PtrSize = 8 ? 40 : 28
+    rect := Buffer(16), scale := GetWindowDPI(hwnd) / 96
+    DllCall("ntdll\RtlMoveMemory", "ptr", rect, "ptr", data + off, "uptr", 16)
+    l := NumGet(rect, 0, "int"), t := NumGet(rect, 4, "int"), r := NumGet(rect, 8, "int"), b := NumGet(rect, 12, "int")
+    colors := CPDesktopPalette(), state := NumGet(data, 16, "uint")
+    pressed := (state & 1) != 0, focused := (state & 0x10) != 0, disabled := (state & 6) != 0
+    surface := colors[paint["surface"]]
+    DllCall("user32\FillRect", "ptr", dc, "ptr", rect, "ptr", CPDesktopBrush(surface))
+    textColor := colors[disabled ? "muted" : "text"]
+    if kind = "panel" || kind = "sidebar" || kind = "bar" {
+        fill := colors[kind]
+        border := fill
+    } else if kind = "primary" {
+        fill := colors[pressed ? "pressed" : "accent"], border := fill, textColor := "FFFFFF"
+    } else if kind = "nav" {
+        fill := colors[paint["selected"] || pressed ? "selected" : "sidebar"], border := fill
+        textColor := colors[paint["selected"] ? "text" : "muted"]
+    } else if kind = "segment" {
+        fill := colors[paint["selected"] || pressed ? "selected" : "field"]
+        border := colors[paint["selected"] ? "link" : "border"]
+    } else if kind = "caption" {
+        hot := drawState["hover"] = hwnd
+        fill := (hot || pressed) ? (paint["action"] = "close" ? "B83B48" : colors["selected"]) : surface
+        border := fill
+    } else if kind = "link" {
+        fill := surface, border := surface, textColor := colors["link"]
+    } else {
+        fill := colors[pressed ? "selected" : "field"], border := colors["border"]
+    }
+    if focused
+        border := colors["link"]
+    pen := DllCall("gdi32\CreatePen", "int", 0, "int", Max(1, Round(scale)), "uint", CPColorRef(border), "ptr")
+    oldPen := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", pen, "ptr")
+    oldBrush := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", CPDesktopBrush(fill), "ptr")
+    roundSize := (kind = "bar" || kind = "sidebar") ? 0 : Round(10 * scale)
+    DllCall("gdi32\RoundRect", "ptr", dc, "int", l + 1, "int", t + 1, "int", r - 1, "int", b - 1,
+        "int", roundSize, "int", roundSize)
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldPen)
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldBrush)
+    DllCall("gdi32\DeleteObject", "ptr", pen)
+    if kindId = 5
+        return true
+    if kind = "caption" {
+        CPDesktopDrawCaptionGlyph(dc, paint["action"], l, t, r, b, scale, textColor, drawState.Get("frameHwnd", 0))
+        return true
+    }
+    if kind = "nav" && paint["selected"] {
+        mark := Buffer(16)
+        NumPut("int", l + 1, "int", t + Round(6 * scale), "int", l + Round(3 * scale), "int", b - Round(6 * scale), mark)
+        DllCall("user32\FillRect", "ptr", dc, "ptr", mark, "ptr", CPDesktopBrush(colors["link"]))
+    }
+    inset := Round((kind = "link" ? 2 : 12) * scale)
+    NumPut("int", l + inset, rect, 0), NumPut("int", r - inset, rect, 8)
+    font := SendMessage(0x31, 0, 0, hwnd)
+    oldFont := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", font, "ptr")
+    DllCall("gdi32\SetBkMode", "ptr", dc, "int", 1)
+    DllCall("gdi32\SetTextColor", "ptr", dc, "uint", CPColorRef(textColor))
+    if paint.Has("icon") {
+        iconHeight := Round(16 * scale)
+        if !drawState["iconFonts"].Has(iconHeight)
+            drawState["iconFonts"][iconHeight] := DllCall("gdi32\CreateFontW", "int", -iconHeight,
+                "int", 0, "int", 0, "int", 0, "int", 400, "uint", 0, "uint", 0, "uint", 0,
+                "uint", 1, "uint", 0, "uint", 0, "uint", 5, "uint", 0, "wstr", "Segoe MDL2 Assets", "ptr")
+        DllCall("gdi32\SelectObject", "ptr", dc, "ptr", drawState["iconFonts"][iconHeight])
+        DllCall("user32\DrawTextW", "ptr", dc, "wstr", paint["icon"], "int", -1, "ptr", rect, "uint", 0x24 | 0x800)
+        DllCall("gdi32\SelectObject", "ptr", dc, "ptr", font)
+        NumPut("int", l + Round(34 * scale), rect, 0)
+    }
+    if kind = "color" {
+        chip := Buffer(16)
+        chipSize := Round(18 * scale), chipY := Round((t + b - chipSize) / 2)
+        NumPut("int", l + inset, "int", chipY, "int", l + inset + chipSize, "int", chipY + chipSize, chip)
+        DllCall("user32\FillRect", "ptr", dc, "ptr", chip, "ptr", CPDesktopBrush(paint.Get("color", "FFFFFF")))
+        DllCall("user32\FrameRect", "ptr", dc, "ptr", chip, "ptr", CPDesktopBrush(colors["border"]))
+        NumPut("int", l + inset + chipSize + Round(12 * scale), rect, 0)
+    }
+    flags := 0x20 | 0x4 | 0x8000 | 0x800 ; SINGLELINE / VCENTER / ELLIPSIS / NOPREFIX
+    if kind != "nav" && kind != "link" && kind != "color"
+        flags |= 1 ; CENTER
+    displayText := kind = "color" ? "#" StrUpper(paint.Get("color", "FFFFFF")) : StrReplace(ctrl.Text, "&&", "&")
+    DllCall("user32\DrawTextW", "ptr", dc, "wstr", displayText, "int", -1, "ptr", rect, "uint", flags)
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldFont)
+    return true
+}
+
+CPDesktopTheme() {
+    global CPDesktop, controlDarkMode, ui
+    if !CPDesktopActive()
+        return
+    colors := CPDesktopPalette()
+    ui.BackColor := colors["window"]
+    for hwnd, spec in CPDesktop["combos"] {
+        ; CB_SETITEMHEIGHT(-1) controls the closed face, not the popup rows.
+        targetHeight := Round(30 * GetWindowDPI(hwnd) / 96) - 6
+        if SendMessage(0x0154, -1, 0, hwnd) != targetHeight
+            SendMessage(0x0153, -1, targetHeight, hwnd)
+        spec["ctrl"].Redraw()
+    }
+    for hwnd, surface in CPDesktop["surfaces"] {
+        ctrl := GuiCtrlFromHwnd(hwnd)
+        ctrl.Opt("+Background" colors[surface])
+        if ctrl.Type != "Slider"
+            ctrl.SetFont("c" colors[CPIsMutedControl(hwnd) ? "muted" : "text"])
+    }
+    CPDesktop["chrome"]["brand"].SetFont("c" colors["text"])
+    for key in ["section", "organize", "subtitle", "profileLabel"]
+        CPDesktop["chrome"][key].SetFont("c" colors["muted"])
+    for hwnd, paint in CPDesktop["paint"] {
+        if paint["ctrl"].Type = "Button" {
+            style := DllCall("user32\GetWindowLongPtr", "ptr", hwnd, "int", -16, "ptr")
+            DllCall("user32\SetWindowLongPtr", "ptr", hwnd, "int", -16, "ptr", (style & ~0xF) | 0xB, "ptr")
+        }
+        paint["ctrl"].Redraw()
+    }
+    CPDesktopRaiseChrome()
+}
+
+CPDesktopRaiseChrome() {
+    global CPDesktop
+    if !(IsSet(CPDesktop) && CPDesktop.Get("ready", false))
+        return
+    controls := CPDesktopActive() ? CPDesktop["chrome"] : Map("classic", CPDesktop["chrome"]["classic"])
+    if CPDesktopActive() {
+        ; Decorative panels never intercept clicks or cover native fields.
+        for key, paint in CPDesktop["paint"] {
+            if paint["ctrl"].Type = "Text"
+                DllCall("user32\SetWindowPos", "ptr", paint["ctrl"].Hwnd, "ptr", 1,
+                    "int", 0, "int", 0, "int", 0, "int", 0, "uint", 0x13)
+        }
+    }
+    for key, ctrl in controls {
+        if InStr(key, "Panel")
+            continue
+        DllCall("user32\SetWindowPos", "ptr", ctrl.Hwnd, "ptr", 0,
+            "int", 0, "int", 0, "int", 0, "int", 0, "uint", 0x13)
+    }
+    CPDesktopOrderTabStops()
+}
+
+CPDesktopOrderTabStops() {
+    global CPDesktop, tab, ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt, btnPrEdit, btnCapPick
+    global btnST, btnTS, btnSTO, chkGuess, chkName, chkDel, chkOpenTW, chkTop_TW, eCapMax
+    global ddlAProv, ddlA_GM, ddlTR, ddlAudioTarget, ddlSpeaker, btnSpRef, btnAudioTest
+    global ddlEProv, ddlEGem, ddlEOpenAI, ddlEPr, btnEPrEdit, btnExplainNow, btnOpenStudyLibrary
+    global saveLibraryChk, saveLibraryScreenshotsChk, saveExplChk, chkOpenEW, chkTop_EW
+    if !CPDesktopActive() || tab.Value < 1 || tab.Value > 10
+        return
+    s := CPDesktop["shot"], c := CPDesktop["chrome"]
+    if tab.Value >= 6 {
+        pageStops := CPDesktop["organizeStops"]
+    } else if tab.Value = 1 {
+        model := StrLower(ddlProv.Text) = "gemini" ? ddlIMG_GM : ddlIMG
+        pageStops := [ddlProv, model, s["models"], ddlPrompt, btnPrEdit, s["prompts"], btnCapPick,
+            btnST, btnTS, btnSTO, s["multi"], chkGuess, chkName, s["advanced"], chkOpenTW, chkTop_TW, chkDel, eCapMax]
+    } else if tab.Value = 2 {
+        a := CPDesktop["audioPage"], model := StrLower(ddlAProv.Text) = "gemini" ? ddlA_GM : ddlTR
+        pageStops := [ddlAProv, model, a["models"], ddlAudioTarget, ddlSpeaker, btnSpRef, btnAudioTest, a["troubleshoot"], a["power"]]
+    } else if tab.Value = 4 {
+        expPage := CPDesktop["explanationPage"], model := StrLower(ddlEProv.Text) = "gemini" ? ddlEGem : ddlEOpenAI
+        pageStops := [ddlEProv, model, expPage["models"], ddlEPr, btnEPrEdit, expPage["prompts"], btnExplainNow,
+            btnOpenStudyLibrary, saveLibraryChk, saveLibraryScreenshotsChk, saveExplChk, expPage["startup"], chkOpenEW, chkTop_EW]
+    } else {
+        overlayPage := CPDesktop["overlayPages"][tab.Value], bindings := CPDesktopOverlayBindings(tab.Value)
+        pageStops := [overlayPage["translator"], overlayPage["explainer"], bindings["opacity"], overlayPage["bg"], overlayPage["txt"]]
+        if tab.Value = 3
+            pageStops.Push(overlayPage["name"])
+        pageStops.Push(bindings["font"], bindings["size"], bindings["bold"], bindings["position"])
+    }
+    stops := [c["screenshot"], c["audioPage"], c["explanation"], c["overlays"], c["study"], c["profiles"], c["settings"], c["profile"]]
+    stops.Push(pageStops*)
+    stops.Push(c["translator"], c["explainer"], c["audio"], c["options"], c["minimize"], c["maximize"], c["close"])
+    for ctrl in stops
+        DllCall("user32\SetWindowPos", "ptr", ctrl.Hwnd, "ptr", 1,
+            "int", 0, "int", 0, "int", 0, "int", 0, "uint", 0x13)
+    ; Keep the backgrounds below the reordered native tab stops.
+    for hwnd, paint in CPDesktop["paint"] {
+        if paint["ctrl"].Type = "Text"
+            DllCall("user32\SetWindowPos", "ptr", hwnd, "ptr", 1,
+                "int", 0, "int", 0, "int", 0, "int", 0, "uint", 0x13)
+    }
+}
+
+CPDesktopToggleMulti(*) {
+    global CPDesktop
+    CPDesktop["multi"] := !CPDesktop["multi"]
+    CPDesktopRelayout()
+}
+
+CPDesktopNavigate(page, *) {
+    CPChangeTabPageAtomically(page, false)
+}
+
+CPDesktopFocusSelectedPage(page) {
+    global CPDesktop, CPFocusVisualNavHwnd
+    if !CPDesktopActive()
+        return
+    if page >= 6 && page != 7 {
+        key := Map(6, "termsTab", 8, "controlsTab", 9, "apiTab", 10, "pathsTab")[page]
+        target := CPDesktop["organizePages"][page][key]
+    } else if page = 3 || page = 5 {
+        target := CPDesktop["overlayPages"][page][page = 3 ? "translator" : "explainer"]
+    } else {
+        key := Map(1, "screenshot", 2, "audioPage", 4, "explanation", 7, "profiles")[page]
+        target := CPDesktop["chrome"][key]
+    }
+    ; Native Tab page changes focus the first tabstop (Controls on every
+    ; Settings page). Focus the selected section before revealing the new page.
+    CPFocusVisualNavHwnd := 0
+    DllCall("user32\SetFocus", "ptr", target.Hwnd)
+}
+
+CPDesktopOverlayMenu(*) {
+    global CPDesktop
+    if CPDesktopActive()
+        return CPDesktopNavigate(CPDesktop["lastOverlayPage"])
+    popup := Menu()
+    popup.Add("Translation window", (*) => CPDesktopNavigate(3))
+    popup.Add("Explanation window", (*) => CPDesktopNavigate(5))
+    popup.Show()
+}
+
+CPDesktopSettingsMenu(*) {
+    global CPTabVisiblePages, CPDesktop
+    if CPDesktopActive() {
+        page := CPDesktop["lastSettingsPage"]
+        return CPDesktopNavigate(ArrayIndexOf(CPTabVisiblePages, page) ? page : 8)
+    }
+    popup := Menu()
+    popup.Add("Terminology overrides", (*) => CPDesktopNavigate(6))
+    popup.Add("Controls", (*) => CPDesktopNavigate(8))
+    popup.Add("API keys", (*) => CPDesktopNavigate(9))
+    if ArrayIndexOf(CPTabVisiblePages, 10)
+        popup.Add("Paths", (*) => CPDesktopNavigate(10))
+    popup.Add()
+    popup.Add("Use classic layout", CPDesktopToggleLayout)
+    popup.Show()
+}
+
+CPDesktopUpdateNavigation(force := false) {
+    global CPDesktop, tab
+    if !CPDesktopActive()
+        return
+    active := Map(1, "screenshot", 2, "audioPage", 3, "overlays", 4, "explanation", 5, "overlays", 7, "profiles").Get(tab.Value, "settings")
+    for key in ["screenshot", "audioPage", "explanation", "overlays", "profiles", "settings"] {
+        ctrl := CPDesktop["chrome"][key]
+        paint := CPDesktop["paint"][ctrl.Hwnd], selected := key = active
+        if !force && paint["selected"] = selected
+            continue ; The legacy 80-ms highlight timer must not repaint idle rows.
+        paint["selected"] := selected
+        ; Owner drawing fills the whole row. Queue changed rows together without
+        ; a separate background erase (which can flash through on layered windows).
+        DllCall("user32\InvalidateRect", "ptr", ctrl.Hwnd, "ptr", 0, "int", false)
+    }
+}
+
+CPDesktopToggleAdvanced(*) {
+    global CPDesktop
+    CPDesktop["advanced"] := !CPDesktop["advanced"]
+    CPDesktopRelayout()
+}
+
+CPDesktopToggleOverlay(title, *) {
+    if CPOverlayWindowHwnd(title) {
+        if title = "Translator"
+            CloseTranslatorOverlay()
+        else
+            CloseExplainerOverlay()
+    } else if title = "Translator"
+        LaunchOverlay()
+    else
+        LaunchExplainerOverlay()
+    CPDesktopRefreshStatus()
+}
+
+CPDesktopRefreshStatus(force := false, *) {
+    global CPDesktop, ui, iniPath
+    if !CPDesktopActive() || (!force && !DllCall("user32\IsWindowVisible", "ptr", ui.Hwnd, "int"))
+        return
+    for title in ["Translator", "Explainer"] {
+        text := title ": " (CPOverlayWindowHwnd(title) ? "On" : "Off")
+        ctrl := CPDesktop["chrome"][StrLower(title)]
+        if ctrl.Text != text
+            ctrl.Text := text
+    }
+    text := "Audio: " (AudioIsRunning() ? "On" : "Off")
+    if CPDesktop["chrome"]["audio"].Text != text
+        CPDesktop["chrome"]["audio"].Text := text
+    profile := Trim(IniRead(iniPath, "game_profiles", "active", ""))
+    profile := profile != "" ? profile : "Current settings"
+    if CPDesktop["chrome"]["profile"].Text != profile
+        CPDesktop["chrome"]["profile"].Text := profile
+    mode := IniRead(iniPath, "capture", "mode", "region")
+    captureText := "Capture source: " (mode = "window" ? "Selected window" : "Selected region")
+    if CPDesktop["shot"]["captureHelp"].Text != captureText
+        CPDesktop["shot"]["captureHelp"].Text := captureText
+    CPDesktopRefreshOverlayColors()
+}
+
+CPDesktopModelMenu(*) {
+    global ddlProv, ddlIMG, ddlIMG_GM, model_gemini_img, model_openai_img
+    gemini := StrLower(Trim(ddlProv.Text)) = "gemini"
+    models := gemini ? model_gemini_img : model_openai_img
+    key := gemini ? "gemini_img" : "openai_img"
+    combo := gemini ? ddlIMG_GM : ddlIMG
+    popup := Menu()
+    popup.Add("Add model…", (*) => AddModelInteractive(models, key, combo, gemini ? "gemini" : "openai", "screenshot"))
+    popup.Add("Remove selected model…", (*) => DeleteModel(models, key, combo))
+    popup.Show()
+}
+
+CPDesktopPromptMenu(*) {
+    popup := Menu()
+    popup.Add("New prompt…", NewPromptProfile)
+    popup.Add("Delete selected prompt…", DeletePromptProfile)
+    popup.Show()
+}
+
+CPDesktopToggleLayout(*) {
+    global CPDesktop, ui, tab, CPTabButtons, CPTabVisiblePages, tabNames, iniPath, CPDesktopShotControls, CPDesktopAudioControls, CPDesktopExplanationControls
+    global CPDesktopOverlayLegacy
+    global CPDesktopOrganizeLegacy, CPControlsCurrentView
+    global CP_CANVAS_MIN_W, CP_CANVAS_MIN_H, CPPanelLastLayoutW, CPPanelLastLayoutH
+    CPCanvasResetForLayout(false)
+    modern := !CPDesktop["modern"]
+    CPDesktop["modern"] := modern
+    CPDesktopApplyFrame()
+    IniWrite(modern ? 1 : 0, iniPath, "cfg_control", "modernLayout")
+    for hwnd, entry in CPDesktop["base"] {
+        entry[1].Move(entry[2], entry[3], entry[4], entry[5])
+        ; Restore only screenshot labels; status labels on other pages stay live.
+    }
+    for ctrl in CPDesktopShotControls {
+        ; Never restore a DropDownList/Edit's Text: it is the live setting value.
+        if ctrl.Type = "Text" || ctrl.Type = "Button" || ctrl.Type = "CheckBox"
+            ctrl.Text := CPDesktop["base"][ctrl.Hwnd][6]
+        ctrl.Visible := tab.Value = 1
+    }
+    for key, ctrl in CPDesktop["shot"]
+        ctrl.Visible := false
+    for ctrl in CPDesktopAudioControls {
+        if ctrl.Type = "Button"
+            ctrl.Text := CPDesktop["base"][ctrl.Hwnd][6]
+        ctrl.Visible := tab.Value = 2
+    }
+    for key, ctrl in CPDesktop["audioPage"]
+        ctrl.Visible := false
+    for ctrl in CPDesktopExplanationControls {
+        if ctrl.Type = "Button" || ctrl.Type = "CheckBox"
+            ctrl.Text := CPDesktop["base"][ctrl.Hwnd][6]
+        ctrl.Visible := tab.Value = 4
+    }
+    for key, ctrl in CPDesktop["explanationPage"]
+        ctrl.Visible := false
+    for page, controls in CPDesktopOverlayLegacy {
+        for ctrl in controls {
+            if ctrl.Type = "Button"
+                ctrl.Text := CPDesktop["base"][ctrl.Hwnd][6]
+            ctrl.Visible := tab.Value = page
+        }
+        CPDesktopOverlayBindings(page)["sizeHint"].Visible := false
+    }
+    for page, overlayPage in CPDesktop["overlayPages"]
+        for key, ctrl in overlayPage
+            ctrl.Visible := false
+    for page, controls in CPDesktopOrganizeLegacy {
+        for ctrl in controls {
+            if ctrl.Type = "Button"
+                ctrl.Text := CPDesktop["base"][ctrl.Hwnd][6]
+            ctrl.Visible := tab.Value = page
+        }
+    }
+    if !modern && tab.Value = 8
+        CPSetControlsView(CPControlsCurrentView, false)
+    for page, organizePage in CPDesktop["organizePages"]
+        for key, ctrl in organizePage
+            ctrl.Visible := false
+    for key, ctrl in CPDesktop["chrome"]
+        ctrl.Visible := false
+    for ctrl in CPDesktopFooterControls()
+        ctrl.Visible := !modern
+    if !modern {
+        global btnST, txtCapMaxHint, sepAction
+        sepAction.Visible := true
+        for hwnd, surface in CPDesktop["surfaces"] {
+            if CPDesktop["base"].Has(hwnd)
+                GuiCtrlFromHwnd(hwnd).Opt("+Background" CPPalette()["window"])
+        }
+        tab.Opt("+Tabstop")
+        for hwnd, spec in CPDesktop["combos"]
+            SendMessage(0x0153, -1, spec["height"], hwnd)
+        for hwnd, paint in CPDesktop["paint"] {
+            if paint["ctrl"].Type = "Button" {
+                style := DllCall("user32\GetWindowLongPtr", "ptr", hwnd, "int", -16, "ptr")
+                DllCall("user32\SetWindowLongPtr", "ptr", hwnd, "int", -16,
+                    "ptr", (style & ~0xF) | paint["nativeType"], "ptr")
+            }
+        }
+        btnST.SetFont("Norm")
+        if IsSet(txtCapMaxHint)
+            txtCapMaxHint.Visible := false
+        CP_CANVAS_MIN_W := CPDesktop["classicW"], CP_CANVAS_MIN_H := CPDesktop["classicH"]
+        for index, ctrl in CPTabButtons {
+            ctrl.Opt("+Border +Center")
+            ctrl.Text := tabNames[CPTabVisiblePages[index]]
+        }
+        ; The fallback remains reversible without editing a configuration file.
+        ctrl := CPDesktop["chrome"]["classic"]
+        ctrl.Text := "Use modern layout"
+        ui.GetClientPos(,, &w)
+        CPDesktopPlace(ctrl, Max(12, w - 184), Max(12, CPDesktop["height"] - 44), 164, 30)
+    }
+    CPPanelLastLayoutW := 0, CPPanelLastLayoutH := 0
+    ui.GetClientPos(,, &w, &h)
+    ResizeUI(ui, 0, w, h)
+    CPApplyControlPanelTheme()
+}
+
+CPDesktopAppearance(*) {
+    global ui, chkDarkMode, chkTop, slControlOpacity, controlPanelOpacity
+    dlg := Gui("+Owner" ui.Hwnd " +ToolWindow", "Appearance & window")
+    dlg.SetFont("s11", "Segoe UI")
+    dlg.MarginX := 24, dlg.MarginY := 20
+    heading := dlg.Add("Text", "w440", "Appearance && window")
+    heading.SetFont("s16 Bold")
+    dlg.Add("Text", "xm y+12 w440", "Changes apply immediately. Fullscreen keeps its own opacity and always-on-top settings.")
+    dark := dlg.Add("Checkbox", "xm y+24 w400 h28", "Dark appearance")
+    dark.Value := chkDarkMode.Value
+    dark.OnEvent("Click", (*) => (chkDarkMode.Value := dark.Value, CPOnDarkModeToggle(), CPApplyOwnedDialogTheme(dlg)))
+    top := dlg.Add("Checkbox", "xm y+14 w400 h28", "Desktop window always on top")
+    top.Value := chkTop.Value
+    top.OnEvent("Click", (*) => CPDesktopTopChanged(top.Value))
+    opacityLabel := dlg.Add("Text", "xm y+24 w400", "Desktop window opacity: " controlPanelOpacity "%")
+    opacity := dlg.Add("Slider", "xm y+8 w440 h30 Range70-100 ToolTip", controlPanelOpacity)
+    opacity.OnEvent("Change", (*) => (slControlOpacity.Value := opacity.Value,
+        CPOnControlPanelOpacityChange(opacity), opacityLabel.Text := "Desktop window opacity: " opacity.Value "%"))
+    done := dlg.Add("Button", "xm y+26 w440 h36 Default", "Done")
+    done.OnEvent("Click", (*) => dlg.Destroy())
+    dlg.OnEvent("Close", (*) => dlg.Destroy())
+    dlg.OnEvent("Escape", (*) => dlg.Destroy())
+    CPApplyOwnedDialogTheme(dlg)
+    dlg.Show("AutoSize")
+}
+
+CPDesktopTopChanged(value) {
+    global chkTop, ui, iniPath
+    chkTop.Value := value ? 1 : 0
+    ui.Opt(value ? "+AlwaysOnTop" : "-AlwaysOnTop")
+    IniWrite(value ? 1 : 0, iniPath, "cfg_control", "winTop")
+}
+
+CPDesktopClassicResize(gui, minMax, w, h){
     global CPPanelInteractiveResize, CPPanelLastLayoutW, CPPanelLastLayoutH
     if (minMax = -1 || w <= 0 || h <= 0)
         return
@@ -33414,12 +39545,19 @@ ResizeUI(gui, minMax, w, h){
     slControlOpacity.Move(cpOpacityLabelX + cpOpacityLabelW + 8, ySave + 1, 110, 24)
     slControlOpacity.GetPos(&cpOpacitySliderX, &cpOpacitySliderY, &cpOpacitySliderW)
     lblControlOpacityPct.Move(cpOpacitySliderX + cpOpacitySliderW + 8, ySave + 6, 44)
+    global CPDesktop
+    if IsSet(CPDesktop) && CPDesktop.Get("ready", false) && !CPDesktopActive() {
+        cpLayoutToggle := CPDesktop["chrome"]["classic"]
+        cpLayoutToggle.Text := "Use modern layout"
+        CPDesktopPlace(cpLayoutToggle, Max(12, viewportW - 184), ySave, 164, 32)
+    }
     CPUpdateComboArrowOverlays()
     CPCanvasFinishLayout(viewportW, viewportH, canvasRestore, false)
     CPClipScrollableControlsToViewport(false)
     CPMaintainFooterZOrder()
 
     ; --- Re-enable redraw and force repaint of the whole window and all children ---
+    CPDesktopRaiseChrome()
     if (hwnd) {
         ; WM_SETREDRAW â†’ 1 = resume redraw (WinAPI with HWND)
         DllCall("SendMessage", "ptr", hwnd, "uint", 0x000B, "ptr", 1, "ptr", 0)
@@ -34553,7 +40691,7 @@ NewExplainPromptProfile(*) {
         return
     name := Trim(ib.Value)
     if (name = "") {
-        MsgBox("Please enter a non-empty name.", "New EXPLAIN prompt", "OK Icon!")
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Please enter a non-empty name.", "New EXPLAIN prompt")
         return
     }
     name := RegExReplace(name, '[\\/:*?"<>|]+', "_")
@@ -34561,7 +40699,7 @@ NewExplainPromptProfile(*) {
         name := "_" name
     path := ExplainProfilePath(name)
     if FileExist(path) {
-        MsgBox("A prompt with that name already exists.",, "OK Icon!")
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "A prompt with that name already exists.", "New EXPLAIN prompt")
         return
     }
     FileAppend("You are a friendly tutor for learners of Japanese." . "`r`n`r`nJapanese:" . "`r`n{jp}", path, "UTF-8")
@@ -34572,10 +40710,10 @@ DeleteExplainPromptProfile(*) {
     global ddlEPr
     name := Trim(ddlEPr.Text)
     if (name = "") {
-        MsgBox("No EXPLAIN prompt selected.",, "OK Icon!")
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "No EXPLAIN prompt selected.", "Delete EXPLAIN prompt")
         return
     }
-    if (MsgBox("Delete EXPLAIN prompt '" name "'?",, "YesNo Icon!")!="Yes")
+    if (CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Delete EXPLAIN prompt '" name "'?", "Delete EXPLAIN prompt", "yesno")!="Yes")
         return
     path := ExplainProfilePath(name)
     try FileDelete(path)
@@ -34644,7 +40782,7 @@ NewPromptProfile(*) {
         return
     name := Trim(ib.Value)
     if (name = "") {
-        MsgBox("Please enter a non-empty name.", "New prompt", "OK Icon!")
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Please enter a non-empty name.", "New prompt")
         return
     }
     name := RegExReplace(name, '[\\/:*?"<>|]+', "_")
@@ -34652,7 +40790,7 @@ NewPromptProfile(*) {
         name := "_" name
     path := PromptFilePath(name)
     if FileExist(path) {
-        if (MsgBox("Prompt '" name "' already exists.`nOpen editor?", "New prompt", "YesNo Icon!")="Yes") {
+        if (CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Prompt '" name "' already exists.`nOpen editor?", "New prompt", "yesno")="Yes") {
             RefreshPromptProfilesList(name)   ; select it safely
             OpenPromptEditor()
         }
@@ -34666,10 +40804,10 @@ DeletePromptProfile(*) {
     global ddlPrompt
     name := Trim(ddlPrompt.Text)
     if (name = "") {
-        MsgBox("No profile selected.",, "OK Icon!")
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "No profile selected.", "Delete prompt")
         return
     }
-    if (MsgBox("Delete prompt '" name "'?",, "YesNo Icon!")!="Yes")
+    if (CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Delete prompt '" name "'?", "Delete prompt", "yesno")!="Yes")
         return
     path := PromptFilePath(name)
     try FileDelete(path)
@@ -35273,7 +41411,7 @@ NewGlossaryProfile(kind := "jp", *) {
         return
     name := Trim(ib.Value)
     if (name = "") {
-        MsgBox("Please enter a non-empty name.", "New " kindLabel " profile", "OK Icon!")
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Please enter a non-empty name.", "New " kindLabel " profile")
         return
     }
     name := RegExReplace(name, '[\\/:*?"<>|]+', "_")
@@ -35282,8 +41420,8 @@ NewGlossaryProfile(kind := "jp", *) {
 
     path := GlossaryPath(kind, name)
     if FileExist(path) {
-        if (MsgBox(kindLabel " profile '" name "' already exists.`nOpen its entries?",
-            "New " kindLabel " profile", "YesNo Icon!") = "Yes") {
+        if (CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), kindLabel " profile '" name "' already exists.`nOpen its entries?",
+            "New " kindLabel " profile", "yesno") = "Yes") {
             if (kind = "jp")
                 jp2enGlossaryProfile := name
             else
@@ -35312,25 +41450,25 @@ DeleteGlossaryProfile(kind := "jp", *) {
     global ddlJPG, ddlENG, iniPath, jp2enGlossaryProfile, en2enGlossaryProfile
     name := (kind = "jp") ? Trim(ddlJPG.Text) : Trim(ddlENG.Text)
     if (name = "") {
-        MsgBox("No profile selected.",, "OK Icon!")
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "No profile selected.", "Delete terminology profile")
         return
     }
     if (name = "default") {
-        MsgBox("The 'default' profile cannot be deleted.",, "OK Icon!")
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "The 'default' profile cannot be deleted.", "Delete terminology profile")
         return
     }
     kindLabel := GlossaryKindLabel(kind)
-    if (MsgBox("Delete the " kindLabel " profile '" name "'?"
+    if (CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Delete the " kindLabel " profile '" name "'?"
         . "`n`nThe other glossary type will not be changed.",
-        "Delete " kindLabel " profile", "YesNo Icon!") != "Yes")
+        "Delete " kindLabel " profile", "yesno") != "Yes")
         return
 
     dir := GlossaryProfileDir(name)
     path := GlossaryPath(kind, name)
     try FileDelete(path)
     catch as ex {
-        MsgBox("Could not delete the profile:`n`n" ex.Message,
-            "Delete " kindLabel " profile", "OK Icon!")
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Could not delete the profile:`n`n" ex.Message,
+            "Delete " kindLabel " profile")
         return
     }
     partnerPath := GlossaryPath(kind = "jp" ? "en" : "jp", name)

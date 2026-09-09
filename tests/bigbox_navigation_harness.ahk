@@ -4,6 +4,7 @@
 #NoTrayIcon
 ; @BIGBOX_GLOBALS@
 ; @DESKTOP_TABS@
+; @AUDIO_LANGUAGES@
 global CP_GAME_TITLE := "The Legend of Xanadu: Kaze no Densetsu Xanadu — an exceptionally long test title"
 global CP_GAME_PLATFORM := "NEC PC Engine-CD"
 global CP_GAME_BOX_ART := A_Args.Length ? A_Args[1] : ""
@@ -78,6 +79,7 @@ global ddlJPG := TestCombo(["default"]), ddlENG := TestCombo(["default"])
 global gameProfilesDir := A_ScriptDir "\profiles", glossariesDir := A_ScriptDir "\glossaries"
 global promptsDir := A_ScriptDir "\prompts", explainPromptsDir := A_ScriptDir "\prompts_explain"
 global ddlGameProfile := TestCombo(["Demo"]), txtGameProfileState := ui.AddText()
+global ddlStartupOverlays := TestCombo(CPStartupOverlayOptions())
 global GameProfileLastError := "", TestProfileSaves := 0, TestProfileApplies := 0
 global ddlSpeaker := TestCombo(["[Windows Default]", "Game speakers", "Headphones", "USB DAC", "TV audio", "日本語 ＆ 音声"])
 global btnSpRef := ui.AddButton(), btnAudioTest := ui.AddButton(), txtAudioTestStatus := ui.AddText()
@@ -195,6 +197,7 @@ try {
     TestAssert(CPBigBoxNavigationControls.Length = 12, "Home has two arrows, eight tiles and two bottom actions")
     TestAssert((DllCall("user32\GetWindowLongW", "ptr", CPBigBoxControls["gameTitle"].Hwnd,
         "int", -16, "uint") & 0x4000) != 0, "Game title retains end ellipsis")
+    TestHomeHeaderContent()
 
     for size in [[1280, 720], [1920, 1080], [3840, 2160]] {
         CPBigBoxGui.Show("Hide w" size[1] " h" size[2])
@@ -202,8 +205,10 @@ try {
         CPBigBoxDashboardApplyTheme()
         TestLayout(size[1], size[2])
         TestCapture("home-" size[1] ".png", size[1], size[2])
+        TestHomeHeaderLongNames(size[1], size[2])
         CPBigBoxSetPage("screenshot", false)
         TestLayout(size[1], size[2])
+        TestScreenshotHintDetails(size[1])
         TestCapture("screenshot-settings-" size[1] ".png", size[1], size[2])
         CPBigBoxSetPage("quickTranslation", false)
         TestLayout(size[1], size[2])
@@ -213,6 +218,7 @@ try {
         TestCapture("explanation-settings-" size[1] ".png", size[1], size[2])
         CPBigBoxSetPage("audio", false)
         TestLayout(size[1], size[2])
+        TestAudioHelpAndStatus(size[1], size[2])
         TestCapture("audio-input-" size[1] ".png", size[1], size[2])
         CPBigBoxSetPage("home", false)
     }
@@ -264,7 +270,7 @@ try {
         TestAssert(!CPBigBoxControls["pageNext"].Enabled, "Quick view has no active page-switching arrow")
         TestAssert(!TestControlShown(CPBigBoxControls["pageNext"]), "Quick view hides page arrows")
         TestAssert(CPBigBoxNavigationControls.Length = (CPBigBoxAIDomain() != "" || testTile[3] = "quickCapture"
-            || testTile[3] = "quickControls" ? 6 : testTile[3] = "quickOverlays" ? 5 : 3),
+            || testTile[3] = "quickControls" ? 6 : testTile[3] = "quickOverlays" ? 6 : 3),
             "Quick view focus excludes hidden page arrows")
         TestAssert(InStr(CPBigBoxControls["pageHint"].Text, "Home ›"), "Quick view shows Home breadcrumb")
         CPBigBoxSwitchPage(1)
@@ -391,6 +397,8 @@ try {
     TestBigBoxAudioFeedback()
     TestBigBoxAudioStartup()
     TestBigBoxOverlays()
+    TestBigBoxBackgroundOpacity()
+    TestBigBoxAlwaysOnTop()
     TestBigBoxControls()
     TestBigBoxTerminologyProfiles()
     TestBigBoxModelManagement()
@@ -601,6 +609,32 @@ TestAISelectors() {
 TestLongChoiceLists() {
     global
     CPBigBoxSetPage("quickAudio")
+    ; Use the production language definitions, not the synthetic short lists
+    ; below, to check both presentations and saved selection after reordering.
+    ddlAudioTarget.Delete()
+    ddlAudioTarget.Add(TestAudioTargetLangs)
+    ddlAudioTarget.Text := "English (en)"
+    AutoPersist()
+    desktopLanguages := ControlGetItems(ddlAudioTarget.Hwnd)
+    TestAssert(desktopLanguages.Length = 14, "All audio output languages remain available")
+    CPBigBoxOpenAIChoice("detail")
+    for languageIndex, language in desktopLanguages {
+        if languageIndex > 1
+            TestAssert(StrCompare(desktopLanguages[languageIndex-1], language, false) < 0,
+                "Desktop audio languages are alphabetical: " language)
+        TestAssert(CPBigBoxAIChoice["options"][languageIndex] = language,
+            "Fullscreen audio languages match the desktop order: " language)
+    }
+    TestAssert(CPBigBoxAIChoice["index"] = 4 && ddlAudioTarget.Text = "English (en)"
+        && audioTargetLang = "English (en)", "Reordering preserves the saved language instead of its old index")
+    CPBigBoxAIListBoundary(false)
+    CPBigBoxBack()
+    TestAssert(ddlAudioTarget.Text = "English (en)", "Cancelling language browsing preserves English")
+    CPBigBoxOpenAIChoice("detail")
+    CPBigBoxCommitAIChoiceIndex(6)
+    TestAssert(ddlAudioTarget.Text = "German (de)" && audioTargetLang = "German (de)"
+        && IniRead(iniPath, "cfg", "audioTargetLanguage") = "German (de)",
+        "Selecting from the sorted list persists the matching language label and code")
     ddlAudioTarget.Delete()
     ddlAudioTarget.Add(["English", "German", "French", "Spanish"])
     ddlAudioTarget.Choose(3)
@@ -805,6 +839,41 @@ TestExplanationPreferences() {
     CPBigBoxSetPage("home")
 }
 
+TestScreenshotHintDetails(width) {
+    global CPBigBoxControls, CPBigBoxAINotice
+    originalNotice := CPBigBoxAINotice
+    CPBigBoxAINotice := ""
+    seenDetails := Map()
+    try {
+        for hintKey in CPBigBoxSettingsKeys("screenshot") {
+            CPBigBoxUpdateSettingsHint(hintKey)
+            hintText := CPBigBoxControls["modeBody"].Text
+            hintLines := StrSplit(hintText, "`n", "`r")
+            TestAssert(hintLines.Length = 2 && hintLines[2] != ""
+                && hintLines[2] = CPBigBoxScreenshotHintDetail(hintKey)
+                && !InStr(hintText, "remain in Advanced Settings"),
+                "Screenshot tile has current, specific second-line help: " hintKey " at " width)
+            TestAssert(!seenDetails.Has(hintLines[2]),
+                "Screenshot help is not repeated between tiles: " hintKey)
+            seenDetails[hintLines[2]] := true
+            CPBigBoxControls["modeBody"].GetPos(,,, &hintHeight)
+            TestAssert(TestTextHeight(CPBigBoxControls["modeBody"]) <= hintHeight,
+                "Both screenshot help lines fit: " hintKey " at " width)
+        }
+        CPBigBoxAINotice := "Saved · Clear screenshots on startup: On"
+        CPBigBoxUpdateSettingsHint("shot_clearOnStartup")
+        TestAssert(InStr(CPBigBoxControls["modeBody"].Text, "`n" CPBigBoxAINotice),
+            "Screenshot save feedback still takes priority over the second help line")
+        CPBigBoxAINotice := "Could not save this option."
+        CPBigBoxUpdateSettingsHint("shot_clearOnStartup")
+        TestAssert(InStr(CPBigBoxControls["modeBody"].Text, "`n" CPBigBoxAINotice),
+            "Screenshot failure feedback still takes priority over the second help line")
+    } finally {
+        CPBigBoxAINotice := originalNotice
+        CPBigBoxUpdateSettingsHint()
+    }
+}
+
 TestScreenshotPreferences() {
     global CPBigBoxControls, CPBigBoxNavigationControls, CPBigBoxNavigationRows, CPBigBoxAINotice
     global CPBigBoxGui, CPBigBoxAICommitting, CPBigBoxModalDepth, CPBigBoxPageFocus, CPBigBoxFocusFrame
@@ -915,6 +984,90 @@ TestScreenshotPreferences() {
     }
     iniPath := testRealIni
     CPBigBoxSetPage("home", false)
+}
+
+TestAudioHelpAndStatus(width, height) {
+    global CPBigBoxControls, CPBigBoxAINotice, CPBigBoxFocusFrame, gAudioInputStatus, txtAudioTestStatus
+    originalNotice := CPBigBoxAINotice, originalStatus := gAudioInputStatus
+    originalDesktopStatus := txtAudioTestStatus.Text
+    CPBigBoxAINotice := ""
+    seenDetails := Map()
+    try {
+        for hintKey in CPBigBoxSettingsKeys("audio") {
+            CPBigBoxUpdateSettingsHint(hintKey)
+            hintLines := StrSplit(CPBigBoxControls["modeBody"].Text, "`n", "`r")
+            TestAssert(hintLines.Length = 2 && hintLines[2] != ""
+                && hintLines[2] = CPBigBoxAudioHintDetail(hintKey),
+                "Audio tile has current, specific second-line help: " hintKey " at " width)
+            TestAssert(!seenDetails.Has(hintLines[2]), "Audio help is not repeated between tiles: " hintKey)
+            seenDetails[hintLines[2]] := true
+            CPBigBoxControls["modeBody"].GetPos(,,, &hintHeight)
+            TestAssert(TestTextHeight(CPBigBoxControls["modeBody"]) <= hintHeight,
+                "Both audio help lines fit: " hintKey " at " width)
+        }
+        for notice in ["Saved · Audio input: Game speakers", "Could not save this option."] {
+            CPBigBoxAINotice := notice
+            CPBigBoxUpdateSettingsHint("audio_device")
+            TestAssert(InStr(CPBigBoxControls["modeBody"].Text, "`n" notice),
+                "Audio save/error feedback takes priority over help: " notice)
+        }
+        CPBigBoxAINotice := ""
+        CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls["audio_test"]))
+        helpBefore := CPBigBoxControls["modeBody"].Text
+        CPBigBoxControls["audio_status_label"].GetPos(&titleX, &titleY, &titleW, &titleH)
+        CPBigBoxControls["audio_status"].GetPos(&statusX, &statusY, &statusW, &statusH)
+        CPBigBoxControls["audio_refresh"].GetPos(&refreshX, &refreshY,, &refreshH)
+        CPBigBoxControls["audio_test"].GetPos(&testX,, &testW)
+        CPBigBoxControls["audio_power"].GetPos(&powerX, &powerY, &powerW, &powerH)
+        CPBigBoxControls["backHome"].GetPos(, &footerY)
+        TestAssert(titleX = refreshX && statusX = titleX && statusW = titleW
+            && Abs(statusX + statusW - testX - testW) <= 1,
+            "Input check readout aligns beneath Refresh/Test at " width)
+        TestAssert(titleY > refreshY + refreshH && titleY = powerY
+            && statusY >= titleY + titleH && statusY + statusH <= footerY
+            && statusX > powerX + powerW,
+            "Input check title/body do not overlap input buttons, session switch, or footer at " width)
+        TestAssert(TestTextHeight(CPBigBoxControls["audio_status_label"]) <= titleH,
+            "Input check heading fits at " width)
+        for message in ["Not tested.", "Listening for audio...", "Refreshing audio devices...",
+            "Audio detected. This device is ready.",
+            "No audio detected. Check the selected device or the game's audio driver.",
+            "Could not open the selected audio device. Refresh devices, check your audio driver and try again.",
+            "Audio test ended without a result. Check the helper paths and try again.",
+            "Devices refreshed. The selected device is unavailable; reconnect it or choose another input.",
+            "Could not refresh audio devices. The previous list was kept. Check your audio driver and helper version."] {
+            SetAudioTestStatus(message)
+            expectedText := message = "Not tested."
+                ? "Not tested yet. Play game audio, then select Test audio." : message
+            TestAssert(CPBigBoxControls["audio_status"].Text = expectedText
+                && TestTextHeight(CPBigBoxControls["audio_status"]) <= statusH,
+                "Labeled audio input message fits at " width ": " message)
+            TestAssert(gAudioInputStatus = message && txtAudioTestStatus.Text = "Test status: " message,
+                "Fullscreen presentation does not change desktop diagnostic wording")
+            TestAssert(CPBigBoxFocusFrame["key"] = "audio_test"
+                && CPBigBoxControls["modeBody"].Text = helpBefore,
+                "Input status updates preserve focus and tile help")
+        }
+        TestCapture("audio-input-error-" width ".png", width, height)
+        for key in ["audio_status_label", "audio_status"]
+            TestAssert(TestControlShown(CPBigBoxControls[key])
+                && !CPBigBoxDashboardControlIndex(CPBigBoxControls[key]),
+                "Input check text is visible without adding a controller stop: " key)
+        CPBigBoxOpenAIChoice("device")
+        for key in ["audio_status_label", "audio_status"]
+            TestAssert(!TestControlShown(CPBigBoxControls[key]), "Input check hides inside device picker: " key)
+        CPBigBoxBack()
+        for page in ["home", "quickAudio", "screenshot"] {
+            CPBigBoxSetPage(page, false)
+            for key in ["audio_status_label", "audio_status"]
+                TestAssert(!TestControlShown(CPBigBoxControls[key]), "Input check hides on " page ": " key)
+        }
+    } finally {
+        CPBigBoxAINotice := originalNotice
+        SetAudioTestStatus(originalStatus)
+        txtAudioTestStatus.Text := originalDesktopStatus
+        CPBigBoxSetPage("audio", false)
+    }
 }
 
 TestAudioInputs() {
@@ -1834,6 +1987,242 @@ TestBigBoxOverlays() {
     controlDarkMode := 1
 }
 
+TestBigBoxBackgroundOpacity() {
+    global
+    local before := FileRead(iniPath), sends := TestOverlayThemes.Length
+    local alpha := Buffer(1), flags := Buffer(4), color := Buffer(4)
+    local backdropHwnd, dims, bx, by, bw, bh, fx, fy, fw, fh, newPage
+    ; Like the rest of this harness, navigate while hidden: CI processes may
+    ; not own the interactive desktop. Show without activation for native
+    ; layer/geometry checks, never steal foreground from the user's apps.
+    CPBigBoxGui.Show("Hide w1280 h720")
+    TestAssert(CPBigBoxBackgroundOpacity = 100 && CPBigBoxEffectiveBackgroundOpacity() = 100,
+        "Fullscreen opacity defaults to solid and remains independent of desktop opacity")
+    CPBigBoxSetPage("quickOverlays", false)
+    CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls["ov_main"]))
+    CPBigBoxSetPage("quickMainWindow", false)
+    TestAssert(CPBigBoxNavigationControls.Length = 5 && CPBigBoxControls["ov_opacity"].Enabled
+        && CPBigBoxControls["ov_topmost"].Enabled
+        && !CPBigBoxControls["ov_bg"].Enabled && !CPBigBoxControls["ov_position"].Enabled,
+        "Main window exposes background opacity and Always on top with standard return actions")
+    CPBigBoxOverlayAction("opacity")
+    CPBigBoxOverlaySliderMove("Left")
+    CPBigBoxOverlaySliderMove("Left")
+    CPBigBoxOverlaySliderMove("Left")
+    TestAssert(CPBigBoxBackgroundPreview = 85 && CPBigBoxBackgroundOpacity = 100
+        && FileRead(iniPath) = before && TestOverlayThemes.Length = sends,
+        "Three controller steps preview 85 percent without writes or changing translation overlays")
+    TestAssert(!CPBigBoxBackdrop.Get("failed", false) && CPBigBoxBackdrop.Has("gui"),
+        "Native background-only composition succeeds")
+    backdropHwnd := CPBigBoxBackdrop["gui"].Hwnd
+    TestAssert(DllCall("user32\GetLayeredWindowAttributes", "ptr", CPBigBoxGui.Hwnd,
+        "ptr", color, "ptr", alpha, "ptr", flags) && NumGet(flags, 0, "uint") = 1,
+        "Foreground uses only a color key, never uniform alpha that would fade text")
+    DllCall("user32\GetLayeredWindowAttributes", "ptr", backdropHwnd,
+        "ptr", color, "ptr", alpha, "ptr", flags)
+    TestAssert(NumGet(flags, 0, "uint") = 2 && NumGet(alpha, 0, "uchar") = Round(85 * 255 / 100),
+        "Only the background receives 85 percent alpha")
+    TestAssert((WinGetExStyle(backdropHwnd) & 0x08000000) && !(WinGetExStyle(backdropHwnd) & 0x20),
+        "Backdrop is non-activating and does not pass clicks through to the game")
+    TestAssert(CPBigBoxOverlaySliderFocused() = "ov_slider1",
+        "Live preview retains the dashboard's slider focus")
+    for dims in [[1280, 720], [1920, 1080], [3840, 2160]] {
+        CPBigBoxGui.Show("NA x0 y0 w" dims[1] " h" dims[2])
+        CPBigBoxDashboardResize(CPBigBoxGui, 0, dims[1], dims[2])
+        CPBigBoxBackgroundSync(true)
+        CPBigBoxGui.GetClientPos(&fx, &fy, &fw, &fh)
+        CPBigBoxBackdrop["gui"].GetClientPos(&bx, &by, &bw, &bh)
+        TestAssert(fx = bx && fy = by && fw = bw && fh = bh,
+            "Background matches dashboard position and size at " dims[1])
+        TestAssert(DllCall("user32\GetWindow", "ptr", CPBigBoxGui.Hwnd, "uint", 2, "ptr") = backdropHwnd,
+            "Dimmer stays directly behind the menu at " dims[1])
+        CPBigBoxControls["modeBody"].GetPos(,,, &bh)
+        TestAssert(TestTextHeight(CPBigBoxControls["modeBody"]) <= bh,
+            "Live preview instructions fit at " dims[1])
+        TestCapture("background-opacity-85-" dims[1] ".png", dims[1], dims[2])
+    }
+    CPBigBoxGui.Hide()
+    CPBigBoxBack()
+    TestAssert(CPBigBoxEffectiveBackgroundOpacity() = 100 && FileRead(iniPath) = before
+        && !DllCall("user32\IsWindowVisible", "ptr", backdropHwnd)
+        && CPBigBoxFocusFrame["key"] = "ov_opacity", "B cancels the preview and restores solid rendering and originating focus")
+    CPBigBoxOverlayAction("opacity")
+    CPBigBoxControls["ov_slider1"].Value := 85
+    CPBigBoxOverlaySliderChanged()
+    CPBigBoxSaveOverlayEditor()
+    TestAssert(CPBigBoxBackgroundOpacity = 85 && CPBigBoxBackgroundPreview = -1
+        && IniRead(iniPath, "cfg_control", "bigBoxBackgroundOpacity") = 85,
+        "Save persists the fullscreen setting and retains its appearance")
+    for newPage in ["home", "quickOverlays", "quickTranslation", "controls", "translationWindow", "apiKeys"] {
+        CPBigBoxSetPage(newPage, false)
+        TestAssert(CPBigBoxEffectiveBackgroundOpacity() = 85 && CPBigBoxGui.BackColor = "010203"
+            && !CPBigBoxBackdrop.Get("failed", false), "Submenu retains background-only opacity: " newPage)
+    }
+    CPBigBoxSetPage("quickTranslation", false)
+    CPBigBoxOpenAIChoice("model")
+    TestAssert(CPBigBoxAIChoiceActive() && CPBigBoxEffectiveBackgroundOpacity() = 85, "Choice lists inherit menu opacity")
+    CPBigBoxBack()
+    CPBigBoxSetPage("quickMainWindow", false)
+    CPBigBoxOverlayAction("opacity")
+    Loop 15
+        CPBigBoxOverlaySliderMove("Left")
+    TestAssert(CPBigBoxBackgroundPreview = 50, "Opacity is clamped at a readable 50 percent minimum")
+    Loop 15
+        CPBigBoxOverlaySliderMove("Right")
+    TestAssert(CPBigBoxBackgroundPreview = 100 && !DllCall("user32\IsWindowVisible", "ptr", backdropHwnd),
+        "100 percent preview returns to normal solid rendering")
+    CPBigBoxCloseOverlayEditor()
+    TestAssert(CPBigBoxEffectiveBackgroundOpacity() = 85, "Cancel restores the saved non-default opacity too")
+    for darkTheme in [false, true] {
+        controlDarkMode := darkTheme
+        CPBigBoxDashboardApplyTheme()
+        TestAssert(CPBigBoxGui.BackColor = "010203"
+            && CPBigBoxBackdrop["gui"].BackColor = CPPalette(darkTheme)["window"],
+            "Light/dark mode recolors the background without fading foreground text: " darkTheme)
+        CPBigBoxBackgroundPreview := 100
+        CPBigBoxDashboardApplyTheme()
+        TestAssert(CPBigBoxGui.BackColor = CPPalette(darkTheme)["window"],
+            "100 percent restores the original theme background: " darkTheme)
+        CPBigBoxBackgroundPreview := -1
+    }
+    CPBigBoxBackdrop["failed"] := true
+    CPBigBoxDashboardApplyTheme()
+    TestAssert(CPBigBoxEffectiveBackgroundOpacity() = 100 && CPBigBoxBackgroundOpacity = 85
+        && CPBigBoxGui.BackColor = CPPalette(true)["window"],
+        "Composition failure uses a solid fallback without discarding the saved preference")
+    CPBigBoxBackdrop["failed"] := false
+    CPBigBoxDashboardApplyTheme()
+    CPBigBoxGui.Show("NA")
+    CPBigBoxBackgroundSync(true)
+    TestAssert(DllCall("user32\IsWindowVisible", "ptr", backdropHwnd), "Saved translucent background is shown with the menu")
+    CPBigBoxGui.Hide()
+    Sleep(20)
+    TestAssert(!DllCall("user32\IsWindowVisible", "ptr", backdropHwnd), "Direct capture/Study-style hide also removes the backdrop")
+    CPBigBoxDashboardShowReady()
+    TestAssert(CPBigBoxEffectiveBackgroundOpacity() = 85 && DllCall("user32\IsWindowVisible", "ptr", backdropHwnd),
+        "Returning from a hidden dashboard restores the saved background")
+    CPSetOverlayPreference("Main window", "opacity", 100)
+    CPBigBoxDashboardApplyTheme()
+    CPBigBoxBackgroundDispose()
+    TestAssert(!DllCall("user32\IsWindow", "ptr", backdropHwnd), "Background cleanup destroys its native window")
+    IniDelete(iniPath, "cfg_control", "bigBoxBackgroundOpacity")
+    CPBigBoxGui.Hide()
+    CPBigBoxSetPage("home", false)
+}
+
+TestBigBoxAlwaysOnTop() {
+    global
+    local originalIni := iniPath, desktopTop := IniRead(iniPath, "cfg_control", "winTop", "missing")
+    local overlaySends := TestOverlayThemes.Length, other := Gui("+ToolWindow", "Synthetic other app")
+    local dims, opacity, foregroundBefore, backdropHwnd, x, y, w, h, key, page
+    try {
+        CPBigBoxGui.Hide()
+        CPBigBoxSetPage("quickMainWindow", false)
+        TestAssert(CPBigBoxAlwaysOnTop && (WinGetExStyle(CPBigBoxGui.Hwnd) & 0x8),
+            "Fullscreen Always on top defaults to the existing topmost behavior")
+        for dims in [[1280, 720], [1920, 1080], [3840, 2160]] {
+            CPBigBoxGui.Show("Hide w" dims[1] " h" dims[2])
+            CPBigBoxDashboardResize(CPBigBoxGui, 0, dims[1], dims[2])
+            TestLayout(dims[1], dims[2])
+            for key in ["ov_opacity", "ov_topmost", "ov_note"] {
+                CPBigBoxControls[key].GetPos(&x, &y, &w, &h)
+                TestAssert(TestTextHeight(CPBigBoxControls[key]) <= h,
+                    "Main window setting text fits at " dims[1] ": " key)
+            }
+            TestCapture("main-window-settings-" dims[1] ".png", dims[1], dims[2])
+        }
+        CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls["ov_topmost"]))
+        CPBigBoxOverlayAction("topmost")
+        TestAssert(!CPBigBoxAlwaysOnTop && !(WinGetExStyle(CPBigBoxGui.Hwnd) & 0x8)
+            && IniRead(iniPath, "cfg_control", "bigBoxAlwaysOnTop") = 0
+            && CPBigBoxControls["ov_topmost"].Text = "Always on top`nOff"
+            && CPBigBoxFocusFrame["key"] = "ov_topmost",
+            "A toggles, saves, and applies Always on top without moving controller focus")
+        for opacity in [85, 100] {
+            CPSetOverlayPreference("Main window", "opacity", opacity)
+            CPBigBoxDashboardApplyTheme()
+            CPBigBoxDashboardShowReady()
+            backdropHwnd := CPBigBoxBackdrop["gui"].Hwnd
+            TestAssert(!(WinGetExStyle(CPBigBoxGui.Hwnd) & 0x8)
+                && !(WinGetExStyle(backdropHwnd) & 0x8),
+                "Reopening honors Off for both foreground and backing at opacity " opacity)
+            other.Show("NA x20 y20 w300 h160")
+            DllCall("user32\SetWindowPos", "ptr", other.Hwnd, "ptr", 0,
+                "int", 0, "int", 0, "int", 0, "int", 0, "uint", 0x0013)
+            foregroundBefore := DllCall("user32\GetForegroundWindow", "ptr")
+            TestAssert(TestWindowIsAbove(other.Hwnd, CPBigBoxGui.Hwnd),
+                "A normal external window can cover the relaxed fullscreen menu")
+            CPBigBoxDashboardApplyTheme()
+            CPBigBoxDashboardUpdateContent()
+            CPBigBoxBackgroundSync()
+            TestAssert(TestWindowIsAbove(other.Hwnd, CPBigBoxGui.Hwnd)
+                && TestWindowIsAbove(other.Hwnd, backdropHwnd)
+                && DllCall("user32\GetForegroundWindow", "ptr") = foregroundBefore,
+                "Menu refresh never reclaims z-order or foreground from the other window")
+            ; Simulate the same temporary demotion used around native file pickers.
+            CPBigBoxModalDepth += 1
+            CPBigBoxBackgroundSync()
+            CPBigBoxModalDepth -= 1
+            CPBigBoxBackgroundSync()
+            TestAssert(!(WinGetExStyle(CPBigBoxGui.Hwnd) & 0x8)
+                && !(WinGetExStyle(backdropHwnd) & 0x8),
+                "Returning from a native dialog does not force Always on top back on")
+            CPBigBoxGui.Hide()
+        }
+        other.Hide()
+        CPBigBoxOverlayAction("topmost")
+        TestAssert(CPBigBoxAlwaysOnTop && (WinGetExStyle(CPBigBoxGui.Hwnd) & 0x8)
+            && (WinGetExStyle(backdropHwnd) & 0x8)
+            && IniRead(iniPath, "cfg_control", "bigBoxAlwaysOnTop") = 1,
+            "Turning On restores topmost behavior on both layers and saves it")
+        CPBigBoxModalDepth += 1
+        CPBigBoxBackgroundSync()
+        TestAssert(!(WinGetExStyle(CPBigBoxGui.Hwnd) & 0x8)
+            && !(WinGetExStyle(backdropHwnd) & 0x8), "Native file selection temporarily relaxes both topmost layers")
+        CPBigBoxModalDepth -= 1
+        CPBigBoxBackgroundSync()
+        TestAssert((WinGetExStyle(CPBigBoxGui.Hwnd) & 0x8)
+            && (WinGetExStyle(backdropHwnd) & 0x8), "Native dialog return restores On only when it is the saved preference")
+        iniPath := A_ScriptDir "\missing-topmost-folder\settings.ini"
+        CPBigBoxOverlayAction("topmost")
+        TestAssert(CPBigBoxAlwaysOnTop && (WinGetExStyle(CPBigBoxGui.Hwnd) & 0x8)
+            && InStr(CPBigBoxOverlayNotice, "Could not save"), "Failed toggle persistence leaves the current behavior unchanged")
+        iniPath := originalIni
+        for page in ["quickTranslatorWindow", "quickExplainerWindow", "translationWindow", "explanationWindow"] {
+            CPBigBoxSetPage(page, false)
+            TestAssert(!CPBigBoxControls["ov_topmost"].Enabled && !TestControlShown(CPBigBoxControls["ov_topmost"]),
+                "Main-window-only toggle is not added to translation overlays: " page)
+        }
+        TestAssert(IniRead(iniPath, "cfg_control", "winTop", "missing") = desktopTop
+            && TestOverlayThemes.Length = overlaySends, "Fullscreen toggle never changes desktop or translation-overlay settings")
+    } finally {
+        iniPath := originalIni
+        CPBigBoxModalDepth := 0
+        CPBigBoxAlwaysOnTop := true
+        CPBigBoxBackgroundOpacity := 100
+        CPBigBoxBackgroundPreview := -1
+        CPBigBoxDashboardApplyTheme()
+        CPBigBoxBackgroundDispose()
+        try IniDelete(iniPath, "cfg_control", "bigBoxAlwaysOnTop")
+        try IniDelete(iniPath, "cfg_control", "bigBoxBackgroundOpacity")
+        other.Destroy()
+        CPBigBoxGui.Hide()
+        CPBigBoxSetPage("home", false)
+    }
+}
+
+TestWindowIsAbove(upper, lower) {
+    local hwnd := lower
+    Loop 500 {
+        hwnd := DllCall("user32\GetWindow", "ptr", hwnd, "uint", 3, "ptr") ; GW_HWNDPREV
+        if !hwnd
+            return false
+        if hwnd = upper
+            return true
+    }
+    return false
+}
+
 TestOverlayStatusStates() {
     global TestOverlayWindows
     local statusGui := Gui("+ToolWindow +AlwaysOnTop", "Synthetic overlay state")
@@ -2140,6 +2529,18 @@ TestBigBoxSetupManagement() {
         CPBigBoxOpenAIChoice("detail")
         CPBigBoxOpenChoiceManager()
         CPBigBoxPromptAction("edit")
+        promptSelectionStart := Buffer(4, 0)
+        promptSelectionEnd := Buffer(4, 0)
+        SendMessage(0x00B0, promptSelectionStart.Ptr, promptSelectionEnd.Ptr,
+            CPBigBoxControls["setup_raw"].Hwnd) ; EM_GETSEL
+        TestAssert(CPBigBoxPromptEditorActive()
+            && NumGet(promptSelectionStart, 0, "uint") = 0
+            && NumGet(promptSelectionEnd, 0, "uint") = 0,
+            "Prompt editor opens keyboard-ready with an unselected caret")
+        promptEditStyle := DllCall("user32\GetWindowLongPtr", "ptr",
+            CPBigBoxControls["setup_raw"].Hwnd, "int", -16, "ptr")
+        TestAssert(!(promptEditStyle & 0x0800),
+            "Fullscreen prompt text remains writable rather than read-only")
         CPBigBoxControls["setup_raw"].Value := "Edited prompt {jp}"
         CPBigBoxSaveSetup()
         TestAssert(FileRead(promptPath, "UTF-8") = "Edited prompt {jp}" && FileExist(promptPath ".bak"),
@@ -2541,6 +2942,7 @@ TestBigBoxTerminologyProfiles() {
 
     FileAppend("[profile]`r`nschemaVersion=1`r`nname=Other`r`n", gameProfilesDir "\Other.ini", "UTF-8")
     CPBigBoxSetPage("profiles", false)
+    TestStartupOverlays()
     TestLayout(1920, 1080)
     TestCapture("profiles-settings-1920.png", 1920, 1080)
     TestAssert(CPBigBoxGroupedSettingsActive(), "Profiles is a complete grouped Big Box page")
@@ -2584,6 +2986,92 @@ TestBigBoxTerminologyProfiles() {
     CPBigBoxSetPage("home", false)
 }
 
+TestStartupOverlays() {
+    global iniPath, chkOpenTW, chkOpenEW, ddlStartupOverlays, CPBigBoxControls
+    global CPBigBoxManageNotice, TestExternalCalls, CPBigBoxGui
+    original := CPStartupOverlayIndex()
+    profile := GameProfilePath("Startup-test")
+    calls := TestExternalCalls
+    Loop 4 {
+        index := A_Index
+        CPSetStartupOverlays(index)
+        GameProfileSaveStartup(profile)
+        CPSetStartupOverlays(index = 4 ? 1 : 4)
+        GameProfileApplyStartup(profile)
+        TestAssert(CPStartupOverlayIndex() = index && ddlStartupOverlays.Value = index,
+            "Profile startup combination round-trips and synchronizes the desktop choice: " index)
+        TestAssert(IniRead(profile, "translator", "openOnLaunch") = chkOpenTW.Value
+            && IniRead(profile, "explainer", "openOnLaunch") = chkOpenEW.Value,
+            "Startup choices keep the existing schema-1 profile keys")
+        CPSetStartupOverlays(index)
+        plan := CPStartupOverlayPlan()
+        TestAssert(!!plan["translator"] = !!chkOpenTW.Value
+            && !!plan["explainer"] = !!chkOpenEW.Value,
+            "Cold launch uses exactly the two profile startup settings")
+        for studyMode in ["library", "reader"] {
+            plan := CPStartupOverlayPlan(studyMode, true)
+            TestAssert(!plan["translator"] && !plan["explainer"],
+                "Standalone Study launches do not open overlays")
+        }
+        CPBigBoxOpenStartupOverlayChoice()
+        CPBigBoxCommitAIChoiceIndex(index = 4 ? 1 : index + 1)
+        TestAssert(CPStartupOverlayIndex() = (index = 4 ? 1 : index + 1),
+            "Controller startup selector commits every combination")
+        TestAssert(InStr(CPBigBoxManageNotice, "Save current settings"),
+            "Startup selector explains how to save the choice per profile")
+    }
+    CPSetStartupOverlays(1)
+    TestAssert(CPStartupOverlayPlan("", true)["translator"],
+        "An explicit custom-launcher command-line override remains supported")
+    CPBigBoxOpenStartupOverlayChoice()
+    CPBigBoxCloseAIChoice()
+    TestAssert(CPStartupOverlayIndex() = 1, "Cancel leaves the startup combination unchanged")
+    CPBigBoxOpenStartupOverlayChoice()
+    CPSetStartupOverlays(3)
+    CPBigBoxCommitAIChoiceIndex(2)
+    TestAssert(CPStartupOverlayIndex() = 3 && InStr(CPBigBoxManageNotice, "Settings changed"),
+        "An outdated controller choice cannot replace newer startup settings")
+    CPSetScreenshotPreference("openOnStartup", true)
+    TestAssert(ddlStartupOverlays.Value = 4, "Original Translator checkbox synchronizes the combined choice")
+    CPSetExplanationPreference("openOnStartup", false)
+    TestAssert(ddlStartupOverlays.Value = 2, "Original Explainer checkbox synchronizes the combined choice")
+    ddlStartupOverlays.Choose(3)
+    CPStartupOverlaysChanged(ddlStartupOverlays)
+    TestAssert(!chkOpenTW.Value && chkOpenEW.Value, "Desktop combined choice updates both original checkboxes")
+    FileDelete(profile)
+    GameProfileApplyStartup(profile)
+    TestAssert(CPStartupOverlayIndex() = 3, "Missing legacy startup keys preserve the current choices")
+    IniWrite(1, profile, "translator", "openOnLaunch")
+    GameProfileApplyStartup(profile)
+    TestAssert(CPStartupOverlayIndex() = 4, "A partial old profile preserves the missing Explainer choice")
+    savedIni := iniPath
+    failed := false
+    try {
+        iniPath := A_ScriptDir ; A directory cannot be used as an INI file.
+        CPSetStartupOverlays(1)
+    } catch {
+        failed := true
+    } finally {
+        iniPath := savedIni
+    }
+    TestAssert(failed && CPStartupOverlayIndex() = 4 && ddlStartupOverlays.Value = 4,
+        "A failed settings write preserves the visible startup choices")
+    for dimension in [[1280, 720], [1920, 1080], [3840, 2160]] {
+        CPBigBoxGui.Show("Hide w" dimension[1] " h" dimension[2])
+        CPBigBoxDashboardResize(CPBigBoxGui, 0, dimension[1], dimension[2])
+        TestLayout(dimension[1], dimension[2])
+        TestCapture("profile-startup-" dimension[1] ".png", dimension[1], dimension[2])
+        TestAssert(TestControlShown(CPBigBoxControls["prof_startup"]),
+            "Startup overlays tile is visible at " dimension[1])
+    }
+    TestAssert(TestExternalCalls = calls, "Editing startup choices does not launch or stop overlays")
+    CPSetStartupOverlays(original)
+    FileDelete(profile)
+    CPBigBoxManageNotice := ""
+    CPBigBoxGui.Show("Hide w1920 h1080")
+    CPBigBoxDashboardResize(CPBigBoxGui, 0, 1920, 1080)
+}
+
 TestPaintProbe(hwnd, msg, wParam, lParam, subclassId, refData) {
     global TestPaintCounts
     if TestPaintCounts.Has(hwnd) {
@@ -2615,6 +3103,80 @@ TestControlShown(control) {
     ; Read the child's own visibility flag even when its test GUI is hidden.
     return (DllCall("user32\GetWindowLongW", "ptr", control.Hwnd, "int", -16, "uint") & 0x10000000) != 0
 }
+TestHomeHeaderContent() {
+    global CPBigBoxControls, CPBigBoxPageFocus, CPBigBoxActionNotice
+    CPBigBoxDashboardUpdateContent()
+    TestAssert(CPBigBoxControls["status_translation_model"].Text = "Gemini · gemini-test",
+        "Header shows the effective screenshot model")
+    TestAssert(CPBigBoxControls["status_explanation_model"].Text = "OpenAI · gpt-test",
+        "Header shows the effective explanation model")
+    TestAssert(CPBigBoxControls["status_audio_model"].Text = "Gemini · gemini-audio-test",
+        "Header shows the effective audio model")
+    TestAssert(CPBigBoxControls["status_translation_detail"].Text = "Prompt: default"
+        && CPBigBoxControls["status_explanation_detail"].Text = "Prompt: default"
+        && CPBigBoxControls["status_audio_detail"].Text = "Language: English",
+        "Header includes both selected prompts and the audio language")
+    for key, label in Map("translation", "Translation AI", "explanation", "Explanation AI",
+        "audioAI", "Audio AI", "overlays", "Overlay Windows", "study", "Study Library",
+        "controls", "Controller Settings")
+        TestAssert(CPBigBoxControls[key].Text = label, "Home label is concise: " key)
+    TestAssert(CPBigBoxControls["audioToggle"].Text = "Audio Translation`nOff"
+        && CPBigBoxControls["capture"].Text = "Capture…`nRegion",
+        "Home retains useful short audio and capture states")
+    TestAssert(FileExist(CPBigBoxBrandLogoPath()), "Big Box brand asset is bundled with source")
+    CPBigBoxActionNotice := "Test action feedback"
+    CPBigBoxUpdateHomeHint("audioToggle")
+    TestAssert(CPBigBoxControls["modeBody"].Text = CPBigBoxActionNotice,
+        "Contextual Home hints retain audio action feedback on its tile")
+    CPBigBoxUpdateHomeHint("translation")
+    TestAssert(InStr(CPBigBoxControls["modeBody"].Text, "Prompt: default"),
+        "Moving to an AI tile reveals its details even after audio feedback")
+    CPBigBoxActionNotice := ""
+    for key, expected in Map("translation", "Prompt: default", "explanation", "OpenAI · gpt-test",
+        "audioAI", "Language: English", "audioToggle", "off. Select to start.",
+        "study", "Active library:", "controls", "keyboard shortcuts") {
+        CPBigBoxUpdateHomeHint(key)
+        TestAssert(InStr(CPBigBoxControls["modeBody"].Text, expected), "Home contextual help: " key)
+    }
+    CPBigBoxPageFocus["home"] := "translation"
+    CPBigBoxUpdateHomeHint()
+}
+
+TestHomeHeaderLongNames(width, height) {
+    global CPBigBoxControls, imgProvider, imgModel, geminiImgModel, promptProfile
+    global explainProvider, explainPromptProfile, audioProvider, audioTargetLang
+    saved := [imgProvider, imgModel, geminiImgModel, promptProfile,
+        explainProvider, explainPromptProfile, audioProvider, audioTargetLang]
+    try {
+        imgProvider := "openai"
+        imgModel := "long-model-name-to-check-header-ellipsis-without-resizing-tiles"
+        promptProfile := "default_with_kanji_reading_en_and_additional_custom_guidance"
+        explainProvider := "gemini"
+        explainPromptProfile := "detailed_explanation_with_vocabulary_and_readings"
+        audioProvider := "openai"
+        audioTargetLang := "German"
+        CPBigBoxDashboardUpdateContent()
+        CPBigBoxUpdateHomeHint("translation")
+        TestAssert(CPBigBoxControls["status_translation_model"].Text = "OpenAI · " imgModel
+            && CPBigBoxControls["status_translation_detail"].Text = "Prompt: " promptProfile,
+            "Header refresh follows changed model and prompt without truncating stored labels")
+        TestAssert(CPBigBoxControls["status_explanation_model"].Text = "Gemini · gemini-test"
+            && CPBigBoxControls["status_explanation_detail"].Text = "Prompt: " explainPromptProfile
+            && CPBigBoxControls["status_audio_model"].Text = "OpenAI · audio-test"
+            && CPBigBoxControls["status_audio_detail"].Text = "Language: German",
+            "Header refresh follows all three providers, explanation prompt and audio language")
+        TestAssert(InStr(CPBigBoxControls["modeBody"].Text, imgModel)
+            && InStr(CPBigBoxControls["modeBody"].Text, promptProfile),
+            "Focused Home action exposes full long model and prompt names")
+        TestLayout(width, height)
+        TestCapture("home-long-names-" width ".png", width, height)
+    } finally {
+        imgProvider := saved[1], imgModel := saved[2], geminiImgModel := saved[3], promptProfile := saved[4]
+        explainProvider := saved[5], explainPromptProfile := saved[6], audioProvider := saved[7], audioTargetLang := saved[8]
+        CPBigBoxDashboardUpdateContent()
+    }
+}
+
 TestLayout(width, height) {
     global CPBigBoxControls, CPBigBoxNavigationControls, CPBigBoxCurrentPage
     for control in CPBigBoxNavigationControls {
@@ -2629,6 +3191,35 @@ TestLayout(width, height) {
     CPBigBoxControls["gameLogo"].GetPos(,, &logoW, &logoH)
     TestAssert(Abs(artW / artH - 180 / 300) < 0.02, "Tall box art keeps its aspect ratio")
     TestAssert(Abs(logoW / logoH - 400 / 90) < 0.1, "Wide logo keeps its aspect ratio")
+    CPBigBoxControls["brandLogo"].GetPos(&brandX, &brandY, &brandW, &brandH)
+    CPBigBoxControls["title"].GetPos(&headingX, &headingY,, &headingH)
+    CPBigBoxControls["panel"].GetPos(, &panelY)
+    CPBigBoxControls["artFrame"].GetPos(&artFrameX)
+    TestAssert(TestControlShown(CPBigBoxControls["brandLogo"])
+        && Abs(brandW / brandH - 434 / 500) < 0.02,
+        "Big Box brand logo is visible and keeps its aspect ratio")
+    TestAssert(brandX + brandW < headingX && brandY + brandH <= headingY + headingH,
+        "Brand logo stays beside the heading without overlap")
+    previousRowBottom := headingY + headingH
+    for key in ["translation", "explanation", "audio"] {
+        previousRight := 0
+        rowY := 0
+        for field in ["label", "model", "detail"] {
+            control := CPBigBoxControls["status_" key "_" field]
+            control.GetPos(&sx, &sy, &sw, &sh)
+            TestAssert(sx >= previousRight && sx + sw < artFrameX && sy >= previousRowBottom
+                && sy + sh < panelY && (!rowY || sy = rowY),
+                "Aligned header status remains above tiles and left of game card: " key " " field)
+            TestAssert(TestControlShown(control) && TestFontHeight(control) <= sh,
+                "Header status text is visible and fits its row: " key " " field)
+            style := DllCall("user32\GetWindowLongW", "ptr", control.Hwnd, "int", -16, "uint")
+            TestAssert((style & 0x4200) = 0x4200 && !(style & 0x10000),
+                "Header status ellipsizes long text, centers it vertically and adds no tab stop")
+            previousRight := sx + sw
+            rowY := sy
+        }
+        previousRowBottom := rowY + sh
+    }
     CPBigBoxControls["modeBody"].GetPos(, &bodyY,, &bodyH)
     TestAssert(TestTextHeight(CPBigBoxControls["modeBody"]) <= bodyH,
         "Status/help text fits vertically at " width "x" height)
@@ -2840,6 +3431,10 @@ TestCapture(name, width, height) {
 
 ; Read-only / no-op external services. The production navigation code below
 ; is copied verbatim by the test runner, including controller edge handling.
+CPDesktopSyncModel(*) => 0 ; desktop shell is exercised by test_desktop_layout.ps1
+CPDesktopSyncAudioModel(*) => 0
+CPDesktopSyncExplanationModel(*) => 0
+CPDesktopRefreshAudio(*) => 0
 SyncUnifiedWindowAppearance(*) => 0
 SyncPromptPostproc(name) => name = "literal" ? "literal" : "test"
 SetDebugMode(*) => 0

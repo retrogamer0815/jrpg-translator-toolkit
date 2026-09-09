@@ -1,5 +1,17 @@
 # Big Box control center — Stage 5C2
 
+## Profile startup overlays
+
+- Profiles → Current settings → Startup overlays exposes all four combinations
+  in the controller UI, with the same selector in desktop Profiles.
+- Save Current stores the existing `translator.openOnLaunch` and
+  `explainer.openOnLaunch` keys; schema-1 Profiles remain compatible.
+- The plugin never adds an overlay-opening argument, for either host, with or
+  without a Profile, whether Translator is already running or not.
+- Regression checks cover all combinations, profile round-trips, synchronized
+  desktop controls, controller selection/cancel/stale-state handling, 720p/1080p/4K
+  layouts, and standalone Study startup suppression. No real overlays are opened.
+
 Stage 3B replaces the prototype action grid with eight Home tiles and a shared
 page-navigation framework. The correction explicitly separates frequent-use
 Home shortcuts from the complete control-center pages. Stage 3C1 adds working
@@ -21,9 +33,10 @@ fullscreen Big Box presentation while retaining its production data and actions.
 Stage 5B applies the same presentation system to Study Reader while preserving
 its version, section, editing, context, and Anki workflows.
 Stage 5C1 ports Review for Anki and its complete recommendation setup flow.
-Stage 5C2 adds a shared controller-first table mode to the fullscreen Library
+Stage 5C2 adds controller-first table navigation to the fullscreen Library
 and Review for Anki, a fullscreen Library column-layout editor, and direct
-row actions for Anki candidates.
+row actions for Anki candidates. The separate Table mode has since been removed;
+horizontal scrolling works directly in the normal tables.
 Advanced Settings remains available as the desktop fallback.
 
 Stage 3G adds complete Terminology Overrides and Profiles pages with modern
@@ -36,9 +49,9 @@ confirmation, and return path remains controller accessible.
 
 ## Two independent navigation layers
 
-Home retains eight shortcuts: Translation AI, Explanation AI, Audio Translation
-AI, Audio Translation On/Off, Capture, Overlay Windows, Study Library, and Button
-Configuration. Audio On/Off now acts immediately; the others open their own quick
+Home retains eight shortcuts: Translation AI, Explanation AI, Audio AI,
+Audio Translation On/Off, Capture, Overlay Windows, Study Library, and Controller
+Settings. Audio On/Off now acts immediately; the others open their own quick
 views, not pages in the shoulder ring.
 Quick views show a Home breadcrumb, hide the page arrows/indicator, and use Back
 to return to their originating tile. Study Library opens as a separate managed
@@ -60,6 +73,35 @@ During implementation, Home quick views and complete pages should reuse the same
 settings operations and reusable controls. The long-term goal is complete
 functionality in the Big Box presentation, making its Advanced Settings bridge
 unnecessary. The normal desktop control center remains available independently.
+
+## Home header and tile polish
+
+The Big Box logo sits beside the upper-left heading. Three aligned, read-only
+status rows replace the generic subtitle: Translation model and prompt,
+Explanation model and prompt, and Audio model and target language. Names use
+native end ellipsis when space is limited, with full model/prompt/language names
+shown in the existing help area when the corresponding Home AI tile is focused.
+The header adds no controller or keyboard focus stops. Game artwork, platform,
+profile, the eight-tile layout, actions, and blue focus frame are unchanged.
+Home tiles now use short labels; Audio retains On/Off and Capture retains
+Region/Window. Audio action feedback remains visible on the audio-toggle tile.
+
+`assets/bigbox-logo.png` is the supplied transparent 434×500 PNG, fitted without
+stretching. It is also embedded by FileInstall in compiled builds, with a
+temporary-file fallback when there is no adjacent assets directory. Source
+distributions must retain the assets directory. The original user file is never
+required after packaging.
+
+Verify at 1280×720, 1920×1080, and 3840×2160: the logo is visible without a
+rectangular background, status rows do not overlap the game card or tile panel,
+and long names ellipsize instead of moving controls. Change providers, models,
+prompts, and audio language, then return Home and confirm all displayed values
+refresh. Navigate each Home tile, toggle audio, and return from a quick page to
+check contextual help and remembered focus. The automated harness checks these
+layouts with normal and long names, status refresh, short labels, logo aspect
+ratio, non-focusable status text, and existing navigation regressions. Its game
+artwork is synthetic and native button theming is stubbed; final dark-button
+appearance is checked in the installed application.
 
 ## Controls
 
@@ -175,28 +217,36 @@ Desktop Review for Anki and all its recommendation dialogs keep their resizable 
 compact desktop presentation. Fullscreen windows are composed while DWM-cloaked,
 so none of these transitions intentionally exposes a small intermediate window.
 
-## Shared Study table mode — Stage 5C2
+## Shared Study table navigation — Stage 5C2
 
-The fullscreen Study Library and Review for Anki now both expose **Table mode...**.
-It replaces the surrounding toolbar and context pane with one large table while
-it is active. Column widths use comfortable presentation minimums instead of
-shrinking every field into the viewport, so long Japanese sources, grammar and
-vocabulary context remain readable. The ‹/› buttons and D-pad Left/Right scroll
-the table horizontally; Up/Down continues to browse rows. Review for Anki keeps
-LB/RB available for switching between its Sentences and Vocabulary tables, and
-the table-mode heading identifies which one is active.
+Fullscreen Library filters use large themed From/To buttons instead of native
+DateTime fields. Either opens a five-part date/time picker: Left/Right chooses
+year, month, day, hour, or minute; Up/Down changes that value; A/Enter confirms;
+B/Escape cancels. The adjacent numeric buttons also work with a mouse. Changing
+month/year clamps invalid days, including leap days. Confirming chooses Custom
+range in the Filters draft, but nothing is committed until Apply filters.
+Cancel restores focus to the original From/To button. Applying validates the
+range and includes the complete final minute. Desktop native pickers are retained.
+Active column filters use a leading ▼ in their headings, including Date generated,
+so the marker remains visible when long labels are ellipsized. Clearing a filter
+removes its marker; column widths and separate sort indicators are unchanged.
+
+The fullscreen Study Library and Review for Anki use their normal tables without
+a separate Table mode action. When a table has horizontal overflow, D-pad
+Left/Right scrolls it directly. Reaching the edge keeps focus for that final
+scroll step; pressing again moves focus to a neighboring control, if present.
+Up/Down browses rows and leaves the table at the first/last row. Review for Anki
+keeps LB/RB and its visible page controls for switching Sentences and Vocabulary.
 
 A opens the selected Library explanation. In fullscreen Review for Anki, A on a
 focused sentence or vocabulary row instead opens **Row actions**, with **Add to
 Anki...** first, followed by Open in Reader, recommendation, review, and
 ignore/restore commands as applicable. This preserves the focused table row, so
 adding vocabulary no longer requires moving focus away from its selection.
-**Selected actions...** exposes the same menu from the table-mode action row;
-both paths reuse the existing commands rather than maintaining duplicate Anki or
-recommendation implementations. Desktop Review retains its direct-open behavior.
-The row counter and disabled Open action clearly cover empty tables. B/Escape or
-**Exit table mode** restores the normal fullscreen layout, focus, footer, prior
-horizontal scroll position, and Library screenshot preview.
+These row actions reuse the existing Anki and recommendation commands. Desktop
+Review retains its direct-open behavior. B/Escape returns to the Library or
+dashboard without an extra table-mode exit step. The Library toolbar and
+screenshot/context pane remain available throughout table navigation.
 
 The fullscreen Library **Columns...** action now opens a controller-oriented
 column-layout editor. The overview identifies every column's current order,
@@ -208,8 +258,8 @@ desktop/Big Box layout untouched. Saving writes through the existing Library
 column settings, so order, visibility, and width stay shared with the desktop
 Library rather than becoming presentation-only preferences.
 
-The resizable desktop Library and Review layouts do not expose or inherit the
-Big Box-only editor or table-mode presentation state.
+The resizable desktop Library and Review layouts retain their existing column
+editors and also support direct horizontal table scrolling.
 
 Page transitions reuse the existing fullscreen window. A 150 ms indicator
 animation does not slide, hide, fade, or change the opacity of that window.
@@ -841,6 +891,12 @@ result-file write errors, and the existing audio-test result format.
     moves rows, and A opens the selected entry in Study Reader. At the first/last
     real row, press Up/Down again and confirm
     focus leaves the table for the nearest control instead of becoming trapped.
+    If the normal table has horizontal overflow, Left/Right must scroll its
+    columns while retaining the selected row and table focus. A move that reaches
+    the left/right edge stays in the table; a subsequent move in that direction
+    can reach the neighboring control. Without overflow, horizontal navigation
+    leaves the table immediately where a neighboring control exists. Check this
+    in the desktop Library and both Review tables too.
     Move Left/Right across both toolbar rows and confirm focus remains in the same
     visual row; use Up/Down to change rows. At a horizontal edge, focus should
     remain on the edge control rather than jumping diagonally or wrapping. Close the Library with B
@@ -854,7 +910,12 @@ result-file write errors, and the existing audio-test result format.
     choice; B must close it without changing the active Library.
     Check a 4:3 source screenshot is large and undistorted, the table occupies
     its width instead of showing compressed columns, and controller focus on
-    Version or Original Japanese does not highlight all of their text.
+    Original Japanese does not highlight all of its text. Version names in
+    Library and Reader are display labels: controller/Tab navigation must skip
+    them, and clicking them must not show a caret. Check vertical centering with
+    Version: and the adjacent arrow/action buttons, including long names which
+    must stay on one line with an ellipsis. Version arrows must still update the
+    name and latest/manually-edited indicators correctly.
 44. Open Study Reader from the fullscreen Library. Confirm it fills the same game
     monitor without a small-window flash, uses the matching modern header/panel/
     footer, identifies the active Library, and keeps the explanation and context
@@ -871,6 +932,26 @@ result-file write errors, and the existing audio-test result format.
     Back to Library button should reveal and focus the fullscreen Library again.
     Repeat outside Big Box and confirm the desktop Reader remains resizable and
     returns to its previously saved bounds.
+    In the fullscreen Reader, Add to Anki > Choose vocabulary must list only the
+    Key vocabulary entries from the explanation version currently on screen.
+    Up/Down selects a word and updates its front/back preview; Right reaches the
+    complete entry text and Left returns to the list. A or Preview Anki card
+    opens the existing Anki preview, without adding a card until it is confirmed.
+    Confirm that the front removes attached pronunciation readings but retains
+    okurigana (for example, 抜ける（ぬける） becomes 抜ける), and the back keeps the
+    complete entry, including its reading and explanation. B returns to the same
+    Reader position/version. Empty Key vocabulary sections must explain why no
+    entries are available and disable Preview. Reopen after switching versions
+    and test quick closes; no stale selection or late dialog should appear.
+    Update the accompanying Python helpers as well as the EXE. With an older
+    helper that does not export `reader_vocabulary.tsv`, the picker must report
+    that its data file is missing and explain which helpers to update, rather
+    than claiming that no vocabulary was recognized.
+    Check the picker at 720p, 1080p and 4K. The desktop Reader must still offer
+    Add selected vocabulary and use the existing mouse-selection behavior.
+    Offline parser/version/export coverage is in `tests/test_study_vocabulary.py`;
+    the Study controller harness covers navigation, layout, preview payloads,
+    empty entries and late callbacks without contacting Anki.
 45. Open Review for Anki from the fullscreen Library. Confirm it fills the game
     monitor without a desktop-sized flash, identifies the active Library, and its
     table columns remain readable at 1280×720, 1920×1080 and 3840×2160 where
@@ -885,27 +966,209 @@ result-file write errors, and the existing audio-test result format.
     Library. Test the context menu's single-entry generate/regenerate and delete
     recommendation actions. Start batch recommendations and confirm its setup,
     Customize and prompt-preview screens all retain the fullscreen design and
-    controller navigation. During generation, verify the looping progress bar,
+    controller navigation. On all three screens, check that the blue frame
+    follows buttons, dropdowns, editors and study-focus toggles; opening a child
+    page must hide the parent's frame, and closing it must restore the parent's
+    highlight without leaving stray blue edges. Preferences use larger two-line
+    On/Off toggle tiles: A/Space toggles once, Restore defaults updates every
+    label, OK applies values, and Cancel discards changes. Check that controls
+    and guidance do not overlap at 720p, 1080p and 4K. Down from both Natural
+    phrasing and Reading comprehension must enter Additional selection guidance.
+    Edit / view prompt opens keyboard-editable selection instructions with a
+    caret, not selected text. D-pad Up/Down scrolls multiline text first and
+    leaves focus only at its boundary; keyboard arrows continue to move the caret.
+    View full prompt combines the draft with current preferences and read-only
+    output rules; Back to editing must preserve the draft. Save then OK applies
+    instructions; Cancel at either level discards that level's edits. Test reload,
+    Restore default instructions, and the `.bak` beside
+    `Settings/anki_recommendation_instructions.txt`. Custom prompts must use a
+    different recommendation cache, while defaults retain existing cached ratings.
+    The offline `tests/test_recommendation_prompt.py` covers backend assembly,
+    cache compatibility, UTF-8 transport, and generation with a mocked API.
+    Desktop preference checkboxes
+    must remain unchanged. During generation, verify the looping progress bar,
     candidate-count message and Generating button remain visible until completion.
     If JoyToKey also maps these buttons, each physical press must move or activate
     only once; ordinary keyboard and mouse input must remain unchanged. Repeat
     outside Big Box and confirm the original desktop layouts are unchanged.
-46. In fullscreen Library, enter Table mode. Confirm the context pane and normal
-    toolbars are replaced by one large table, its title and row counter are clear,
-    Up/Down browses rows, and Left/Right plus ‹/› reveal the deliberately wider
-    columns. A should open the selected explanation; Selected actions should open
-    the normal Library context menu. Exit with B and verify the original layout,
-    screenshot, focus and horizontal position return. Open Columns in the
+46. Confirm fullscreen Library and Review for Anki no longer show Table mode.
+    In the normal tables, Up/Down browses rows and Left/Right scrolls when there
+    is horizontal overflow. At the horizontal edge, another press moves to a
+    neighboring control; at the first/last row, Up/Down leaves the table.
+    In both Review pages, one Up from the first row must go directly to a
+    control above, without briefly focusing the larger hidden tab container.
+    Down from there must return directly to the visible table. Repeat with an
+    empty table; desktop Review must retain its visible, navigable tabs.
+    The Library toolbar and screenshot/context pane must remain visible.
+    A should open the selected Library explanation. Open Columns in the
     fullscreen Library. Move one column, change its width, hide an optional
     column, and cancel; confirm nothing changed. Repeat and Save layout; confirm
     order, width, and visibility update in the Library and persist after reopening
     it. Required Japanese source must not be hideable, and Reset all must remain
-    staged until Save. Repeat Table mode in Review for Anki for both Sentences and
-    Vocabulary, switching them with LB/RB. Verify A opens row actions without
-    losing the chosen candidate, Add to Anki works for vocabulary, and B exits
-    table mode before a second B returns to Library. Finally confirm neither
-    desktop Study window shows the Table mode action and desktop Review still
-    opens a candidate directly with A/Enter.
+    staged until Save. In Review for Anki, switch Sentences/Vocabulary with
+    LB/RB. Verify A opens row actions without losing the chosen candidate,
+    Add to Anki works for vocabulary, and B closes the row actions before a
+    second B returns to Library. With no popup open, B returns directly.
+    Desktop Review must still open a candidate directly with A/Enter.
+
+47. From fullscreen Reader's Choose vocabulary and Review for Anki's row actions,
+    open an Anki card preview. It must fill the screen, use the shared dark
+    presentation and blue focus frame, and keep the current library visible in
+    its header. Check vocabulary and full-explanation cards at 720p, 1080p and
+    4K. Card fields remain keyboard-editable without initial select-all; D-pad
+    Up/Down scrolls long text before leaving at its boundary. A opens the deck
+    dropdown; B closes that dropdown first, not the entire preview. The large
+    Include screenshot On/Off tile must toggle once per press, retain the existing saved
+    preference, and be disabled when this version has no screenshot. Preview
+    images must preserve their aspect ratio. Generate example remains available
+    only for vocabulary cards.
+    Add to Anki must open a separate fullscreen confirmation, initially focused
+    on Back to preview, showing the actual destination and screenshot setting.
+    B/Back must return to the unchanged draft without sending anything. Repeated
+    Add presses must not create multiple pending submissions. Only explicit
+    confirmation may invoke the existing duplicate-check/add bridge. Completion
+    and error messages must keep the fullscreen presentation. Confirmation and
+    completion information uses larger, borderless plain text, not an editable
+    field or an extra focus stop. Long error details must remain readable using
+    the borderless, controller-scrollable overflow view. Cancel/close must
+    release focus overlays, cancel queued work, and re-enable the Reader. Repeat
+    in desktop mode to verify the original windowed preview and confirmation.
+    The automated harness uses synthetic cards and a mocked Anki bridge; it
+    never creates real Anki notes or modifies the user's library/settings.
+
+### Current chapter workflow
+
+Open **Current chapter...** from the Library. Save, Clear current, Cancel,
+Escape and controller B should return focus to that same Library button, with
+the blue frame in fullscreen mode, rather than the Library selector.
+The launch button stays enabled and undimmed; the selector must never receive
+even transient focus during opening or closing. Repeated activation reuses
+the existing chapter page instead of opening a duplicate. The harness records
+selector focus events through both handoffs, not just the final focus target.
+
+**Remove saved...** and **Clear history...** use fullscreen confirmations in
+Big Box, with readable borderless information, blue focus frames, explicit
+action labels, and Cancel selected initially. B cancels only the confirmation
+and restores its originating chapter-page button. Controller polling must
+remain responsive while the confirmation is open. Desktop mode retains its
+windowed themed messages. Removing the active remembered chapter clears its
+automatic assignment; clearing history alone preserves the active assignment.
+Neither operation changes existing explanations.
+
+The automated harness covers these paths against temporary chapter settings,
+including confirm/cancel, focus restoration, and 720p/1080p/4K message layout.
+
+## Fullscreen library management
+
+Open **Libraries...** from the fullscreen Study Library. The manager and its
+New, Rename, Archived libraries, and Restore pages use the same fullscreen
+shell and blue focus frame. Archive confirmation and name-validation/errors
+use readable, borderless fullscreen messages; desktop layouts remain windowed.
+
+Use Up/Down to select a library, then A/Enter (or Right) to reach the actions
+beside the table without changing the selected row. B returns one page at a
+time. The originating action stays enabled during child-page transitions, and
+its focus is restored before the outgoing page is removed. Repeated opens
+reuse the existing child page. Name entry requires a keyboard and opens with
+a caret, not a full-text selection. Open Folder remains a Windows Explorer
+action.
+
+The isolated harness verifies Default-library protection, selection-preserving
+controller actions, create/rename/archive/restore against temporary folders,
+safe cancellation and nested focus return, validation messages, desktop
+fallback, and proportional table/action layout at 720p, 1080p and 4K. Synthetic
+window captures verify layout; the harness stubs the native dark-theme painter.
+No real Study Library or Anki data is touched.
+
+Fullscreen controller navigation also clears native button hover left by a
+stationary hidden mouse cursor, so **Current chapter...** keeps the same gray
+as its neighbors when it is not selected. Desktop mouse hover is unchanged.
+
+## Library opening focus and screenshot controls
+
+Opening or reopening the fullscreen Study Library starts on the Library
+dropdown. The selected explanation still populates the detail pane, but the
+table must not receive transient focus or a blue frame during startup. Desktop
+mode keeps its initial table focus for mouse double-click behavior. Returns
+from child pages continue to restore their originating control.
+
+The fullscreen Library's **Open full image** action fits on one line. Its
+neighboring arrows are narrower and the counter uses a compact `1 / 12` format,
+centered on the same row. Desktop and Reader screenshot counters are unchanged.
+The isolated harness checks fresh/reused opening focus events, production
+layout and actual font measurements at 720p, 1080p and 4K, with synthetic window
+captures for geometry review.
+
+## Control center background opacity
+
+Home > Overlay Windows > Main window > Control center background opacity opens
+a live-preview slider. Left/Right changes it in 5% steps from 50% to 100%.
+The default is 100% (solid). Save persists only
+`cfg_control.bigBoxBackgroundOpacity`; B/Cancel restores the saved value.
+Desktop `cfg_control.opacity` and Translator/Explainer opacity are independent.
+
+Below 100%, the dashboard uses an opaque, color-keyed foreground over a separate
+alpha-blended background. Text, native buttons, edit fields, and blue focus
+frames are not uniformly faded. The background mirrors the dashboard's panel
+geometry, stays immediately beneath it, never activates, and consumes mouse
+clicks rather than passing them into the game. Hiding for Study, capture, or
+Return to Game removes both surfaces. Study windows and desktop dialogs retain
+their solid backgrounds. If composition fails, the menu falls back to solid.
+
+The isolated harness checks Save/Cancel, clamping, submenu inheritance, native
+alpha flags, non-activating/click-blocking styles, resize alignment, hide/reopen,
+and cleanup. Test 720p/1080p/4K, light/dark themes, and the real game at 85% and
+100%, including capture and Study round-trips. Synthetic WM_PRINT captures show
+the foreground mask; they are not screenshots of the user's game or desktop.
+
+## Control center Always on top
+
+The Main window page also has an **Always on top** toggle (On by default).
+It saves immediately to `cfg_control.bigBoxAlwaysOnTop`, independently of the
+desktop's `cfg_control.winTop`. Off demotes both the dashboard and its translucent
+background so other apps can cover them. Refreshes do not raise or activate an
+unchanged menu. Returning from a native file picker restores the saved preference
+instead of unconditionally forcing topmost. Study and translation overlays keep
+their existing window behavior.
+
+The isolated harness checks both native topmost flags, ordinary-window z-order,
+refresh without foreground stealing, hidden/reopened menus, native-dialog
+demotion/return, persistence failure, desktop isolation, and layout at 720p,
+1080p and 4K. Manually check Alt+Tab and the Snipping Tool with opacity at both
+100% and 85%, then turn Always on top back On to verify the original behavior.
+
+## Vocabulary card review navigation
+
+In the fullscreen card review, D-pad Down from the Front field reaches
+**Generate example...**, then Down reaches the Back field. Up follows the
+same path in reverse. Long card text scrolls before leaving its field at the
+boundary. Disabled example actions are skipped; desktop navigation is unchanged.
+The isolated harness checks these routes, the blue focus frame, and A activation
+at 720p, 1080p and 4K without sending an AI request or adding a real Anki card.
+
+## Screenshot Translation help text
+
+Each Screenshot Translation tile has its own second help line, describing the
+current model/prompt management, formatting, capture, or startup behavior.
+The obsolete migration notice is no longer shown on this page. Save and error
+messages still take priority. The harness checks all nine tile descriptions for
+distinct text and layout fit at 720p, 1080p and 4K.
+
+## Audio Translation help and input-check status
+
+Each Audio Translation tile now has a distinct second help line for its provider,
+model, output language, input selection, refresh, test, or live-session action.
+Save/error feedback retains priority over this help. A labeled **Audio input check**
+readout sits below Refresh devices/Test audio, separate from the live-session
+switch, with a muted heading and readable result text. The idle message explains
+how to run a check. The readout adds no controller focus stop and is hidden in
+pickers and on other pages; desktop diagnostic wording is unchanged.
+
+The isolated harness checks distinct help, idle/progress/success/error messages,
+heading/body alignment, visibility, focus preservation and text fit at 720p,
+1080p and 4K. The existing hidden-helper tests still cover asynchronous refresh,
+successful/silent/failed input checks, timeouts and cleanup without real audio
+capture or AI calls.
 
 ## Updated roadmap
 
@@ -927,7 +1190,7 @@ result-file write errors, and the existing audio-test result format.
 | 5A (implemented) | Modern fullscreen Big Box Study Library presentation using the existing Library data and actions, while preserving the desktop window. |
 | 5B (implemented) | Modern fullscreen Big Box Study Reader presentation using the existing Reader workflows, with responsive context, explicit Library return, no first-frame flash, and protected desktop bounds. |
 | 5C1 (implemented) | Fullscreen Review for Anki, responsive sentence/vocabulary tables, Reader return routing, and fullscreen batch-recommendation confirmation, customization and prompt preview. |
-| 5C2 (implemented) | Shared controller-first table mode, fullscreen Library order/width/visibility editor, and direct Review row actions with Add to Anki first. |
+| 5C2 (implemented) | Direct controller table scrolling, fullscreen Library order/width/visibility editor, and Review row actions with Add to Anki first; separate Table mode removed. |
 | 5C3 | Remaining Big Box Study transitions and modern owned-dialog workflows outside recommendation setup. |
 | 5D | Multi-resolution Study presentation testing and polish. |
 | 6 | Full functionality audit and integration testing; retire the Big Box Advanced Settings bridge only once nothing depends on it. |

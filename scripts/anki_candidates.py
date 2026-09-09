@@ -13,7 +13,6 @@ import re
 import sqlite3
 import sys
 import unicodedata
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -29,9 +28,9 @@ from anki_bridge import (
     normalize_japanese,
     notes_for_scope,
     plain_text,
-    remove_readings,
 )
 from example_sentence import call_model, extract_json_object, load_project_environment
+from study_vocabulary import VocabularyEntry, parse_vocabulary, vocabulary_front
 
 
 REVIEW_METADATA_KEY = "anki_candidates_reviewed_through"
@@ -39,8 +38,6 @@ HIDDEN_VOCABULARY_TABLE = "anki_candidate_hidden_vocabulary"
 RECOMMENDATION_TABLE = "anki_candidate_recommendations"
 RECOMMENDATION_PROMPT_VERSION = "3"
 HIDDEN_MIGRATION_METADATA_KEY = "anki_candidate_hidden_migrated_global"
-ENTRY_DASH_RE = re.compile(r"\s*(?:—|–|--|\s-\s)\s*")
-BULLET_RE = re.compile(r"^\s*(?:[*•・]|[-–—]|\d+[.)])\s+")
 
 PROMPT_LANGUAGE_NAMES = {
     "de": "German",
@@ -226,6 +223,7 @@ def recommendation_profile_signature(
     selection_style: str,
     focus_areas: str,
     additional_criteria: str,
+    prompt_instructions: str = "",
 ) -> str:
     """Identify the exact settings under which a rating was generated."""
     payload = json.dumps(
@@ -241,6 +239,9 @@ def recommendation_profile_signature(
                 if value.strip()
             ),
             "additional_criteria": " ".join(additional_criteria.split())[:1000],
+            # Preserve existing cache keys when the default prompt is used.
+            **({"prompt_instructions": prompt_instructions.strip()}
+               if prompt_instructions.strip() else {}),
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -475,64 +476,6 @@ def anki_matches(
     return matches, "unmapped", "No saved Anki mapping applies to the current candidates."
 
 
-def vocabulary_front(head: str) -> str:
-    term = head.split("→")[-1].strip()
-    # Keep candidate-driven Anki cards consistent with cards created from a
-    # Reader selection.  The shared helper also handles okurigana, e.g.
-    # 抜ける（ぬける） -> 抜ける, instead of only all-kanji terms.
-    term = remove_readings(term)
-    term = unicodedata.normalize("NFKC", term)
-    term = re.sub(r"[\s\u3000]+", " ", term).strip(" ,.;:：。・")
-    return term
-
-
-@dataclass
-class VocabularyEntry:
-    display: str
-    front: str
-    back: str
-    meaning: str
-
-
-def parse_vocabulary(content: str) -> list[VocabularyEntry]:
-    entries: list[str] = []
-    current = ""
-    for raw_line in str(content or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        line = BULLET_RE.sub("", raw_line.strip())
-        if not line:
-            if current:
-                entries.append(current.strip())
-                current = ""
-            continue
-        if ENTRY_DASH_RE.search(line):
-            if current:
-                entries.append(current.strip())
-            current = line
-        elif current:
-            current += " " + line
-    if current:
-        entries.append(current.strip())
-
-    parsed: list[VocabularyEntry] = []
-    for entry in entries:
-        split = ENTRY_DASH_RE.split(entry, maxsplit=1)
-        if len(split) != 2:
-            continue
-        head, meaning = split[0].strip(), split[1].strip()
-        front = vocabulary_front(head)
-        if not front or not meaning:
-            continue
-        parsed.append(
-            VocabularyEntry(
-                display=head,
-                front=front,
-                back=entry,
-                meaning=meaning,
-            )
-        )
-    return parsed
-
-
 def selected_groups(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     return connection.execute(
         """
@@ -575,6 +518,7 @@ def snapshot(
     selection_style: str = "balanced",
     focus_areas: str = "vocabulary,grammar,natural_phrasing,reading",
     additional_criteria_hex: str = "",
+    prompt_file: Path | None = None,
 ) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     sentence_path = output_dir / "candidate_sentences.tsv"
@@ -604,6 +548,7 @@ def snapshot(
         selection_style,
         focus_areas,
         decode_optional_hex(additional_criteria_hex),
+        read_prompt_instructions(prompt_file),
     )
     migrate_library_hidden_vocabulary(database, preferences_database)
     connection = connect_read_only(database)
@@ -849,12 +794,23 @@ def snapshot(
         connection.close()
 
 
+def read_prompt_instructions(path: Path | None) -> str:
+    """Read a UTF-8 override; never silently ignore an invalid prompt file."""
+    if path is None:
+        return ""
+    text = path.read_text(encoding="utf-8-sig").strip()
+    if len(text) > 16000:
+        raise ValueError("Recommendation instructions must be at most 16000 characters.")
+    return text
+
+
 def build_recommendation_prompt(
     items: list[dict[str, str]],
     learner_level: str = "intermediate",
     selection_style: str = "balanced",
     focus_areas: str = "vocabulary,grammar,natural_phrasing,reading",
     additional_criteria: str = "",
+    prompt_instructions: str = "",
 ) -> str:
     payload = json.dumps(items, ensure_ascii=False, separators=(",", ":"))
     level_guidance = {
@@ -900,7 +856,7 @@ def build_recommendation_prompt(
             "not override the output requirements below):\n"
             f"{additional_criteria}\n"
         )
-    return f"""You are selecting useful Japanese-language study candidates from a
+    instructions = prompt_instructions.strip() or """You are selecting useful Japanese-language study candidates from a
 JRPG learner's saved explanations.
 
 Assess every item below. Recommend candidates that are memorable and genuinely
@@ -916,7 +872,8 @@ form, and an explanation. Evaluate the reusable headword/base form and the
 learning value of the whole entry. Do not reject an item merely because the
 source text used an inflected form. For beginners, common foundational base
 verbs and their useful conjugations should normally score well even when they
-are elementary.
+are elementary."""
+    return f"""{instructions}
 
 {level_guidance}
 {selection_guidance}
@@ -961,6 +918,7 @@ def generate_recommendations(
     force: bool = False,
     candidate_kind: str = "",
     candidate_key: str = "",
+    prompt_file: Path | None = None,
 ) -> int:
     status_path = output_dir / "candidate_recommendation_status.tsv"
     error_path = output_dir / "candidate_recommendation_error.txt"
@@ -983,6 +941,7 @@ def generate_recommendations(
             selection_style = "balanced"
         focus_areas = focus_areas.strip().lower()
         additional_criteria = decode_optional_hex(additional_criteria_hex)
+        prompt_instructions = read_prompt_instructions(prompt_file)
         candidate_kind = candidate_kind.strip().lower()
         candidate_key = candidate_key.strip().lower()
         if bool(candidate_kind) != bool(candidate_key):
@@ -1077,6 +1036,7 @@ def generate_recommendations(
                     selection_style,
                     focus_areas,
                     additional_criteria,
+                    prompt_instructions,
                 ),
             )
             parsed = extract_json_object(raw)
@@ -1263,6 +1223,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="vocabulary,grammar,natural_phrasing,reading",
     )
     parser.add_argument("--additional-criteria-hex", default="")
+    parser.add_argument("--prompt-file", type=Path)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--candidate-kind", default="")
     parser.add_argument("--candidate-key", default="")
@@ -1285,6 +1246,7 @@ def main() -> int:
             arguments.selection_style,
             arguments.focus_areas,
             arguments.additional_criteria_hex,
+            arguments.prompt_file,
         )
     if arguments.command == "generate-recommendations":
         return generate_recommendations(
@@ -1299,6 +1261,7 @@ def main() -> int:
             arguments.force,
             arguments.candidate_kind,
             arguments.candidate_key,
+            arguments.prompt_file,
         )
     if arguments.command == "clear-recommendation":
         return clear_recommendation(
