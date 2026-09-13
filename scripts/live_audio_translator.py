@@ -263,6 +263,7 @@ OVERLAY_DIR = os.path.join(TEMP_DIR, "JRPG_Overlay")
 AUDIO_TXT = os.path.join(OVERLAY_DIR, "audio.txt")
 LOG_TXT = os.path.join(OVERLAY_DIR, "audio_log.txt")
 ERR_TXT = os.path.join(OVERLAY_DIR, "audio_error.txt")
+AUDIO_SESSION_FILE = os.environ.get("AUDIO_SESSION_FILE", "").strip()
 os.makedirs(OVERLAY_DIR, exist_ok=True)
 
 AUDIO_PROVIDER = (os.environ.get("AUDIO_PROVIDER", "openai") or "openai").strip().lower()
@@ -535,6 +536,31 @@ def run_speaker_list():
     return exit_code
 
 
+def claim_audio_session():
+    """Publish the PID of the process that owns the live audio session."""
+    if not AUDIO_SESSION_FILE:
+        return
+    try:
+        Path(AUDIO_SESSION_FILE).parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(AUDIO_SESSION_FILE, str(os.getpid()))
+    except Exception:
+        # Session tracking improves control-panel recovery but must never keep
+        # audio translation from starting when the temp folder is unavailable.
+        pass
+
+
+def release_audio_session():
+    """Remove only this process's marker, preserving a newer replacement."""
+    if not AUDIO_SESSION_FILE:
+        return
+    try:
+        marker = Path(AUDIO_SESSION_FILE)
+        if marker.read_text(encoding="utf-8-sig").strip() == str(os.getpid()):
+            marker.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def trim_display(text):
     text = text.strip()
     if len(text) <= MAX_DISPLAY_CHARS:
@@ -791,6 +817,7 @@ async def main_async():
 
 
 def main():
+    claim_audio_session()
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:
@@ -820,6 +847,8 @@ def main():
         print(detail, file=sys.stderr)
         time.sleep(0.5)
         raise
+    finally:
+        release_audio_session()
 
 
 if __name__ == "__main__":

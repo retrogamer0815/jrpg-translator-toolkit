@@ -46,8 +46,6 @@ global ddlAProv := TestCombo(["Gemini", "OpenAI"]), ddlTR := TestCombo(model_ope
 global ddlA_GM := TestCombo(model_gemini_audio), ddlAudioTarget := TestCombo(["English", "German", "French"])
 global btnIMG_Add := ui.AddButton(), btnIMG_Del := ui.AddButton()
 global btnIMG_GM_Add := ui.AddButton(), btnIMG_GM_Del := ui.AddButton()
-global btnEOpenAI_Add := ui.AddButton(), btnEOpenAI_Del := ui.AddButton()
-global btnEGem_Add := ui.AddButton(), btnEGem_Del := ui.AddButton()
 global btnTR_Add := ui.AddButton(), btnTR_Del := ui.AddButton()
 global btnA_GM_Add := ui.AddButton(), btnA_GM_Del := ui.AddButton()
 global slTrans := ui.AddSlider("Range0-255", 255), ddlFont := TestCombo(["Segoe UI"])
@@ -90,6 +88,7 @@ global TestAudioApiConfigured := true, TestAudioRecoveryScans := 0
 global TestAudioBusyProbe := Map("active", false, "samples", [])
 global TestToasts := []
 global gPidAudio := 0, gJustStoppedUntil := 0, gLastAction := ""
+global gAudioSessionFile := A_ScriptDir "\audio-session.pid"
 global speakerName := "[Windows Default]", gAudioInputJob := Map("active", false), gAudioInputStatus := "Not tested."
 global TestLiveAudioRunning := false
 global pythonExe := "python.exe", audioScript := "audio.py", overlayAhk := "overlay.ahk", imgScript := "image.py"
@@ -117,13 +116,13 @@ global hotkeyActions := [
     "screenshot_translation", "launch_explainer_request", "recapture_region", "start_stop_audio"
 ]
 global hotkeyLabels := Map(
-    "screenshot_translate", "Screenshot + Translate",
+    "screenshot_translate", "Capture + Translate",
     "explain_last_translation", "Explain last translation",
     "hide_show_translator", "Show/Hide Translator",
     "hide_show_explainer", "Show/Hide Explainer",
     "hide_show_control_panel", "Show/Hide Control Panel",
-    "take_screenshot", "Take Screenshot",
-    "screenshot_translation", "Translate Screenshots",
+    "take_screenshot", "Make Capture",
+    "screenshot_translation", "Translate Captures",
     "launch_explainer_request", "Launch Explainer + Req.",
     "recapture_region", "Recapture Region",
     "start_stop_audio", "Audio Translation On/Off"
@@ -313,7 +312,7 @@ try {
     CPControllerResetNavigation()
     CPControllerHandleNavigation(TestSnapshot(), hwnd)
     CPControllerHandleNavigation(TestSnapshot("X:RB"), hwnd)
-    TestAssert(CPBigBoxCurrentPage = "screenshot", "RB opens full Screenshot Translation, not quick AI settings")
+    TestAssert(CPBigBoxCurrentPage = "screenshot", "RB opens full Game Text Translation, not quick AI settings")
     Loop 12
         CPControllerHandleNavigation(TestSnapshot("X:RB"), hwnd)
     TestAssert(CPBigBoxCurrentPage = "screenshot", "Held RB does not skip pages")
@@ -399,6 +398,7 @@ try {
     TestBigBoxOverlays()
     TestBigBoxBackgroundOpacity()
     TestBigBoxAlwaysOnTop()
+    TestNativePickerOwnership()
     TestBigBoxControls()
     TestBigBoxTerminologyProfiles()
     TestBigBoxModelManagement()
@@ -860,7 +860,7 @@ TestScreenshotHintDetails(width) {
             TestAssert(TestTextHeight(CPBigBoxControls["modeBody"]) <= hintHeight,
                 "Both screenshot help lines fit: " hintKey " at " width)
         }
-        CPBigBoxAINotice := "Saved · Clear screenshots on startup: On"
+        CPBigBoxAINotice := "Saved · Clear captures on startup: On"
         CPBigBoxUpdateSettingsHint("shot_clearOnStartup")
         TestAssert(InStr(CPBigBoxControls["modeBody"].Text, "`n" CPBigBoxAINotice),
             "Screenshot save feedback still takes priority over the second help line")
@@ -1337,7 +1337,7 @@ TestBigBoxControls() {
     TestAssert(CPBigBoxAIListActive() && CPBigBoxAIChoice["options"].Length = 10,
         "Ten controller actions use the bounded scrolling list")
     TestAssert(InStr(CPBigBoxControls["modeTitle"].Text, "Choose an action")
-        && InStr(CPBigBoxControls["listChoice3"].Text, "Screenshot + Translate"),
+        && InStr(CPBigBoxControls["listChoice3"].Text, "Capture + Translate"),
         "Controller list shows friendly action and binding labels")
     TestAssert(FileRead(iniPath) = before, "Browsing controller actions never writes settings")
     TestLayout(1920, 1080)
@@ -1559,7 +1559,7 @@ TestBigBoxStage3D() {
     CPBigBoxSetPage("screenshot", false)
     CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls["capture_settings"]))
     CPBigBoxOpenCaptureSettings()
-    TestAssert(CPBigBoxCaptureParent = "screenshot" && InStr(CPBigBoxControls["pageHint"].Text, "Screenshot Translation"),
+    TestAssert(CPBigBoxCaptureParent = "screenshot" && InStr(CPBigBoxControls["pageHint"].Text, "Game Text Translation"),
         "Full Screenshot page shares Capture with its own return breadcrumb")
     CPBigBoxOpenCaptureLimit()
     CPBigBoxAdjustCaptureLimit(-20000)
@@ -1751,10 +1751,10 @@ TestBigBoxAudioStartup() {
         EnvSet("JRPG_TEST_AUDIO_RUNTIME_MODE", "wait")
         TestAssert(StartAudioCore(true) && gPidAudio && ProcessExist(gPidAudio), "Production audio start receives the exact child PID")
         childHandle := DllCall("kernel32\OpenProcess", "uint", 0x100001, "int", false, "uint", gPidAudio, "ptr")
-        TestAssert(TestToasts.Length = toastsBefore + 1 && TestToasts[-1] = "Audio Translation On"
-            && InStr(CPBigBoxActionNotice, "is on"), "Big Box audio start shows the shared corner toast as well as inline feedback")
-        TestAssert(StartAudioCore(true) && TestToasts.Length = toastsBefore + 1,
-            "Already-running audio does not repeat the start notification")
+        TestAssert(TestToasts.Length = toastsBefore && InStr(CPBigBoxActionNotice, "is on"),
+            "Big Box audio start reports success inside the dashboard without a corner toast")
+        TestAssert(StartAudioCore(true) && TestToasts.Length = toastsBefore,
+            "Already-running audio keeps feedback inside the dashboard")
         TestAssert(childHandle && TestAudioRecoveryScans = 0 && FileRead(runtimeLog, "UTF-8") = "started`n",
             "Successful Big Box start does not scan or launch a second process")
         DllCall("kernel32\TerminateProcess", "ptr", childHandle, "uint", 0)
@@ -1762,11 +1762,16 @@ TestBigBoxAudioStartup() {
         DllCall("kernel32\CloseHandle", "ptr", childHandle)
         childHandle := 0, gPidAudio := 0
         EnvSet("JRPG_TEST_AUDIO_RUNTIME_MODE", "exit")
-        TestAssert(!StartAudioCore(true) && InStr(CPBigBoxActionNotice, "exited during startup"),
-            "An early audio-helper exit produces an inline failure")
-        TestAssert(TestToasts.Length = toastsBefore + 1, "Early audio-helper failure does not show an On notification")
+        earlyStartResult := StartAudioCore(true)
+        TestAssert(!earlyStartResult && InStr(CPBigBoxActionNotice, "exited during startup"),
+            "An early audio-helper exit produces an inline failure (result=" earlyStartResult
+                ", pid=" gPidAudio ", notice=" CPBigBoxActionNotice ")")
+        TestAssert(TestToasts.Length = toastsBefore, "Early audio-helper failure does not show an On notification")
         TestAssert(FileRead(runtimeLog, "UTF-8") = "started`nstarted`n" && TestAudioRecoveryScans = 0,
             "Failed Big Box start is not retried synchronously or through process scans")
+        TestAssert(!StartAudioCore(false), "Desktop audio startup reports an early helper exit")
+        TestAssert(FileRead(runtimeLog, "UTF-8") = "started`nstarted`nstarted`n" && TestAudioRecoveryScans = 1,
+            "Failed desktop startup performs one recovery scan but never launches a blocking retry")
     } finally {
         if childHandle {
             DllCall("kernel32\TerminateProcess", "ptr", childHandle, "uint", 0)
@@ -2209,6 +2214,39 @@ TestBigBoxAlwaysOnTop() {
         CPBigBoxGui.Hide()
         CPBigBoxSetPage("home", false)
     }
+}
+
+TestBigBoxNativePickerBackend(spec) {
+    global CPBigBoxModalDepth, CPBigBoxGui, TestBigBoxPickerSpec
+    TestBigBoxPickerSpec := spec
+    TestAssert(CPBigBoxModalDepth = 1 && !CPBigBoxEffectiveAlwaysOnTop(),
+        "Owned native picker temporarily yields fullscreen topmost status")
+    DllCall("user32\EnableWindow", "ptr", CPBigBoxGui.Hwnd, "int", 0)
+    return "C:\picked\python.exe"
+}
+
+TestNativePickerOwnership() {
+    global CPBigBoxGui, CPBigBoxModalDepth, TestBigBoxPickerSpec := 0
+    CPBigBoxGui.Show("Hide w1920 h1080")
+    CPBigBoxModalDepth := 0
+    selected := CPNativeFileSelect(
+        CPBigBoxGui.Hwnd, 3, "C:\configured\python.exe",
+        "Select Python interpreter", "Programs (*.exe)",
+        TestBigBoxNativePickerBackend
+    )
+    TestAssert(selected = "C:\picked\python.exe"
+        && IsObject(TestBigBoxPickerSpec)
+        && TestBigBoxPickerSpec["owner"] = CPBigBoxGui.Hwnd
+        && TestBigBoxPickerSpec["presentation"] = "fullscreen"
+        && TestBigBoxPickerSpec["options"] = 3
+        && TestBigBoxPickerSpec["root"] = "C:\configured\python.exe"
+        && TestBigBoxPickerSpec["prompt"] = "Select Python interpreter"
+        && TestBigBoxPickerSpec["filter"] = "Programs (*.exe)",
+        "Fullscreen native picker preserves the complete selection request")
+    TestAssert(CPBigBoxModalDepth = 0
+        && DllCall("user32\IsWindowEnabled", "ptr", CPBigBoxGui.Hwnd),
+        "Fullscreen native picker restores modal depth and owner state")
+    CPBigBoxGui.Hide()
 }
 
 TestWindowIsAbove(upper, lower) {
@@ -2855,7 +2893,7 @@ TestBigBoxTerminologyProfiles() {
         && InStr(CPBigBoxControls["modeBody"].Text, "leaves the other unchanged"),
         "Terminology profile tools explain that glossary types are independent")
     CPBigBoxUpdateSettingsHint("term_enabled")
-    TestAssert(InStr(CPBigBoxControls["modeBody"].Text, "next screenshot translation"),
+    TestAssert(InStr(CPBigBoxControls["modeBody"].Text, "next capture translation"),
         "Terminology toggle focus explains when changes take effect")
     CPBigBoxToggleTerminology()
     TestAssert(useTerminologyOverrides && chkUseTerminologyOverrides.Value
@@ -3435,6 +3473,9 @@ CPDesktopSyncModel(*) => 0 ; desktop shell is exercised by test_desktop_layout.p
 CPDesktopSyncAudioModel(*) => 0
 CPDesktopSyncExplanationModel(*) => 0
 CPDesktopRefreshAudio(*) => 0
+CPDialogDefaultOwner(*) => 0
+CPDialogPresentation(*) => "fullscreen"
+CPAdaptiveOwnedMessage(*) => "OK"
 SyncUnifiedWindowAppearance(*) => 0
 SyncPromptPostproc(name) => name = "literal" ? "literal" : "test"
 SetDebugMode(*) => 0
@@ -3464,7 +3505,9 @@ CPModelCatalogJobCancel(*) {
     TestCatalogCallback := 0
 }
 AudioIsRunning(*) {
-    global TestLiveAudioRunning
+    global TestLiveAudioRunning, gPidAudio
+    if gPidAudio && ProcessExist(gPidAudio)
+        return true
     return TestLiveAudioRunning
 }
 CPStartBigBoxAudio() {
@@ -3642,6 +3685,7 @@ CPControllerSendDialogKey(*) => 0
 CPNavMove(*) => 0
 CPNavSwitchTab(*) => 0
 CPNavActivate(*) => 0
+CPNavCancel(*) => 0
 CPNavCancelCurrent(*) => 0
 SavePanelBounds(*) => 0
 DbgCP(*) => 0

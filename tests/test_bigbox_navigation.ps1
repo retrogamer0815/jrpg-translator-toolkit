@@ -31,7 +31,7 @@ $stage5Requirements = [ordered]@{
     'fullscreen Review layout' = 'StudyCandidatesResizeBigBox(scState, scGui, scWidth, scHeight)'
     'visible Review page navigation' = 'StudyCandidatesSwitchBigBoxPage.Bind(scState, -1)'
     'fullscreen recommendation workflow' = 'StudyCandidatesRecommendationBigBoxShell('
-    'Reader returns to fullscreen Review' = 'CPStudyReaderState["returnToCandidates"] := scState'
+    'Review-owned Add to Anki workflow' = 'scAnkiState := StudyCandidatesAnkiState(scState, scCandidate)'
     'direct controller column browsing' = 'StudyControllerScrollTable(studyFocused, direction,'
     'fullscreen Library column editor' = 'return StudyLibraryOpenBigBoxColumns(slState)'
     'column editor working-copy save' = 'StudyLibraryBigBoxColumnsPersist(slEditor)'
@@ -47,6 +47,13 @@ foreach ($requirement in $stage5Requirements.GetEnumerator()) {
     if (!$sourceNormalized.Contains($requirement.Value)) {
         throw "Stage 5 source requirement missing: $($requirement.Key)"
     }
+}
+$candidateAddSource = [regex]::Match(
+    $sourceNormalized, '(?ms)^StudyCandidatesAddSelected\([^\n]*\{.*?^}'
+).Value
+if (!$candidateAddSource -or $candidateAddSource.Contains('OpenStudyReader(') -or
+    !$candidateAddSource.Contains('StudyCandidatesAnkiState(scState, scCandidate)')) {
+    throw 'Review for Anki must own Add to Anki directly without opening the Study Reader.'
 }
 if ($sourceNormalized -match 'StudyBigBoxTableMode|Table mode\.\.\.') {
     throw 'Removed fullscreen Table mode controls or routing were reintroduced.'
@@ -95,7 +102,8 @@ $functions = @('CPPalette', 'CPSetWindowCloaked', 'StudyLibraryImageDimensions',
     'RefreshSpeakerList', 'SetAudioTestStatus', 'TestAudioInput', 'AudioInputJobBusy',
     'AudioInputJobControls', 'AudioInputJobStart', 'AudioInputJobDispose', 'AudioInputJobCancel',
     'AudioInputJobPoll', 'AudioInputApplyTestResult', 'AudioInputApplyDeviceResult',
-    'CPSetCaptureMaxKB', 'CPMaxPngAdjustSyncValue', 'StartAudioCore', 'CPSuspendBigBoxForCapture',
+    'CPSetCaptureMaxKB', 'CPMaxPngAdjustSyncValue', 'AudioSessionPid', 'AudioSessionClear',
+    'StartAudioCore', 'CPSuspendBigBoxForCapture',
     'CPColorHexToHSV', 'CPColorHSVToHex', 'StartOverlayAdjustmentCore', 'CPFinishOverlayAdjustment',
     'GetWindowDPI', 'CPColorRef', 'CPColorGradientWriteVertex', 'CPColorGradientFillRect',
     'CPDrawControllerColorGradient', 'CPControllerColorGradientCustomDraw',
@@ -114,6 +122,7 @@ $functions = @('CPPalette', 'CPSetWindowCloaked', 'StudyLibraryImageDimensions',
     'SetComboToExistingItem', 'RefreshModelCombos', 'ModelAlreadyAdded',
     'ModelCatalogParseOutput', 'CPNormalizeApiSecret', 'CPDotEnvValue',
     'UpdatePathsDirtyState',
+    'CPNativePickerOwner', 'CPNativePicker', 'CPNativeFileSelect', 'CPNativeDirSelect',
     'ListPromptProfiles', 'RefreshPromptProfilesList',
     'ListExplainPromptProfiles', 'RefreshExplainPromptProfilesList',
     'AboutVersionInfo')
@@ -155,7 +164,7 @@ $studyFunctions = @(
     'StudyReaderVocabularyEntries', 'StudyReaderVocabularyPickerAlive',
     'StudyReaderVocabularyPickerChanged', 'StudyReaderVocabularyPickerClose',
     'StudyReaderVocabularyPickerChoose', 'StudyReaderVocabularyPickerOpenReview',
-    'StudyReaderVocabularyPickerReturn', 'StudyCandidatesReturnAfterAnkiCancel',
+    'StudyReaderVocabularyPickerReturn', 'StudyCandidatesAnkiState',
     'StudyReaderOpenVocabularyPicker', 'StudyReaderShowAnkiMenu',
     'StudyReaderCloseAnkiAddDialog', 'StudyReaderQueueAnkiAction', 'StudyReaderRunAnkiAction',
     'StudyReaderAddReviewedAnkiNote', 'StudyReaderAnkiMessage', 'StudyLibraryOwnedMessage',
@@ -313,7 +322,9 @@ function Invoke-AhkTest([string]$Script, [string]$Name, [string[]]$ExtraArgument
     $stderr = Join-Path $output.FullName ($Name + '.stderr.txt')
     $arguments = @('/ErrorStdOut', ('"' + $Script + '"')) + $ExtraArguments
     $process = Start-Process -FilePath $AutoHotkey -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-    $timeoutMs = if ($Name -in @('study-controller', 'navigation')) { 60000 } else { 30000 }
+    $timeoutMs = if ($Name -eq 'study-controller') { 120000 }
+        elseif ($Name -eq 'navigation') { 60000 }
+        else { 30000 }
     if (!$process.WaitForExit($timeoutMs)) {
         $process.Kill()
         throw "$Name timed out; stopped only its test process."

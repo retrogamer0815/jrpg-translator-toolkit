@@ -11,11 +11,439 @@ if (@($StudyOnly, $DialogsOnly, $ShutdownOnly).Where({ [bool]$_ }).Count -gt 1) 
 }
 $repo = Split-Path -Parent $PSScriptRoot
 $source = [IO.File]::ReadAllText((Join-Path $repo 'JRPG Translator.ahk'))
+$pickerRequirements = [ordered]@{
+    'shared picker ownership' = 'GuiFromHwnd(ownerHwnd).Opt("+OwnDialogs")'
+    'fullscreen modal suspension' = 'CPBigBoxModalDepth += 1'
+    'desktop capture route' = 'return OpenModernCapturePicker()'
+    'modern capture choices' = '["Capture region", "Capture window", "Cancel"]'
+    'Study export owner' = 'slState["gui"].Hwnd, "S16"'
+}
+foreach ($requirement in $pickerRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Picker-polish source requirement missing: $($requirement.Key)"
+    }
+}
+if ([regex]::Matches($source, '\bFileSelect\(').Count -ne 1 -or
+    [regex]::Matches($source, '\bDirSelect\(').Count -ne 1 -or
+    [regex]::Matches($source, '\bCPNativeFileSelect\(').Count -ne 8 -or
+    [regex]::Matches($source, '\bCPNativeDirSelect\(').Count -ne 2) {
+    throw 'Every file/folder picker entry point must use the shared owned wrapper.'
+}
+$modernActionMenuFunctions = @(
+    'CPDesktopAudioModelMenu',
+    'CPDesktopExplanationModelMenu',
+    'CPDesktopExplanationPromptMenu',
+    'CPDesktopModelMenu',
+    'CPDesktopPromptMenu'
+)
+foreach ($functionName in $modernActionMenuFunctions) {
+    $body = [regex]::Match($source, '(?ms)^' + [regex]::Escape($functionName) + '\([^\r\n]*\)\s*\{.*?^\}').Value
+    if (!$body -or !$body.Contains('CPDesktopActionMenu(') -or $body.Contains('Menu()')) {
+        throw "Modern desktop action must use the themed popup: $functionName"
+    }
+}
+if ([regex]::Matches($source, '\bMenu\(\)').Count -ne 0) {
+    throw 'Desktop popup actions must not fall back to unthemed native menus.'
+}
+$modernOnlyDesktopRequirements = [ordered]@{
+    'legacy preference migration' = 'IniWrite(1, iniPath, "cfg_control", "modernLayout")'
+    'modern-only active state' = 'return IsSet(CPDesktop) && CPDesktop.Get("ready", false)'
+    'direct modern resize route' = 'return CPDesktopLayout(gui, minMax, w, h)'
+}
+foreach ($requirement in $modernOnlyDesktopRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Modern-only desktop source requirement missing: $($requirement.Key)"
+    }
+}
+if ($source.Contains('CPDesktopToggleLayout') -or
+    $source.Contains('"Use classic layout"') -or
+    $source.Contains('"Use modern layout"') -or
+    $source.Contains('CPDesktop["modern"]') -or
+    [regex]::Matches($source, '\bCPDesktopClassicResize\(').Count -ne 0) {
+    throw 'Selectable classic desktop controls, state, menus, and resize code must stay retired.'
+}
+$modelSourceRequirements = [ordered]@{
+    'online source opens directly' = 'c["online"].OnEvent("Click", CPModelDialogChooseSource.Bind(s, "online"))'
+    'manual source opens directly' = 'c["manual"].OnEvent("Click", CPModelDialogChooseSource.Bind(s, "manual"))'
+}
+foreach ($requirement in $modelSourceRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Model-source source requirement missing: $($requirement.Key)"
+    }
+}
+$pageRegistryRequirements = [ordered]@{
+    'ten-page registry constructor' = 'CPDesktopCreatePageRegistry()'
+    'shared page lookup' = 'CPDesktopPage(page := 0)'
+    'semantic control registration' = 'descriptor["controls"][key] := ctrl'
+    'shared visibility helper' = 'CPDesktopSetControlGroupVisible(controls, visible)'
+    'registry layout dispatch' = 'currentPage["layout"].Call(extentW)'
+    'registry navigation identity' = 'active := descriptor["navKey"]'
+}
+foreach ($requirement in $pageRegistryRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Desktop page-registry source requirement missing: $($requirement.Key)"
+    }
+}
+$screenshotMigrationRequirements = [ordered]@{
+    'direct screenshot-page constructor' = 'CPDesktopCreateScreenshotPage()'
+    'owned screenshot registry group' = 'CPDesktop["shot"], [], CPDesktopLayoutScreenshot'
+    'Game Text page title and subtitle' = '[1, "screenshot", "Game Text Translation", "Capture and translate text from your game.", "screenshot"'
+    'Game Text sidebar label' = '["screenshot", "Game Text", (*) => CPDesktopNavigate(1)]'
+    'Game Text document icon' = 'Map("screenshot", 0xE7C3, "audioPage", 0xE767'
+    'primary capture action label' = 'btnST.Text := "Capture && Translate"'
+    'standalone capture action label' = 'btnTS.Text := "Make Capture"'
+    'queued capture translation label' = 'btnSTO.Text := "Translate Captures"'
+    'provider alias registration' = 'CPDesktopPageRegisterControl(1, "providerChoice"'
+    'capture alias registration' = 'CPDesktopPageRegisterControl(1, "captureTranslate"'
+    'model menu wiring' = 'shot["models"].OnEvent("Click", CPDesktopModelMenu)'
+    'prompt menu wiring' = 'shot["prompts"].OnEvent("Click", CPDesktopPromptMenu)'
+    'shared selection wiring' = 'ddlPrompt.OnEvent("Change", CPScreenshotAISelectionChanged)'
+    'pre-construction startup preference guard' = 'translator := IsSet(chkOpenTW)'
+    'pre-construction combo guard' = 'if IsSet(ddlProv)'
+    'post-construction combo initialization' = 'Modern Screenshot, Audio, Explanation, Overlay, Terminology, Profiles, and'
+}
+foreach ($requirement in $screenshotMigrationRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Screenshot-page migration source requirement missing: $($requirement.Key)"
+    }
+}
+foreach ($retiredScreenshotControl in @('CPDesktopShotControls', 'btnIMG_Add', 'btnIMG_Del',
+    'btnIMG_GM_Add', 'btnIMG_GM_Del', 'btnPrNew', 'btnPrDel')) {
+    if ($source.Contains($retiredScreenshotControl)) {
+        throw "Retired Game Text Translation control remains: $retiredScreenshotControl"
+    }
+}
+$audioMigrationRequirements = [ordered]@{
+    'direct audio-page constructor' = 'CPDesktopCreateAudioPage()'
+    'owned audio registry group' = 'CPDesktop["audioPage"], [], CPDesktopLayoutAudio'
+    'provider alias registration' = 'CPDesktopPageRegisterControl(2, "providerChoice"'
+    'device alias registration' = 'CPDesktopPageRegisterControl(2, "listenDevice"'
+    'diagnostic alias registration' = 'CPDesktopPageRegisterControl(2, "result"'
+    'shared audio selection wiring' = 'ddlTR.OnEvent("Change", CPAudioAISelectionChanged)'
+    'device-list initialization' = 'PopulateSpeakersList(speakerName)'
+    'pre-construction audio combo guard' = 'if IsSet(ddlAProv)'
+}
+foreach ($requirement in $audioMigrationRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Audio-page migration source requirement missing: $($requirement.Key)"
+    }
+}
+foreach ($retiredAudioControl in @('CPDesktopAudioControls', 'btnA_GM_Add', 'btnA_GM_Del',
+    'btnTR_Add', 'btnTR_Del', 'lblLiveInput', 'lblLiveTranslation', 'txtAudioHelp')) {
+    if ($source.Contains($retiredAudioControl)) {
+        throw "Retired Audio Translation control remains: $retiredAudioControl"
+    }
+}
+$explanationMigrationRequirements = [ordered]@{
+    'direct explanation-page constructor' = 'CPDesktopCreateExplanationPage()'
+    'owned explanation registry group' = 'CPDesktop["explanationPage"], [], CPDesktopLayoutExplanation'
+    'explanation provider alias registration' = 'CPDesktopPageRegisterControl(4, "providerChoice"'
+    'explanation prompt alias registration' = 'CPDesktopPageRegisterControl(4, "promptChoice"'
+    'explanation action alias registration' = 'CPDesktopPageRegisterControl(4, "createExplanation"'
+    'explanation preference alias registration' = 'CPDesktopPageRegisterControl(4, "saveLibrary"'
+    'shared explanation selection wiring' = 'ddlEProv.OnEvent("Change", CPExplanationAISelectionChanged)'
+    'pre-construction explanation prompt guard' = 'if IsSet(ddlEPr)'
+    'explanation prompt initialization' = 'RefreshExplainPromptProfilesList(explainPromptProfile)'
+    'post-construction alias initialization' = 'Modern Screenshot, Audio, Explanation, Overlay, Terminology, Profiles, and'
+}
+foreach ($requirement in $explanationMigrationRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Explanation-page migration source requirement missing: $($requirement.Key)"
+    }
+}
+foreach ($retiredExplanationControl in @('CPDesktopExplanationControls', 'btnEGem_Add', 'btnEGem_Del',
+    'btnEOpenAI_Add', 'btnEOpenAI_Del', 'btnEPrNew', 'btnEPrDel', 'txtExplainSaveInfo')) {
+    if ($source.Contains($retiredExplanationControl)) {
+        throw "Retired Explanation control remains: $retiredExplanationControl"
+    }
+}
+$overlayMigrationRequirements = [ordered]@{
+    'direct overlay-page constructor' = 'CPDesktopCreateOverlayPages()'
+    'owned Translator overlay registry group' = 'CPDesktop["overlayPages"][3], [], CPDesktopLayoutOverlay.Bind(3)'
+    'owned Explainer overlay registry group' = 'CPDesktop["overlayPages"][5], [], CPDesktopLayoutOverlay.Bind(5)'
+    'overlay opacity alias registration' = 'CPDesktopPageRegisterControl(page, "opacitySlider"'
+    'overlay font alias registration' = 'CPDesktopPageRegisterControl(page, "fontChoice"'
+    'overlay position alias registration' = 'CPDesktopPageRegisterControl(page, "moveResize"'
+    'Translator opacity wiring' = 'slTrans.OnEvent("Change", CPTranslatorOpacityChanged)'
+    'Explainer opacity wiring' = 'slTrans_EW.OnEvent("Change", CPExplainerOpacityChanged)'
+    'shared move/resize wiring' = 'bindings["position"].OnEvent("Click", StartOverlayAdjustment.Bind(title))'
+    'post-construction overlay font initialization' = 'LoadFontsIntoCombo_EW()'
+}
+foreach ($requirement in $overlayMigrationRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Overlay-window migration source requirement missing: $($requirement.Key)"
+    }
+}
+foreach ($retiredOverlayScaffold in @('CPDesktopOverlayLegacy', 'cpBeforeOverlay', 'twLabelX', 'ewLabelX')) {
+    if ($source.Contains($retiredOverlayScaffold)) {
+        throw "Retired Overlay Windows scaffold remains: $retiredOverlayScaffold"
+    }
+}
+$terminologyMigrationRequirements = [ordered]@{
+    'direct terminology-page constructor' = 'CPDesktopCreateTerminologyPage()'
+    'owned terminology registry group' = 'CPDesktop["organizePages"][6], [], CPDesktopLayoutOrganize.Bind(6)'
+    'terminology enable alias registration' = 'CPDesktopPageRegisterControl(6, "enabled"'
+    'local glossary alias registration' = 'CPDesktopPageRegisterControl(6, "localChoice"'
+    'model glossary alias registration' = 'CPDesktopPageRegisterControl(6, "modelChoice"'
+    'terminology enable wiring' = 'chkUseTerminologyOverrides.OnEvent("Click", TerminologyOverridesChanged)'
+    'local glossary selection wiring' = 'ddlENG.OnEvent("Change", CPTerminologyProfileChanged.Bind("en"))'
+    'model glossary selection wiring' = 'ddlJPG.OnEvent("Change", CPTerminologyProfileChanged.Bind("jp"))'
+    'terminology manager wiring' = 'btnJPG_Edit.OnEvent("Click", CPTerminologyManage.Bind("jp"))'
+    'terminology profile initialization' = 'RefreshGlossaryProfilesList(jp2enGlossaryProfile, en2enGlossaryProfile)'
+}
+foreach ($requirement in $terminologyMigrationRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Terminology-page migration source requirement missing: $($requirement.Key)"
+    }
+}
+foreach ($retiredTerminologyScaffold in @('CPDesktopOrganizeLegacy[6]', 'CPDesktopCaptureOrganizeControls(6',
+    'txtGlossaryHelp1', 'txtGlossaryHelp2', 'txtGlossaryHelp3', 'txtGlossaryHelp4')) {
+    if ($source.Contains($retiredTerminologyScaffold)) {
+        throw "Retired Terminology scaffold remains: $retiredTerminologyScaffold"
+    }
+}
+$profilesMigrationRequirements = [ordered]@{
+    'direct profiles-page constructor' = 'CPDesktopCreateProfilesPage()'
+    'owned profiles registry group' = 'CPDesktop["organizePages"][7], [], CPDesktopLayoutOrganize.Bind(7)'
+    'profile selector alias registration' = 'CPDesktopPageRegisterControl(7, "profileChoice"'
+    'startup selector alias registration' = 'CPDesktopPageRegisterControl(7, "startupChoice"'
+    'profile state alias registration' = 'CPDesktopPageRegisterControl(7, "profileState"'
+    'profile selection wiring' = 'ddlGameProfile.OnEvent("Change", GameProfileUpdateSummary)'
+    'startup selection wiring' = 'ddlStartupOverlays.OnEvent("Change", CPStartupOverlaysChanged)'
+    'profile creation wiring' = 'btnGameProfileAdd.OnEvent("Click", CreateGameProfile)'
+    'profile save wiring' = 'btnGameProfileSave.OnEvent("Click", SaveSelectedGameProfile)'
+    'profile apply wiring' = 'btnGameProfileApply.OnEvent("Click", ApplySelectedGameProfile)'
+    'profile deletion wiring' = 'btnGameProfileDelete.OnEvent("Click", DeleteSelectedGameProfile)'
+    'startup selection initialization' = 'CPStartupOverlaysSync()'
+    'profile list initialization' = 'RefreshGameProfilesList()'
+}
+foreach ($requirement in $profilesMigrationRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Profiles-page migration source requirement missing: $($requirement.Key)"
+    }
+}
+foreach ($retiredProfilesScaffold in @('CPDesktopOrganizeLegacy[7]', 'CPDesktopCaptureOrganizeControls(7',
+    'lblGameProfilesTitle', 'txtGameProfileIntro', 'txtGameProfileGlobal', 'txtStartupOverlayHelp',
+    'txtGameProfileDetails')) {
+    if ($source.Contains($retiredProfilesScaffold)) {
+        throw "Retired Profiles scaffold remains: $retiredProfilesScaffold"
+    }
+}
+$controlsMigrationRequirements = [ordered]@{
+    'direct controls-page constructor' = 'CPDesktopCreateControlsPage()'
+    'owned controls registry group' = 'CPDesktop["organizePages"][8], [], CPDesktopLayoutOrganize.Bind(8)'
+    'keyboard selector alias registration' = 'CPDesktopOrganizeButton(8, "keyboard", "Keyboard"'
+    'controller selector alias registration' = 'CPDesktopOrganizeButton(8, "gamepad", "Controller"'
+    'keyboard binding alias registration' = 'CPDesktopPageRegisterControl(8, "keyboardBinding_" action'
+    'controller binding alias registration' = 'CPDesktopPageRegisterControl(8, "controllerBinding_" action'
+    'controller option alias registration' = 'CPDesktopPageRegisterControl(8, "controllerEnabled"'
+    'keyboard change wiring' = 'hkBtnChg[action].OnEvent("Click", Hotkey_Row_Change.Bind(action))'
+    'keyboard disable wiring' = 'hkBtnDis[action].OnEvent("Click", Hotkey_Row_Disable.Bind(action))'
+    'keyboard default wiring' = 'hkBtnDef[action].OnEvent("Click", Hotkey_Row_Default.Bind(action))'
+    'controller assignment wiring' = 'CPControllerAssignButtons[action].OnEvent("Click", CPControllerAssign.Bind(action))'
+    'controller disable wiring' = 'CPControllerDisableButtons[action].OnEvent("Click", CPControllerDisable.Bind(action))'
+    'binding initialization' = 'CPControllerLoadBindings()'
+    'view initialization' = 'CPSetControlsView(IniRead(iniPath, "controller_inputs", "view", "keyboard"), false)'
+    'view-specific registry visibility' = 'for ctrl in CPControlsKeyboardControls'
+}
+foreach ($requirement in $controlsMigrationRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Controls-page migration source requirement missing: $($requirement.Key)"
+    }
+}
+foreach ($retiredControlsScaffold in @('CPDesktopOrganizeLegacy[8]', 'CPDesktopCaptureOrganizeControls(8',
+    'CPLayoutControllerOptions(', 'txtControllerDpadNote', 'controlsActionX', 'controlsBindingX',
+    'controllerOptionsX', 'controllerTopY', 'lblKeyboardAction', 'lblControllerAction')) {
+    if ($source.Contains($retiredControlsScaffold)) {
+        throw "Retired Controls scaffold remains: $retiredControlsScaffold"
+    }
+}
+$apiKeysMigrationRequirements = [ordered]@{
+    'direct API Keys-page constructor' = 'CPDesktopCreateApiKeysPage()'
+    'owned API Keys registry group' = 'CPDesktop["organizePages"][9], [], CPDesktopLayoutOrganize.Bind(9)'
+    'in-app entry alias registration' = 'CPDesktopPageRegisterControl(9, "inAppEntry"'
+    'Gemini key alias registration' = 'CPDesktopPageRegisterControl(9, "geminiKey"'
+    'OpenAI key alias registration' = 'CPDesktopPageRegisterControl(9, "openAIKey"'
+    'masked Gemini field' = 'ui.AddEdit("x0 y0 w420 h34 Hidden Password")'
+    'in-app entry wiring' = 'cbApiInApp.OnEvent("Click", CPApiInAppChanged)'
+    'key dirty-state wiring' = 'eGemini.OnEvent("Change", UpdateEnvDirty)'
+    'key save wiring' = 'btnSaveEnv.OnEvent("Click", SaveApiEnv)'
+    'key delete wiring' = 'btnDelEnv.OnEvent("Click", DeleteEnvFile)'
+    'environment-variable wiring' = 'btnOpenEnvVars.OnEvent("Click", OpenWindowsEnvironmentVariables)'
+    'About wiring' = 'btnAbout.OnEvent("Click", ShowAboutDialog)'
+    'existing key initialization' = 'prefOpenAI := ParseEnvLine(envBody, "OPENAI_API_KEY")'
+    'named enablement synchronizer' = 'ToggleApiKeyControls(*) {'
+}
+foreach ($requirement in $apiKeysMigrationRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "API Keys-page migration source requirement missing: $($requirement.Key)"
+    }
+}
+foreach ($retiredApiKeysScaffold in @('CPDesktopOrganizeLegacy[9]', 'CPDesktopCaptureOrganizeControls(9',
+    'txtApiHelp1', 'txtApiHelp2', 'txtApiHelp3', 'txtApiHelp4', 'ToggleApiKeyControls :=')) {
+    if ($source.Contains($retiredApiKeysScaffold)) {
+        throw "Retired API Keys scaffold remains: $retiredApiKeysScaffold"
+    }
+}
+$pathsMigrationRequirements = [ordered]@{
+    'direct Paths-page constructor' = 'CPDesktopCreatePathsPage()'
+    'owned Paths registry group' = 'CPDesktop["organizePages"][10], [], CPDesktopLayoutOrganize.Bind(10)'
+    'Python path alias registration' = 'CPDesktopPageRegisterControl(10, "pythonPath"'
+    'overlay path alias registration' = 'CPDesktopPageRegisterControl(10, "overlayPath"'
+    'screenshot path alias registration' = 'CPDesktopPageRegisterControl(10, "imagePath"'
+    'audio path alias registration' = 'CPDesktopPageRegisterControl(10, "audioPath"'
+    'explainer path alias registration' = 'CPDesktopPageRegisterControl(10, "explainerPath"'
+    'save alias registration' = 'CPDesktopPageRegisterControl(10, "savePaths"'
+    'direct-output alias registration' = 'CPDesktopPageRegisterControl(10, "directOutput"'
+    'debug alias registration' = 'CPDesktopPageRegisterControl(10, "debugMode"'
+    'path dirty-state wiring' = 'pathEditControl.OnEvent("Change", UpdatePathsDirtyState)'
+    'Python browse wiring' = 'bPy.OnEvent("Click", BrowsePythonExe)'
+    'explainer browse wiring' = 'bExplainSel.OnEvent("Click", BrowseExplainScript)'
+    'path save wiring' = 'btnSavePaths.OnEvent("Click", (*) => SaveEditedPaths())'
+    'direct-output wiring' = 'cbDirectModelOutput.OnEvent("Click", CPOnDirectModelOutputToggle)'
+    'debug wiring' = 'cbDebug.OnEvent("Click", CPOnDebugModeToggle)'
+    'clean-state initialization' = 'ClearPathsDirty()'
+}
+foreach ($requirement in $pathsMigrationRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Paths-page migration source requirement missing: $($requirement.Key)"
+    }
+}
+foreach ($retiredPathsScaffold in @('CPDesktopOrganizeLegacy', 'CPDesktopExistingControls()',
+    'CPDesktopCaptureOrganizeControls(', 'cpOrganizeBefore', 'tPython :=', 'tOv :=', 'tImg :=',
+    'tAud :=', 'tExplain :=', 'directOpts :=')) {
+    if ($source.Contains($retiredPathsScaffold)) {
+        throw "Retired Paths scaffold remains: $retiredPathsScaffold"
+    }
+}
+$audioRuntimeRequirements = [ordered]@{
+    'worker-owned session marker' = 'EnvSet("AUDIO_SESSION_FILE", gAudioSessionFile)'
+    'immediate footer refresh' = 'CPDesktopRefreshStatus()'
+    'shutdown-owned audio cleanup' = 'try StopAudioCore(false, false)'
+    'toast text background' = '" Background" background " +0x200"'
+}
+foreach ($requirement in $audioRuntimeRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Audio runtime source requirement missing: $($requirement.Key)"
+    }
+}
+$audioStartBody = [regex]::Match($source, '(?ms)^StartAudioCore\([^\r\n]*\)\s*\{.*?^\}').Value
+$audioToggleBody = [regex]::Match($source, '(?ms)^ToggleAudioFromButton\([^\r\n]*\)\s*\{.*?^\}').Value
+if (!$audioStartBody -or $audioStartBody.Contains('RunWait(') -or $audioStartBody.Contains('Toast(') -or
+    !$audioToggleBody.Contains('AudioIsRunning(true)')) {
+    throw 'Audio start/stop must recover worker state without a blocking retry or corner toast.'
+}
+$desktopLayoutBody = [regex]::Match($source, '(?ms)^CPDesktopLayout\([^\r\n]*\)\s*\{.*?^\}').Value
+if (!$desktopLayoutBody) {
+    throw 'Desktop layout function not found for page-registry validation.'
+}
+foreach ($legacyGroup in @('CPDesktopShotControls', 'CPDesktopAudioControls',
+    'CPDesktopExplanationControls', 'CPDesktopOverlayLegacy', 'CPDesktopOrganizeLegacy')) {
+    if ($desktopLayoutBody.Contains($legacyGroup)) {
+        throw "Desktop layout must dispatch through the page registry, not $legacyGroup."
+    }
+}
+if (!$source.Contains('(state & 0x200) = 0') -or
+    !$source.Contains('borderInset := Max(1, Ceil(penWidth / 2))')) {
+    throw 'Desktop owner-draw must hide pointer focus cues and keep every focus-border edge in bounds.'
+}
+$navigationPaintRequirements = [ordered]@{
+    'painted focus redraw helper' = 'CPDesktopRefreshPaintedButton(hwnd, forceRedraw := true)'
+    'painted focus entry path' = 'if CPDesktopRefreshPaintedButton(hwnd)'
+    'painted focus restore path' = 'if CPDesktopRefreshPaintedButton(CPFocusVisualHwnd)'
+    'controller shares keyboard navigation' = 'CPNavMove(command)'
+}
+foreach ($requirement in $navigationPaintRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Desktop navigation-paint source requirement missing: $($requirement.Key)"
+    }
+}
+$desktopActivationRequirements = [ordered]@{
+    'owner-drawn button activation' = 'DllCall("user32\PostMessageW", "ptr", hwnd, "uint", 0x00F5'
+    'keyboard root cancel fallback' = 'CPNavCancel()'
+    'controller root cancel fallback' = 'CPNavCancel(cancelFallback)'
+}
+foreach ($requirement in $desktopActivationRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Desktop activation source requirement missing: $($requirement.Key)"
+    }
+}
+$sectionNavigationRequirements = [ordered]@{
+    'modern sidebar page order' = 'desktopOrder := [1, 2, 4, 3, 5, 7, 6, 8, 9, 10]'
+    'available-page filtering' = 'if ArrayIndexOf(CPTabVisiblePages, page)'
+    'section switching uses semantic order' = 'pages := CPDesktopSectionNavigationPages()'
+}
+foreach ($requirement in $sectionNavigationRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Desktop section-navigation source requirement missing: $($requirement.Key)"
+    }
+}
+$candidate720pRequirements = [ordered]@{
+    '720p-safe Review minimum' = '"Review saved sentences and vocabulary before adding them to Anki.", 960, 620)'
+    'compact Review threshold' = 'compact := h < 760'
+    'expanded compact assessment' = 'summaryH := compact ? 64 : 44'
+    '720p-safe initial Review height' = 'StudyDesktopDialogShow(scState, 1040, 640, scScopeDdl)'
+    'taskbar-aware borderless maximize' = 'StudyDesktopConstrainMaximize(hwnd, minMaxInfo)'
+    'single-click candidate handler' = 'StudyCandidatesItemSelected(scState, scList, scRow, scSelected)'
+    'stale deselection guard' = 'StudyCandidatesSelectionSettled.Bind(scState, scRevision)'
+    'sentence single-click wiring' = 'scSentenceList.OnEvent("ItemSelect", StudyCandidatesItemSelected.Bind(scState))'
+    'vocabulary single-click wiring' = 'scVocabularyList.OnEvent("ItemSelect", StudyCandidatesItemSelected.Bind(scState))'
+    'sentence pointer-row wiring' = 'scSentenceList.OnEvent("Click", StudyCandidatesRowClicked.Bind(scState))'
+    'vocabulary pointer-row wiring' = 'scVocabularyList.OnEvent("Click", StudyCandidatesRowClicked.Bind(scState))'
+    'settled candidate-tab repaint' = 'SetTimer(StudyDesktopCandidatesRedrawTabs.Bind(s, index), -1)'
+}
+foreach ($requirement in $candidate720pRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "720p Review-layout source requirement missing: $($requirement.Key)"
+    }
+}
+$studyLibraryPointerRequirements = [ordered]@{
+    'keyboard and controller row-detail wiring' = 'slList.OnEvent("ItemFocus", StudyLibraryGroupFocused.Bind(slState))'
+    'exact pointer row-detail wiring' = 'slList.OnEvent("Click", StudyLibraryGroupFocused.Bind(slState))'
+}
+foreach ($requirement in $studyLibraryPointerRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Study Library pointer-selection source requirement missing: $($requirement.Key)"
+    }
+}
+$hotkeyRequirements = [ordered]@{
+    'initial themed shortcut display' = 's["controls"]["editor"].Text := display != "" ? display : "None"'
+    'shortcut display z-order repair' = 'CPHotkeyDialogPresentEditor(s)'
+    'in-app shortcut feedback' = 'CPHotkeySetNotice(notice)'
+    'shortcut removal wording' = '"Keyboard shortcut removed · "'
+    'shortcut save wording' = '"Keyboard shortcut saved · "'
+    'shortcut default wording' = '"Default keyboard shortcut restored · "'
+}
+foreach ($requirement in $hotkeyRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Keyboard-shortcut source requirement missing: $($requirement.Key)"
+    }
+}
+$desktopInputFieldRequirements = [ordered]@{
+    'shared dark input frame' = 'CPDesktopRegisterPaint(frame, "fieldFrame", "panel")'
+    'legacy input edge removal' = 'ctrl.Opt("-Border -E0x200 -VScroll")'
+    'keyboard binding field frame' = '8, "keyboardBinding_" action, hkEdits[action], "keyboard"'
+    'controller binding field frame' = 'CPControllerBindingEdits[action], "controller"'
+    'Gemini key field frame' = 'CPDesktopRegisterInputField(9, "geminiKey", eGemini)'
+    'OpenAI key field frame' = 'CPDesktopRegisterInputField(9, "openAIKey", eOpenAI)'
+}
+foreach ($requirement in $desktopInputFieldRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Desktop input-field source requirement missing: $($requirement.Key)"
+    }
+}
+foreach ($functionName in @('Hotkeys_OnApply', 'Hotkeys_OnRevert')) {
+    $body = [regex]::Match($source, '(?ms)^' + $functionName + '\([^\r\n]*\)\s*\{.*?^\}').Value
+    if (!$body -or $body.Contains('ToolTip(')) {
+        throw "Keyboard-shortcut feedback must stay inside the app UI: $functionName"
+    }
+}
 $output = New-Item -ItemType Directory -Path $OutputDirectory -Force
 New-Item -ItemType Directory -Path (Join-Path $output.FullName 'assets') -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $repo 'assets/bigbox-logo.png') -Destination (Join-Path $output.FullName 'assets')
 Copy-Item -LiteralPath (Join-Path $repo 'assets/desktop-logo.png') -Destination (Join-Path $output.FullName 'assets')
 Copy-Item -LiteralPath (Join-Path $repo 'JRPG Translator.ahk') -Destination $output.FullName
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'audio_runtime_fixture.ahk') -Destination $output.FullName
 # Opaque, differently shaped captures exercise replacing the native Picture
 # bitmap. These are synthetic test assets, not screenshots from a real library.
 Add-Type -AssemblyName System.Drawing

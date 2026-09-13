@@ -90,6 +90,7 @@ global CPControllerSurfaceTransitionState := ""
 global TestHandoffPage := 0, TestHandoffChecks := 0, TestHandoffCancelDiscovery := false
 global TestHandoffFailDiscovery := false
 global TestChapterReply := "No", TestChapterMessageChecks := 0, TestDesktopMessages := []
+global TestDesktopMessageReplies := []
 global TestChapterSelectorFocus := 0
 global studyLibrariesRoot := A_ScriptDir "\management-fixture\libraries"
 global studyLibrariesArchiveRoot := A_ScriptDir "\management-fixture\archives"
@@ -347,6 +348,7 @@ try {
     TestRecommendationPersistence()
     TestRecommendationWorkflow(CPStudyLibraryState)
     TestReaderVocabularyPicker(CPStudyLibraryState)
+    TestCandidateAnkiOwner()
     TestFullscreenAnkiPreview(CPStudyLibraryState)
     WinActivate("ahk_id " libraryGui.Hwnd)
     libraryList.Focus()
@@ -1720,6 +1722,12 @@ TestAnswerChapterMessage() {
             && body.Visible && y + h < actionY && x + w <= size[1],
             "Chapter information remains borderless and fits above actions at " size[1])
     }
+    ; Return the fixture to a visible 720p surface before sampling focus-frame
+    ; pixels. Leaving a 4K test window clipped by a 720p monitor can prevent
+    ; off-screen layered frame edges from being composed even when their
+    ; geometry and focus tracking are correct.
+    form["gui"].Show("w1280 h720")
+    TestProductionStudyFormResize(form, form["gui"], 0, 1280, 720)
     TestRecommendationFrame(form, controls["no"])
     TestChapterMessageChecks += 1
     if TestChapterReply = "No"
@@ -2020,6 +2028,7 @@ TestFullscreenAnkiPreview(libraryState) {
         TestVocabularyReviewReturn(owner)
     } finally {
         SetTimer(TestAnswerAnkiMessage, 0)
+        SetTimer(TestAnswerAnkiMessageSimple, 0)
         if IsObject(TestAnkiMessageState) && !TestAnkiMessageState["closed"]
             StudyLibraryOwnedMessageClose(TestAnkiMessageState, "No")
         if IsObject(preview) && !preview["closed"] {
@@ -2084,6 +2093,77 @@ TestAnkiCancelReturn() {
     global TestAnkiCancelReturns
     TestAnkiCancelReturns += 1
     return true
+}
+
+TestCandidateAnkiOwner() {
+    global TestReaderCloses, TestAnkiSends, TestAnkiReplies, TestAnkiMessageState
+    global TestDesktopMessageReplies
+    originalSends := TestAnkiSends
+    dataGui := Gui("+AlwaysOnTop", "Anki candidate data fixture")
+    source := dataGui.AddEdit("x10 y10 w250 h80 ReadOnly Multi", "お城（おしろ）に行く（いく）。")
+    dataGui.Show("x20 y20 w280 h110")
+    dataState := Map("gui", dataGui, "closed", false,
+        "libraryName", "Demo library", "outputDir", A_ScriptDir,
+        "currentGroupId", 7, "currentVersion", 2,
+        "currentProfile", "Demo profile", "currentAnkiStatus", "not_checked",
+        "editing", false, "versions", [Map("version", 2)],
+        "source", source, "sections", [Map("content", TestMultilineText())],
+        "mediaIndex", 0, "media", [])
+    candidatesGui := Gui("+Owner" dataGui.Hwnd " +AlwaysOnTop", "Anki candidates return fixture")
+    candidatesGui.Show("x320 y20 w300 h120")
+    candidates := Map("gui", candidatesGui, "closeRequested", false,
+        "libraryState", dataState)
+    try {
+        for bigBox in [false, true] {
+            for action in ["cancel", "add"] {
+                candidates["bigBoxPresentation"] := bigBox
+                beforeCloses := TestReaderCloses
+                beforeSends := TestAnkiSends
+                ankiOwner := StudyCandidatesAnkiState(candidates, Map("groupId", 7))
+                TestAssert(IsObject(ankiOwner) && ankiOwner["gui"] = candidatesGui
+                    && ankiOwner["ankiDataState"] = dataState
+                    && ankiOwner["ankiCandidateState"] = candidates
+                    && ankiOwner["bigBoxPresentation"] = bigBox,
+                    "Review builds a Review-owned Anki data state: fullscreen=" bigBox)
+                review := TestProductionAnkiPreview(ankiOwner, "vocabulary", "城", "castle")
+                if action = "cancel" {
+                    for control in review["gui"] {
+                        if control.Type = "Button" && control.Text = "Cancel" {
+                            SendMessage(0xF5, 0, 0, control.Hwnd)
+                            break
+                        }
+                    }
+                    Sleep(80)
+                } else {
+                    if bigBox {
+                        TestAnkiReplies := ["Yes", "OK"]
+                        TestAnkiMessageState := 0
+                        SetTimer(TestAnswerAnkiMessageSimple, -30)
+                    } else
+                        TestDesktopMessageReplies := ["Yes", "OK"]
+                    StudyReaderAddReviewedAnkiNote(review)
+                    if bigBox
+                        TestWaitAnkiMessages()
+                }
+                TestAssert(review["closed"] && StudyCandidatesGuiAlive(candidates)
+                    && DllCall("user32\IsWindowEnabled", "ptr", candidatesGui.Hwnd, "int")
+                    && TestReaderCloses = beforeCloses
+                    && TestAnkiSends = beforeSends + (action = "add" ? 1 : 0),
+                    "Candidates-origin " action " returns directly to Review without a Reader: fullscreen=" bigBox)
+                if action = "add"
+                    TestAnkiSends := originalSends
+            }
+        }
+    } finally {
+        SetTimer(TestAnswerAnkiMessage, 0)
+        SetTimer(TestAnswerAnkiMessageSimple, 0)
+        if IsObject(TestAnkiMessageState) && !TestAnkiMessageState["closed"]
+            StudyLibraryOwnedMessageClose(TestAnkiMessageState, "OK")
+        TestAnkiSends := originalSends
+        TestDesktopMessageReplies := []
+        try candidatesGui.Destroy()
+        try dataGui.Destroy()
+    }
 }
 
 TestVocabularyReviewReturn(owner) {
@@ -2159,29 +2239,6 @@ TestVocabularyReviewReturn(owner) {
         TestAssert(!StudyReaderVocabularyPickerReturn(owner, 7, 2, "行く", "行く（いく） — to go."),
             "Stale review return cannot reopen vocabulary for a changed explanation version")
         owner["currentVersion"] := 2
-        ; Test the shared Cancel callback through both native and fullscreen review windows.
-        candidatesGui := Gui("+AlwaysOnTop", "Anki candidates return fixture")
-        candidatesGui.Show("w300 h120")
-        candidates := Map("gui", candidatesGui, "closeRequested", false)
-        for bigBox in [false, true] {
-            owner["bigBoxPresentation"] := bigBox
-            beforeCloses := TestReaderCloses
-            review := TestProductionAnkiPreview(owner, "vocabulary", "城", "castle", true,
-                StudyCandidatesReturnAfterAnkiCancel.Bind(candidates, owner))
-            for control in review["gui"] {
-                if control.Type = "Button" && control.Text = "Cancel" {
-                    SendMessage(0xF5, 0, 0, control.Hwnd)
-                    break
-                }
-            }
-            Sleep(80)
-            TestAssert(review["closed"] && owner["returnToCandidates"] = candidates
-                && TestReaderCloses = beforeCloses + 1,
-                "Candidates-origin Cancel closes the intermediate Reader and restores its list route: fullscreen=" bigBox)
-        }
-        candidatesGui.Destroy()
-        TestAssert(!StudyCandidatesReturnAfterAnkiCancel(candidates, owner),
-            "A closed candidates window is never reopened by a stale Cancel callback")
     } finally {
         if IsObject(TestVocabularyReviewState) && !TestVocabularyReviewState["closed"]
             StudyReaderCloseAnkiAddDialog(TestVocabularyReviewState)
@@ -2207,6 +2264,19 @@ TestWaitAnkiMessages() {
         Sleep(25)
     }
     TestAssert(false, "Anki confirmation/completion workflow completed within timeout")
+}
+
+TestAnswerAnkiMessageSimple() {
+    global TestAnkiReplies, TestAnkiMessageState
+    if !IsObject(TestAnkiMessageState) || TestAnkiMessageState["closed"]
+        || !TestAnkiMessageState.Get("ready", false) {
+        SetTimer(TestAnswerAnkiMessageSimple, -25)
+        return
+    }
+    reply := TestAnkiReplies.RemoveAt(1)
+    StudyLibraryOwnedMessageClose(TestAnkiMessageState, reply)
+    if TestAnkiReplies.Length
+        SetTimer(TestAnswerAnkiMessageSimple, -40)
 }
 
 TestAnswerAnkiMessage() {
@@ -2593,8 +2663,10 @@ CPPrepareStudyListHeader(*) {
 CPApplyThemeToControl(*) {
 }
 CPThemedOwnedMessage(owner, message, title := "", buttons := "ok", *) {
-    global TestDesktopMessages
+    global TestDesktopMessages, TestDesktopMessageReplies
     TestDesktopMessages.Push(Map("owner", owner, "message", message, "title", title, "buttons", buttons))
+    if TestDesktopMessageReplies.Length
+        return TestDesktopMessageReplies.RemoveAt(1)
     return buttons = "yesno" ? "No" : "OK"
 }
 Toast(*) => 0
@@ -2722,6 +2794,11 @@ StudyLibraryRefresh(*) {
 CPAdaptiveOwnedMessage(*) {
     global TestFilterWarnings
     TestFilterWarnings += 1
+}
+
+CPDialogDefaultResult(buttons) {
+    return buttons = "yesno" ? "No"
+        : buttons = "yesnocancel" ? "Cancel" : "OK"
 }
 
 StudyCandidatesResizeBigBox(*) {
