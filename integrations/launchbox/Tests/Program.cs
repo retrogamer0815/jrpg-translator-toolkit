@@ -102,6 +102,8 @@ internal static class Program
         Require(setupFooter != null,
             "The setup window Save/Cancel footer is not pinned outside the scrolling region.");
 
+        TestControllerDisclosureActivation(setupWindow);
+
         TestNoTranslatorProfile(setupWindow, restored, game, serializer, translatorProfilesDirectory);
 
         IGameMenuItemPlugin menuItem = new GameSetupMenuItem();
@@ -221,6 +223,25 @@ internal static class Program
         {
             throw new InvalidOperationException(message);
         }
+    }
+
+    private static void TestControllerDisclosureActivation(GameSetupWindow window)
+    {
+        Button locationsToggle = PrivateField<Button>(window, "_locationsToggle");
+        StackPanel locationsPanel = PrivateField<StackPanel>(window, "_locationsPanel");
+        Visibility initialVisibility = locationsPanel.Visibility;
+        MethodInfo activateControl = typeof(GameSetupWindow).GetMethod(
+            "ActivateControl",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Controller activation helper was not found.");
+
+        bool activated = (bool)(activateControl.Invoke(window, new object[] { locationsToggle }) ?? false);
+        Require(activated && locationsPanel.Visibility != initialVisibility,
+            "Controller activation must expand or collapse Application locations.");
+
+        activated = (bool)(activateControl.Invoke(window, new object[] { locationsToggle }) ?? false);
+        Require(activated && locationsPanel.Visibility == initialVisibility,
+            "A second controller activation must restore the Application locations state.");
     }
 
     private static void TestNoTranslatorProfile(GameSetupWindow window,

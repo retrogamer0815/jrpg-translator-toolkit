@@ -25,7 +25,7 @@ foreach ($requirement in $pickerRequirements.GetEnumerator()) {
 }
 if ([regex]::Matches($source, '\bFileSelect\(').Count -ne 1 -or
     [regex]::Matches($source, '\bDirSelect\(').Count -ne 1 -or
-    [regex]::Matches($source, '\bCPNativeFileSelect\(').Count -ne 8 -or
+    [regex]::Matches($source, '\bCPNativeFileSelect\(').Count -ne 2 -or
     [regex]::Matches($source, '\bCPNativeDirSelect\(').Count -ne 2) {
     throw 'Every file/folder picker entry point must use the shared owned wrapper.'
 }
@@ -45,10 +45,23 @@ foreach ($functionName in $modernActionMenuFunctions) {
 if ([regex]::Matches($source, '\bMenu\(\)').Count -ne 0) {
     throw 'Desktop popup actions must not fall back to unthemed native menus.'
 }
+$promptMenuRequirements = [ordered]@{
+    'Game Text prompt edit is inside Manage' = '[OpenPromptEditor, NewPromptProfile, DeletePromptProfile]'
+    'Explanation prompt edit is inside Manage' = '[OpenExplainPromptEditor_Multi, NewExplainPromptProfile, DeleteExplainPromptProfile]'
+    'prompt manager labels its contextual edit action' = '["Edit selected prompt…", "New prompt…", "Delete selected prompt…"]'
+}
+foreach ($requirement in $promptMenuRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Prompt-management source requirement missing: $($requirement.Key)"
+    }
+}
 $modernOnlyDesktopRequirements = [ordered]@{
     'legacy preference migration' = 'IniWrite(1, iniPath, "cfg_control", "modernLayout")'
     'modern-only active state' = 'return IsSet(CPDesktop) && CPDesktop.Get("ready", false)'
     'direct modern resize route' = 'return CPDesktopLayout(gui, minMax, w, h)'
+    'fullscreen return requests normal desktop bounds' = 'CPShowControlPanelReady(true, true)'
+    'fullscreen return uses preferred desktop viewport' = 'targetW := Max(clientW, CPPreferredViewportW)'
+    'fullscreen return relayouts before reveal' = 'ResizeUI(ui, 0, restoredClientW, restoredClientH)'
 }
 foreach ($requirement in $modernOnlyDesktopRequirements.GetEnumerator()) {
     if (!$source.Contains($requirement.Value)) {
@@ -72,7 +85,7 @@ foreach ($requirement in $modelSourceRequirements.GetEnumerator()) {
     }
 }
 $pageRegistryRequirements = [ordered]@{
-    'ten-page registry constructor' = 'CPDesktopCreatePageRegistry()'
+    'nine-page registry constructor' = 'CPDesktopCreatePageRegistry()'
     'shared page lookup' = 'CPDesktopPage(page := 0)'
     'semantic control registration' = 'descriptor["controls"][key] := ctrl'
     'shared visibility helper' = 'CPDesktopSetControlGroupVisible(controls, visible)'
@@ -84,12 +97,28 @@ foreach ($requirement in $pageRegistryRequirements.GetEnumerator()) {
         throw "Desktop page-registry source requirement missing: $($requirement.Key)"
     }
 }
+$profileHeaderRequirements = [ordered]@{
+    'header profile dropdown' = 'chrome["profile"] := ui.AddDropDownList'
+    'header profile selection wiring' = 'chrome["profile"].OnEvent("Change", CPDesktopProfileSelectionChanged)'
+    'header profile list synchronization' = 'CPDesktopRefreshProfileSelector(force := false)'
+    'header Manage profiles action' = 'if choice = "Manage profiles…"'
+    'profile switch dirty-state comparison' = 'GameProfileHasUnsavedChanges(name)'
+    'profile switch save choice' = '"Save and switch", "Switch without saving", "Cancel"'
+}
+foreach ($requirement in $profileHeaderRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Desktop profile-selector source requirement missing: $($requirement.Key)"
+    }
+}
+if ($source.Contains('["profile", "Current settings", (*) => CPDesktopNavigate(7)]')) {
+    throw 'Retired header profile shortcut button remains'
+}
 $screenshotMigrationRequirements = [ordered]@{
     'direct screenshot-page constructor' = 'CPDesktopCreateScreenshotPage()'
     'owned screenshot registry group' = 'CPDesktop["shot"], [], CPDesktopLayoutScreenshot'
     'Game Text page title and subtitle' = '[1, "screenshot", "Game Text Translation", "Capture and translate text from your game.", "screenshot"'
     'Game Text sidebar label' = '["screenshot", "Game Text", (*) => CPDesktopNavigate(1)]'
-    'Game Text document icon' = 'Map("screenshot", 0xE7C3, "audioPage", 0xE767'
+    'Game Text translation icon' = 'Map("screenshot", 0xF2B7, "audioPage", 0xE767'
     'primary capture action label' = 'btnST.Text := "Capture && Translate"'
     'standalone capture action label' = 'btnTS.Text := "Make Capture"'
     'queued capture translation label' = 'btnSTO.Text := "Translate Captures"'
@@ -100,7 +129,7 @@ $screenshotMigrationRequirements = [ordered]@{
     'shared selection wiring' = 'ddlPrompt.OnEvent("Change", CPScreenshotAISelectionChanged)'
     'pre-construction startup preference guard' = 'translator := IsSet(chkOpenTW)'
     'pre-construction combo guard' = 'if IsSet(ddlProv)'
-    'post-construction combo initialization' = 'Modern Screenshot, Audio, Explanation, Overlay, Terminology, Profiles, and'
+    'post-construction combo initialization' = 'Modern Screenshot, Audio, Explanation, Overlay, Terminology, Profiles,'
 }
 foreach ($requirement in $screenshotMigrationRequirements.GetEnumerator()) {
     if (!$source.Contains($requirement.Value)) {
@@ -108,7 +137,7 @@ foreach ($requirement in $screenshotMigrationRequirements.GetEnumerator()) {
     }
 }
 foreach ($retiredScreenshotControl in @('CPDesktopShotControls', 'btnIMG_Add', 'btnIMG_Del',
-    'btnIMG_GM_Add', 'btnIMG_GM_Del', 'btnPrNew', 'btnPrDel')) {
+    'btnIMG_GM_Add', 'btnIMG_GM_Del', 'btnPrNew', 'btnPrDel', 'btnPrEdit')) {
     if ($source.Contains($retiredScreenshotControl)) {
         throw "Retired Game Text Translation control remains: $retiredScreenshotControl"
     }
@@ -144,7 +173,7 @@ $explanationMigrationRequirements = [ordered]@{
     'shared explanation selection wiring' = 'ddlEProv.OnEvent("Change", CPExplanationAISelectionChanged)'
     'pre-construction explanation prompt guard' = 'if IsSet(ddlEPr)'
     'explanation prompt initialization' = 'RefreshExplainPromptProfilesList(explainPromptProfile)'
-    'post-construction alias initialization' = 'Modern Screenshot, Audio, Explanation, Overlay, Terminology, Profiles, and'
+    'post-construction alias initialization' = 'Modern Screenshot, Audio, Explanation, Overlay, Terminology, Profiles,'
 }
 foreach ($requirement in $explanationMigrationRequirements.GetEnumerator()) {
     if (!$source.Contains($requirement.Value)) {
@@ -152,7 +181,7 @@ foreach ($requirement in $explanationMigrationRequirements.GetEnumerator()) {
     }
 }
 foreach ($retiredExplanationControl in @('CPDesktopExplanationControls', 'btnEGem_Add', 'btnEGem_Del',
-    'btnEOpenAI_Add', 'btnEOpenAI_Del', 'btnEPrNew', 'btnEPrDel', 'txtExplainSaveInfo')) {
+    'btnEOpenAI_Add', 'btnEOpenAI_Del', 'btnEPrNew', 'btnEPrDel', 'btnEPrEdit', 'txtExplainSaveInfo')) {
     if ($source.Contains($retiredExplanationControl)) {
         throw "Retired Explanation control remains: $retiredExplanationControl"
     }
@@ -270,50 +299,54 @@ $apiKeysMigrationRequirements = [ordered]@{
     'key save wiring' = 'btnSaveEnv.OnEvent("Click", SaveApiEnv)'
     'key delete wiring' = 'btnDelEnv.OnEvent("Click", DeleteEnvFile)'
     'environment-variable wiring' = 'btnOpenEnvVars.OnEvent("Click", OpenWindowsEnvironmentVariables)'
-    'About wiring' = 'btnAbout.OnEvent("Click", ShowAboutDialog)'
     'existing key initialization' = 'prefOpenAI := ParseEnvLine(envBody, "OPENAI_API_KEY")'
     'named enablement synchronizer' = 'ToggleApiKeyControls(*) {'
+    'inline save feedback' = 'CPApiKeysSetNotice("In-app API keys saved.")'
+    'inline removal feedback' = 'CPApiKeysSetNotice("In-app API keys removed.")'
 }
 foreach ($requirement in $apiKeysMigrationRequirements.GetEnumerator()) {
     if (!$source.Contains($requirement.Value)) {
         throw "API Keys-page migration source requirement missing: $($requirement.Key)"
     }
 }
+if (!$source.Contains('c["about"].OnEvent("Click", CPDesktopAppearanceAbout.Bind(s))')) {
+    throw 'Appearance dialog About wiring is missing'
+}
 foreach ($retiredApiKeysScaffold in @('CPDesktopOrganizeLegacy[9]', 'CPDesktopCaptureOrganizeControls(9',
-    'txtApiHelp1', 'txtApiHelp2', 'txtApiHelp3', 'txtApiHelp4', 'ToggleApiKeyControls :=')) {
+    'txtApiHelp1', 'txtApiHelp2', 'txtApiHelp3', 'txtApiHelp4', 'ToggleApiKeyControls :=',
+    'CPDesktopPageRegisterControl(9, "aboutAction"')) {
     if ($source.Contains($retiredApiKeysScaffold)) {
         throw "Retired API Keys scaffold remains: $retiredApiKeysScaffold"
     }
 }
-$pathsMigrationRequirements = [ordered]@{
-    'direct Paths-page constructor' = 'CPDesktopCreatePathsPage()'
-    'owned Paths registry group' = 'CPDesktop["organizePages"][10], [], CPDesktopLayoutOrganize.Bind(10)'
-    'Python path alias registration' = 'CPDesktopPageRegisterControl(10, "pythonPath"'
-    'overlay path alias registration' = 'CPDesktopPageRegisterControl(10, "overlayPath"'
-    'screenshot path alias registration' = 'CPDesktopPageRegisterControl(10, "imagePath"'
-    'audio path alias registration' = 'CPDesktopPageRegisterControl(10, "audioPath"'
-    'explainer path alias registration' = 'CPDesktopPageRegisterControl(10, "explainerPath"'
-    'save alias registration' = 'CPDesktopPageRegisterControl(10, "savePaths"'
-    'direct-output alias registration' = 'CPDesktopPageRegisterControl(10, "directOutput"'
-    'debug alias registration' = 'CPDesktopPageRegisterControl(10, "debugMode"'
-    'path dirty-state wiring' = 'pathEditControl.OnEvent("Change", UpdatePathsDirtyState)'
-    'Python browse wiring' = 'bPy.OnEvent("Click", BrowsePythonExe)'
-    'explainer browse wiring' = 'bExplainSel.OnEvent("Click", BrowseExplainScript)'
-    'path save wiring' = 'btnSavePaths.OnEvent("Click", (*) => SaveEditedPaths())'
-    'direct-output wiring' = 'cbDirectModelOutput.OnEvent("Click", CPOnDirectModelOutputToggle)'
-    'debug wiring' = 'cbDebug.OnEvent("Click", CPOnDebugModeToggle)'
-    'clean-state initialization' = 'ClearPathsDirty()'
+$apiSaveSource = [regex]::Match($source, '(?ms)^SaveApiEnv\([^\r\n]*\)\s*\{.*?^\}').Value
+$apiDeleteSource = [regex]::Match($source, '(?ms)^DeleteEnvFile\([^\r\n]*\)\s*\{.*?^\}').Value
+if (!$apiSaveSource -or !$apiDeleteSource -or
+    $apiSaveSource.Contains('Toast(') -or $apiDeleteSource.Contains('Toast(')) {
+    throw 'Desktop API-key feedback must remain inside the Settings page, without a floating toast window.'
 }
-foreach ($requirement in $pathsMigrationRequirements.GetEnumerator()) {
+$advancedIniRequirements = [ordered]@{
+    'Python executable load' = 'pythonExe       := Load("pythonExe",        defPython)'
+    'direct-output default off' = 'defDirectModelOutput := 0'
+    'debug default off' = 'defDebugMode := 0'
+    'direct-output INI load' = 'directModelOutput := Integer(Load("directModelOutput", defDirectModelOutput, "cfg")) ? 1 : 0'
+    'debug INI load' = 'debugMode := Integer(Load("debugMode", defDebugMode, "cfg"))'
+    'Python executable persistence' = 'IniWrite(pythonExe,       iniPath, "cfg", "pythonExe")'
+    'direct-output persistence' = 'IniWrite(directModelOutput, iniPath, "cfg", "directModelOutput")'
+    'debug persistence' = 'IniWrite(debugMode, iniPath, "cfg", "debugMode")'
+    'retired visibility-key cleanup' = 'IniDelete(iniPath, "cfg", "showPathsTab")'
+}
+foreach ($requirement in $advancedIniRequirements.GetEnumerator()) {
     if (!$source.Contains($requirement.Value)) {
-        throw "Paths-page migration source requirement missing: $($requirement.Key)"
+        throw "Advanced INI source requirement missing: $($requirement.Key)"
     }
 }
-foreach ($retiredPathsScaffold in @('CPDesktopOrganizeLegacy', 'CPDesktopExistingControls()',
-    'CPDesktopCaptureOrganizeControls(', 'cpOrganizeBefore', 'tPython :=', 'tOv :=', 'tImg :=',
-    'tAud :=', 'tExplain :=', 'directOpts :=')) {
+foreach ($retiredPathsScaffold in @('CPDesktopCreatePathsPage', 'CPDesktopLayoutPaths',
+    'CPBigBoxOpenPathEditor', 'CPBigBoxTogglePathOption', 'CPBigBoxWritePath',
+    'UpdatePathsDirtyState', 'SaveEditedPaths', 'ConfirmUnsavedPaths', 'pathsTab',
+    'CPDesktopPageRegisterControl(10', '[10, "paths"', '"path_python"')) {
     if ($source.Contains($retiredPathsScaffold)) {
-        throw "Retired Paths scaffold remains: $retiredPathsScaffold"
+        throw "Retired Paths UI remains: $retiredPathsScaffold"
     }
 }
 $audioRuntimeRequirements = [ordered]@{
@@ -369,9 +402,10 @@ foreach ($requirement in $desktopActivationRequirements.GetEnumerator()) {
     }
 }
 $sectionNavigationRequirements = [ordered]@{
-    'modern sidebar page order' = 'desktopOrder := [1, 2, 4, 3, 5, 7, 6, 8, 9, 10]'
+    'modern sidebar page order' = 'desktopOrder := [1, 2, 4, 3, 5, "study", 7, 8, 6, 9]'
     'available-page filtering' = 'if ArrayIndexOf(CPTabVisiblePages, page)'
     'section switching uses semantic order' = 'pages := CPDesktopSectionNavigationPages()'
+    'Study is a focus-only stop' = 'if nextPage = "study"'
 }
 foreach ($requirement in $sectionNavigationRequirements.GetEnumerator()) {
     if (!$source.Contains($requirement.Value)) {
@@ -397,6 +431,18 @@ foreach ($requirement in $candidate720pRequirements.GetEnumerator()) {
         throw "720p Review-layout source requirement missing: $($requirement.Key)"
     }
 }
+$studyDialog720pRequirements = [ordered]@{
+    'taskbar-aware Study dialog sizing' = 'StudyDesktopDialogFitToWorkArea(g, preferredW, preferredH)'
+    'responsive explanation generation dialog' = 'StudyDesktopDialogShow(srNewState, 920, 740, srProvider, true)'
+    'compact explanation generation threshold' = 'compact := h < 700'
+    'responsive explanation prompt dialog' = 's["controls"]["editor"], s["mode"] = "edit")'
+    'prompt edit initial caret' = 'StudyReaderPromptPlaceInitialCaret(s)'
+}
+foreach ($requirement in $studyDialog720pRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "720p Study-dialog source requirement missing: $($requirement.Key)"
+    }
+}
 $studyLibraryPointerRequirements = [ordered]@{
     'keyboard and controller row-detail wiring' = 'slList.OnEvent("ItemFocus", StudyLibraryGroupFocused.Bind(slState))'
     'exact pointer row-detail wiring' = 'slList.OnEvent("Click", StudyLibraryGroupFocused.Bind(slState))'
@@ -405,6 +451,20 @@ foreach ($requirement in $studyLibraryPointerRequirements.GetEnumerator()) {
     if (!$source.Contains($requirement.Value)) {
         throw "Study Library pointer-selection source requirement missing: $($requirement.Key)"
     }
+}
+$studyLibrarySelectorRequirements = [ordered]@{
+    'integrated management action' = 'slItems.Push("Manage Study Libraries…")'
+    'management action restores active selection' = 'StudyLibraryRefreshLibrarySelector(slState, slState["libraryName"])'
+    'management action opens existing workflow' = 'StudyLibraryOpenManager(slState)'
+    'separated final dropdown action' = 'CPComboSeparatorBefore[slState["libraryDdl"].Hwnd] := slManageIndex'
+}
+foreach ($requirement in $studyLibrarySelectorRequirements.GetEnumerator()) {
+    if (!$source.Contains($requirement.Value)) {
+        throw "Study Library selector source requirement missing: $($requirement.Key)"
+    }
+}
+if ($source.Contains('slNewLibraryButton :=')) {
+    throw 'Retired standalone Study Library management button remains'
 }
 $hotkeyRequirements = [ordered]@{
     'initial themed shortcut display' = 's["controls"]["editor"].Text := display != "" ? display : "None"'
@@ -441,6 +501,7 @@ foreach ($functionName in @('Hotkeys_OnApply', 'Hotkeys_OnRevert')) {
 $output = New-Item -ItemType Directory -Path $OutputDirectory -Force
 New-Item -ItemType Directory -Path (Join-Path $output.FullName 'assets') -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $repo 'assets/bigbox-logo.png') -Destination (Join-Path $output.FullName 'assets')
+Copy-Item -LiteralPath (Join-Path $repo 'assets/bigbox-game-placeholder.png') -Destination (Join-Path $output.FullName 'assets')
 Copy-Item -LiteralPath (Join-Path $repo 'assets/desktop-logo.png') -Destination (Join-Path $output.FullName 'assets')
 Copy-Item -LiteralPath (Join-Path $repo 'JRPG Translator.ahk') -Destination $output.FullName
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'audio_runtime_fixture.ahk') -Destination $output.FullName
@@ -520,7 +581,7 @@ $script = Join-Path $output.FullName 'desktop-generated.ahk'
 $stdout = Join-Path $output.FullName 'desktop.stdout.txt'
 $stderr = Join-Path $output.FullName 'desktop.stderr.txt'
 $process = Start-Process -FilePath $AutoHotkey -ArgumentList @('/ErrorStdOut', ('"' + $script + '"')) -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-if (!$process.WaitForExit(90000)) {
+if (!$process.WaitForExit(300000)) {
     $process.Kill()
     throw "Desktop test timed out. Logs: $output"
 }

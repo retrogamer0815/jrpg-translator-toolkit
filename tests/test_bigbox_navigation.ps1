@@ -40,8 +40,24 @@ $stage5Requirements = [ordered]@{
     'controller-first Add to Anki action' = 'if scPreferAddToAnki {'
     'non-blocking controller row-action popup' = 'StudyCandidatesShowSelectedActionsDeferred.Bind('
     'stable popup row base colors' = 'CPThemedChoicePopupResetRows(cpPopupState)'
+    'fullscreen combo atomic reveal' = 'SetTimer(StudyBigBoxPrepareComboReveal.Bind(slForm), -120)'
     'seamless fullscreen Study handoff' = 'Keep the dashboard visible and foreground while the Library performs'
     'controller release transition guard' = 'CPControllerSurfaceTransitionBlocks(cpNavState, targetHwnd)'
+    'single focus-border geometry' = 'CPFocusBorderPositions(x, y, w, h, thickness)'
+    'dashboard buttons use owner-draw painting' = 'CPBigBoxPreparePaintedButtons()'
+    'dashboard focus replaces neutral border' = 'borderHex := focused ? CPBigBoxFocusColor()'
+    'dashboard focus omits native inset' = 'native DrawFocusRect, whose dotted inset looked like a second gray frame.'
+    'dashboard non-button focus uses repaint-safe overlays' = 'JRPG Translator dashboard focus border'
+    'page switches repaint every shown tile' = 'CPBigBoxRedrawVisiblePaintedButtons()'
+    'controller status uses readable enabled text' = 'CPBigBoxControls["ctrl_status"].Enabled := true'
+    'Game Text purpose-specific help' = 'Translate text captured from your game. AI, formatting, and startup changes are saved immediately.'
+    'Explanation purpose-specific help' = 'Create study-focused explanations from captured game text. AI, saving, and startup changes are saved immediately.'
+    'spatial vertical dashboard navigation' = 'CPBigBoxClosestNavigationColumn('
+    'neutral game-media artwork fallback' = 'CPBigBoxNeutralArtworkPath()'
+    'format-neutral capture size wording' = 'Capture image size limit'
+    'Study focus replaces neutral border' = 'sbPositions := CPFocusBorderPositions('
+    'foreground Big Box direct launch' = 'A foreground --bigbox-ui launch requests the dashboard immediately.'
+    'running-instance Big Box reveal' = '__cpExistingHwnd, "open_bigbox_dashboard"'
 }
 foreach ($requirement in $stage5Requirements.GetEnumerator()) {
     if (!$sourceNormalized.Contains($requirement.Value)) {
@@ -66,6 +82,7 @@ if ($libraryOpenSource -match '(?:slList|CPStudyLibraryState\["list"\])\.Focus\(
 $output = New-Item -ItemType Directory -Path $OutputDirectory -Force
 $assetOutput = New-Item -ItemType Directory -Path (Join-Path $output.FullName 'assets') -Force
 Copy-Item -LiteralPath (Join-Path $repo 'assets/bigbox-logo.png') -Destination $assetOutput.FullName -Force
+Copy-Item -LiteralPath (Join-Path $repo 'assets/bigbox-game-placeholder.png') -Destination $assetOutput.FullName -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'audio_input_fixture.ahk') -Destination $output.FullName -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'audio_runtime_fixture.ahk') -Destination $output.FullName -Force
 Add-Type -AssemblyName System.Drawing
@@ -93,7 +110,8 @@ $functions = @('CPPalette', 'CPSetWindowCloaked', 'StudyLibraryImageDimensions',
     'CPShowDialogFocusCues', 'CPControllerNavigationState', 'CPControllerResetNavigation',
     'CPControllerBeginSurfaceTransition', 'CPControllerFinishSurfaceTransition',
     'CPControllerSurfaceTransitionBlocks',
-    'CPControllerDispatchNavigation', 'CPControllerHandleNavigation',
+    'CPControllerPanelHwnd', 'CPControllerDispatchNavigation',
+    'CPControllerHandleNavigation',
     'AutoPersist', 'UpdateVars', 'SaveAll', 'ApplyShotSettings', 'ExplainPromptChanged',
     'ToggleModelControls', 'ToggleExplanationControls', 'ToggleAudioControls',
     'CPExplanationPreference', 'CPSetExplanationPreference', 'CPExplanationPreferenceChanged',
@@ -121,7 +139,6 @@ $functions = @('CPPalette', 'CPSetWindowCloaked', 'StudyLibraryImageDimensions',
     'ModelListNaturalCompare', 'ModelListSort', 'SetComboItems',
     'SetComboToExistingItem', 'RefreshModelCombos', 'ModelAlreadyAdded',
     'ModelCatalogParseOutput', 'CPNormalizeApiSecret', 'CPDotEnvValue',
-    'UpdatePathsDirtyState',
     'CPNativePickerOwner', 'CPNativePicker', 'CPNativeFileSelect', 'CPNativeDirSelect',
     'ListPromptProfiles', 'RefreshPromptProfilesList',
     'ListExplainPromptProfiles', 'RefreshExplainPromptProfilesList',
@@ -146,7 +163,8 @@ $generatedPath = Join-Path $output.FullName 'bigbox-navigation-generated.ahk'
 $studyFunctions = @(
     'StudyDesktopRegistry', 'StudyDesktopContext',
     'StudyLibraryFocusOnOpen', 'StudyLibraryImageCounterText', 'StudyLibraryApplyBigBoxFonts',
-    'StudyLibrarySafeName', 'StudyLibraryDirectoryForName', 'StudyLibraryListNames',
+    'StudyLibrarySafeName', 'StudyLibraryDirectoryForName', 'StudyLibraryMoveDirectory',
+    'StudyLibraryListNames',
     'StudyLibraryRefreshLibrarySelector', 'StudyLibraryFormatBytes',
     'StudyLibraryCreateNew', 'StudyLibraryOpenNew', 'StudyLibraryManagerSelectedName',
     'StudyLibraryManagerUpdateActions', 'StudyLibraryRefreshManager', 'StudyLibraryManagerSwitch',
@@ -183,6 +201,7 @@ $studyFunctions = @(
     'StudyAnkiChooseText', 'StudyAnkiDeckScope', 'StudyAnkiTextInList', 'StudyLibraryImageDimensions',
     'CPHwndIsCombo', 'CPComboDropped', 'CPShowCombo', 'CPHwndIsFocusable',
     'CPApplyOwnedDialogTheme',
+    'CPFocusBorderPositions',
     'StudyBigBoxFocusFrameKeys', 'StudyBigBoxFocusFrameHide',
     'StudyBigBoxFocusFrameUpdate', 'StudyBigBoxFocusFrameFocused',
     'StudyBigBoxFocusFrameWatch', 'StudyBigBoxFocusFrameStart',
@@ -216,7 +235,9 @@ $studyFunctions = @(
     'StudyLibraryDatePickerNavigate', 'StudyLibraryDatePickerKeyDown',
     'StudyLibraryDatePickerDestroyed', 'StudyLibraryOpenDatePicker',
     'StudyLibraryBigBoxFormState', 'StudyLibraryBigBoxFormAdd',
-    'StudyLibraryBigBoxFormShow', 'StudyCandidatesRecommendationBigBoxShell',
+    'StudyLibraryBigBoxFormShow', 'StudyBigBoxRefreshComboFaces',
+    'StudyBigBoxPrepareComboReveal', 'StudyBigBoxFinishComboReveal',
+    'StudyCandidatesRecommendationBigBoxShell',
     'StudyCandidatesRecommendationBigBoxShow',
     'StudyCandidatesRecommendationBigBoxApplyFonts',
     'StudyCandidatesRecommendationBigBoxApplyTheme',
@@ -242,7 +263,7 @@ $studyFunctions = @(
     'StudyLibraryChoiceIndex', 'StudyLibraryDateControlsChanged',
     'StudyLibraryClearFilters', 'StudyLibraryClearFiltersAndClose',
     'StudyLibraryCloseDialog',
-    'CPControllerNavigationTarget',
+    'CPControllerPanelHwnd', 'CPControllerNavigationTarget',
     'StudyCandidatesDestroyGui',
     'StudyCandidatesRestoreLibraryFocus',
     'StudyCandidatesInitialRefresh',

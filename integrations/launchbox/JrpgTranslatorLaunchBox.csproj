@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net9.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
     <UseSystemDrawing>true</UseSystemDrawing>
     <OutputType>Library</OutputType>
@@ -31,5 +31,6 @@
     <EmbeddedResource Remove="Tests\**\*" />
     <None Remove="Tests\**\*" />
     <EmbeddedResource Include="Assets\menu-icon.png" />
+    <EmbeddedResource Include="Assets\joytokey-icon.png" />
   </ItemGroup>
 </Project>

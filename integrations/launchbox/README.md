@@ -64,7 +64,7 @@ Build with:
 .\build.ps1
 ```
 
-The build output is under `bin\Release\net9.0-windows`. The build script also
+The build output is under `bin\Release\net10.0-windows`. The build script also
 runs a self-contained smoke test that does not use personal JoyToKey profiles.
 
 Create an installable ZIP with:

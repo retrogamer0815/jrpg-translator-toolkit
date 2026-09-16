@@ -15,7 +15,6 @@ global envPath := A_ScriptDir "\Settings\.env"
 global APP_VERSION := "v-test", PROJECT_URL := "https://example.invalid/project"
 global BUG_REPORT_URL := "https://example.invalid/bugs", BEGINNER_VIDEO_URL := "https://example.invalid/video"
 global WRITTEN_GUIDE_URL := "https://example.invalid/guide"
-global showPathsTab := false
 global imgProvider := "gemini", geminiImgModel := "gemini-test", imgModel := "gpt-test"
 global explainProvider := "openai", explainOpenAIModel := "gpt-test", explainGeminiModel := "gemini-test"
 global audioProvider := "gemini", trModel := "audio-test", geminiAudioModel := "gemini-audio-test"
@@ -62,7 +61,6 @@ global TestOverlayWindows := Map()
 global CPControllerColorGradientSliders := TestOverlayGradientKeys, CPControllerColorGradientMessageRegistered := false
 global TestOverlayGui := Gui("-Caption +ToolWindow"), CPOverlayAdjustState := Map("active", false)
 global CP_PRESENTATION_MODE := "bigbox", TestOverlayReady := true, TestOverlayReturns := 0, TestOverlaySaves := 0
-global cbDirectModelOutput := ui.AddCheckbox(), cbDebug := ui.AddCheckbox()
 global cbApiInApp := ui.AddCheckbox(), eOpenAI := ui.AddEdit(, ""), eGemini := ui.AddEdit(, "")
 global btnSaveEnv := ui.AddButton(), btnDelEnv := ui.AddButton()
 global envSavedOpenAI := "", envSavedGemini := ""
@@ -93,9 +91,6 @@ global speakerName := "[Windows Default]", gAudioInputJob := Map("active", false
 global TestLiveAudioRunning := false
 global pythonExe := "python.exe", audioScript := "audio.py", overlayAhk := "overlay.ahk", imgScript := "image.py"
 global explainScript := "explain.py", captureDir := "captures", overlayTrans := 255
-global ePython := ui.AddEdit(, pythonExe), eOverlay := ui.AddEdit(, overlayAhk)
-global eImg := ui.AddEdit(, imgScript), eAudio := ui.AddEdit(, audioScript), eExplain := ui.AddEdit(, explainScript)
-global btnSavePaths := ui.AddButton(), pathsDirty := false
 global audioTargetLang := "English", promptProfile := "default", explainPromptProfile := "default", imgPostproc := "test"
 global capMaxKB := 1400, capMode := "region", capRect := "0,0,100,100"
 global debugMode := 0, directModelOutput := 0, controlPanelOpacity := 1, useTerminologyOverrides := 0
@@ -222,7 +217,6 @@ try {
         CPBigBoxSetPage("home", false)
     }
     ; Full pages must match every original desktop tab, not the Home tile list.
-    showPathsTab := true
     TestAssert(CPBigBoxPageOrder().Length = TestDesktopTabNames.Length + 1, "All desktop tabs represented")
     for testPageIndex, testPageKey in CPBigBoxPageOrder() {
         if (testPageIndex = 1)
@@ -236,21 +230,19 @@ try {
             TestAssert(InStr(CPBigBoxControls["previewTitle"].Text, "Full settings page"), "Full page preview is labeled")
         TestLayout(3840, 2160)
     }
-    TestAssert(CPBigBoxCurrentPage = "paths", "Paths is last when enabled")
+    TestAssert(CPBigBoxCurrentPage = "apiKeys", "API Keys is the final settings page")
     CPBigBoxSwitchPage(1)
-    TestAssert(CPBigBoxCurrentPage = "home", "Paths wraps to Home")
-    CPBigBoxSetPage("paths")
-    showPathsTab := false
-    CPBigBoxDashboardUpdateContent()
-    TestAssert(CPBigBoxCurrentPage = "home", "Hiding the active Paths page returns safely to Home")
-    TestAssert(!CPBigBoxSetPage("paths"), "Hidden Paths page cannot be opened")
-    TestAssert(CPBigBoxPageOrder().Length = 10, "Paths follows desktop optional visibility")
+    TestAssert(CPBigBoxCurrentPage = "home", "API Keys wraps to Home")
+    TestAssert(!CPBigBoxSetPage("paths"), "The retired Paths page cannot be opened")
+    TestAssert(CPBigBoxPageOrder().Length = 10, "Fullscreen includes Home and nine desktop pages")
     TestAssert(CPBigBoxPageIndicator["w"] = Floor(CPBigBoxPageIndicator["width"] / 10)
-        - CPBigBoxPageIndicator["gap"], "Indicator updates after optional tab removal")
+        - CPBigBoxPageIndicator["gap"], "Indicator matches the fixed page ring")
     CPBigBoxSwitchPage(-1)
     TestAssert(CPBigBoxCurrentPage = "apiKeys", "Previous wraps Home to API Keys")
     CPBigBoxSwitchPage(1)
     TestAssert(CPBigBoxCurrentPage = "home", "Next wraps API Keys to Home")
+    TestAssert(CPBigBoxControls["advanced"].Text = "Open Desktop Interface",
+        "Fullscreen dashboard clearly labels the desktop-interface handoff")
     for testTile in CPBigBoxHomeTiles() {
         CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls[testTile[1]]))
         if testTile[1] = "audioToggle" {
@@ -849,7 +841,10 @@ TestScreenshotHintDetails(width) {
             CPBigBoxUpdateSettingsHint(hintKey)
             hintText := CPBigBoxControls["modeBody"].Text
             hintLines := StrSplit(hintText, "`n", "`r")
-            TestAssert(hintLines.Length = 2 && hintLines[2] != ""
+            TestAssert(hintLines.Length = 2
+                && (SubStr(hintKey, 1, 3) != "ai_"
+                    || hintLines[1] = "Translate text captured from your game. AI, formatting, and startup changes are saved immediately.")
+                && hintLines[2] != ""
                 && hintLines[2] = CPBigBoxScreenshotHintDetail(hintKey)
                 && !InStr(hintText, "remain in Advanced Settings"),
                 "Screenshot tile has current, specific second-line help: " hintKey " at " width)
@@ -1483,6 +1478,7 @@ TestBigBoxControls() {
 TestBigBoxStage3D() {
     global
     local before, startCount, stopCount, stageSize, stageIni, stageOverlay, sentBefore, resumed, captureKind, targetBefore
+    local captureHelp, captureHelpSeen, captureHelpKey, expectedHelp, helpText
     CPBigBoxSetPage("home", false)
     TestLiveAudioRunning := false
     startCount := TestAudioStarts, stopCount := TestAudioStops
@@ -1538,6 +1534,24 @@ TestBigBoxStage3D() {
         CPBigBoxOpenCaptureSettings()
         TestAssert(CPBigBoxCaptureParent = "home" && CPBigBoxNavigationControls.Length = 6,
             "Capture opens as a modern Home quick view")
+        captureHelp := Map(
+            "cap_region", "Select a fixed rectangular area of the screen for game-text captures.",
+            "cap_window", "Choose the game window that should be used for game-text captures.",
+            "cap_max", "Set the largest file size allowed for each capture image."
+        )
+        captureHelpSeen := Map()
+        for captureHelpKey, expectedHelp in captureHelp {
+            CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls[captureHelpKey]))
+            helpText := CPBigBoxControls["modeBody"].Text
+            TestAssert(InStr(helpText, expectedHelp) && !captureHelpSeen.Has(helpText),
+                "Capture tile has unique contextual help: " captureHelpKey)
+            TestAssert(!InStr(helpText, "PNG"),
+                "Capture help describes the function without exposing its file format: " captureHelpKey)
+            captureHelpSeen[helpText] := true
+        }
+        TestAssert(InStr(CPBigBoxControls["cap_max"].Text, "Capture image size limit")
+            && !InStr(CPBigBoxControls["cap_max"].Text, "PNG"),
+            "Capture size tile uses format-neutral wording")
         TestLayout(stageSize[1], stageSize[2])
         TestCapture("capture-" stageSize[1] ".png", stageSize[1], stageSize[2])
         CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls["cap_max"]))
@@ -1787,6 +1801,7 @@ TestBigBoxOverlays() {
     global
     local dims, page, target, fields, field, pref, before, sendsBefore, value, expected, oldProfile
     local realIni, original, failed, returnsBefore, oldHidden, x, y, w, h, theme, busyBefore
+    local seenHelp, helpKey, helpText, helpLines, helpHeight
     ddlFont.Add(["Arial", "Consolas", "Georgia", "Verdana", "Tahoma"])
     TestOverlayStatusStates()
     for dims in [[1280, 720], [1920, 1080], [3840, 2160]] {
@@ -1799,8 +1814,46 @@ TestBigBoxOverlays() {
                 "Overlay page replaces preview without writes: " page)
             TestLayout(dims[1], dims[2])
             TestCapture(page "-" dims[1] ".png", dims[1], dims[2])
-            if CPBigBoxOverlayTarget() = ""
+            if page = "quickOverlays" {
+                seenHelp := Map()
+                for helpKey in ["ov_translator", "ov_explainer", "ov_main",
+                    "backHome", "advanced", "return"] {
+                    CPBigBoxUpdateSettingsHint(helpKey)
+                    helpText := CPBigBoxControls["modeBody"].Text
+                    helpLines := StrSplit(helpText, "`n", "`r")
+                    TestAssert(helpText = CPBigBoxQuickOverlayHelp(helpKey)
+                        && helpLines.Length = 2 && !seenHelp.Has(helpText),
+                        "Quick Overlay choice has unique two-line help: " helpKey " at " dims[1])
+                    seenHelp[helpText] := true
+                    CPBigBoxControls["modeBody"].GetPos(,,, &helpHeight)
+                    TestAssert(TestTextHeight(CPBigBoxControls["modeBody"]) <= helpHeight,
+                        "Quick Overlay help fits: " helpKey " at " dims[1])
+                }
+            }
+            target := CPBigBoxOverlayTarget()
+            if target = ""
                 continue
+            if page = "translationWindow" || page = "explanationWindow" {
+                seenHelp := Map()
+                for helpKey in CPBigBoxSettingsKeys(page) {
+                    CPBigBoxUpdateSettingsHint(helpKey)
+                    helpText := CPBigBoxControls["modeBody"].Text
+                    helpLines := StrSplit(helpText, "`n", "`r")
+                    TestAssert(helpText = CPBigBoxOverlayHelp(target, helpKey)
+                        && helpLines.Length = 2 && !seenHelp.Has(helpText),
+                        "Overlay setting has unique two-line help: " page " / " helpKey " at " dims[1])
+                    seenHelp[helpText] := true
+                    CPBigBoxControls["modeBody"].GetPos(,,, &helpHeight)
+                    TestAssert(TestTextHeight(CPBigBoxControls["modeBody"]) <= helpHeight,
+                        "Overlay setting help fits: " page " / " helpKey " at " dims[1])
+                }
+            } else {
+                CPBigBoxUpdateSettingsHint("ov_bg")
+                helpText := CPBigBoxControls["modeBody"].Text
+                CPBigBoxUpdateSettingsHint("ov_position")
+                TestAssert(helpText != CPBigBoxControls["modeBody"].Text,
+                    "Quick overlay detail changes help with focus: " page " at " dims[1])
+            }
             for field in ["bg", "opacity"] {
                 pref := CPOverlayPreference(CPBigBoxOverlayTarget(), field)
                 CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls["ov_" field]))
@@ -2475,15 +2528,11 @@ TestBigBoxSetupManagement() {
     secret := "synthetic-test-key-never-display"
     promptName := "controller_test_prompt"
     promptPath := promptsDir "\" promptName ".txt"
-    originalPython := pythonExe
-    originalDirect := directModelOutput
-    originalDebug := debugMode
     originalPrompt := ddlPrompt.Text
     try {
         try if FileExist(envPath)
             FileDelete(envPath)
         CPBigBoxSyncApiDesktop()
-        showPathsTab := true
         CPBigBoxSetPage("apiKeys", false)
         TestAssert(CPBigBoxSettingsGroups("apiKeys").Length = 3
             && CPBigBoxNavigationControls.Length = 8,
@@ -2495,6 +2544,12 @@ TestBigBoxSetupManagement() {
         CPBigBoxOpenApiEditor("gemini")
         TestAssert(CPBigBoxCurrentPage = "setupEdit" && CPBigBoxControls["setup_secret"].Visible,
             "Provider key opens a masked fullscreen editor")
+        secretStyle := DllCall("user32\GetWindowLongPtr", "ptr",
+            CPBigBoxControls["setup_secret"].Hwnd, "int", -16, "ptr")
+        TestAssert((secretStyle & 0x20) && !(secretStyle & 0x4) && !(secretStyle & 0x00200000),
+            "Fullscreen API key is a password-only single-line field without a vertical scrollbar")
+        TestAssert(SendMessage(0x00D2, 0, 0, CPBigBoxControls["setup_secret"].Hwnd) != 0,
+            "Fullscreen API key has an active password mask")
         TestLayout(1920, 1080)
         TestCapture("api-key-editor-1920.png", 1920, 1080)
         CPBigBoxControls["setup_secret"].Value := secret
@@ -2505,6 +2560,15 @@ TestBigBoxSetupManagement() {
             && !InStr(CPBigBoxControls["modeBody"].Text, secret),
             "Saved API secret is never copied into dashboard labels")
         CPBigBoxOpenApiEditor("gemini")
+        CPBigBoxGui.Show("Hide w1280 h720")
+        CPBigBoxDashboardResize(CPBigBoxGui, 0, 1280, 720)
+        TestAssert(SendMessage(0x00D2, 0, 0, CPBigBoxControls["setup_secret"].Hwnd) != 0,
+            "Reopening a saved API key keeps its password mask")
+        TestAssert(TestFontHeight(CPBigBoxControls["setup_secret"])
+            > TestFontHeight(CPBigBoxControls["setup_edit"]),
+            "API key text is larger than the general-purpose setup field at 720p")
+        TestLayout(1280, 720)
+        TestCapture("api-key-editor-saved-1280.png", 1280, 720)
         CPBigBoxDeleteApiRequest("gemini")
         TestAssert(CPBigBoxCurrentPage = "setupConfirm", "Removing one in-app key requires confirmation")
         CPBigBoxCancelSetup()
@@ -2514,34 +2578,6 @@ TestBigBoxSetupManagement() {
         CPBigBoxConfirmSetup()
         TestAssert(CPBigBoxCurrentPage = "apiKeys" && CPBigBoxApiLocalValue("gemini") = "",
             "Confirmed API-key removal clears only the in-app provider key")
-
-        CPBigBoxSetPage("paths", false)
-        TestAssert(CPBigBoxSettingsGroups("paths").Length = 3,
-            "Paths is a complete grouped fullscreen page")
-        TestLayout(1920, 1080)
-        TestCapture("paths-1920.png", 1920, 1080)
-        CPBigBoxOpenPathEditor("python")
-        CPBigBoxControls["setup_edit"].Value := A_ScriptFullPath
-        CPBigBoxSaveSetup()
-        TestAssert(pythonExe = A_ScriptFullPath && IniRead(iniPath, "cfg", "pythonExe", "") = A_ScriptFullPath,
-            "Existing path saves to the shared runtime setting")
-        CPBigBoxOpenPathEditor("python")
-        missingPath := A_ScriptDir "\missing-python.exe"
-        CPBigBoxControls["setup_edit"].Value := missingPath
-        CPBigBoxSaveSetup()
-        TestAssert(CPBigBoxCurrentPage = "setupConfirm" && pythonExe = A_ScriptFullPath,
-            "Missing path waits for an explicit save-anyway confirmation")
-        CPBigBoxCancelSetup()
-        TestAssert(CPBigBoxCurrentPage = "setupEdit" && CPBigBoxControls["setup_edit"].Value = missingPath,
-            "Cancelling missing-path confirmation returns to the pending editor")
-        CPBigBoxSaveSetup()
-        CPBigBoxConfirmSetup()
-        TestAssert(pythonExe = missingPath, "Confirmed missing path uses the desktop tab's save-anyway behavior")
-        CPBigBoxSetPage("paths", false)
-        CPBigBoxTogglePathOption("direct")
-        CPBigBoxTogglePathOption("debug")
-        TestAssert(directModelOutput != originalDirect && debugMode != originalDebug,
-            "Advanced path-page switches save immediately")
 
         CPBigBoxSetPage("quickTranslation", false)
         CPBigBoxOpenAIChoice("detail")
@@ -2601,14 +2637,8 @@ TestBigBoxSetupManagement() {
         try if FileExist(promptPath ".bak")
             FileDelete(promptPath ".bak")
         CPBigBoxSyncApiDesktop()
-        CPBigBoxWritePath("python", originalPython)
-        if directModelOutput != originalDirect
-            CPBigBoxTogglePathOption("direct")
-        if debugMode != originalDebug
-            CPBigBoxTogglePathOption("debug")
         RefreshPromptProfilesList(originalPrompt)
         CPBigBoxApplyAISelection("translation", "detail")
-        showPathsTab := false
         CPBigBoxResetSetup()
         CPBigBoxAIChoice := Map("active", false)
         CPBigBoxSetPage("home", false)
@@ -2705,9 +2735,14 @@ TestPickerTransitionFocusProbe(hwnd, msg, wParam, lParam, subclassId, refData) {
 }
 
 TestGroupedFocusAndPainting() {
-    global CPBigBoxGui, CPBigBoxControls, CPBigBoxNavigationRows, CPBigBoxFocusFrame
+    global CPBigBoxGui, CPBigBoxControls, CPBigBoxNavigationRows, CPBigBoxFocusFrame, CPBigBoxCurrentPage
     global CPBigBoxFocusIndex, CPBigBoxNavigationControls, controlDarkMode, TestPaintCounts
     CPBigBoxSetPage("explanation", false)
+    CPBigBoxUpdateSettingsHint("ai_provider")
+    explanationHint := StrSplit(CPBigBoxControls["modeBody"].Text, "`n", "`r")
+    TestAssert(explanationHint.Length = 2
+        && explanationHint[1] = "Create study-focused explanations from captured game text. AI, saving, and startup changes are saved immediately.",
+        "Explanation page describes its purpose instead of using generic AI-setting help")
     TestAssert(CPBigBoxNavigationRows.Length = 5, "Explanation has arrows, three semantic rows and bottom actions")
     for groupIndex, group in CPBigBoxExplanationGroups() {
         for index, key in group[2]
@@ -2726,6 +2761,25 @@ TestGroupedFocusAndPainting() {
     TestAssert(CPBigBoxFocusFrame["key"] = "exp_openOnStartup", "Down reaches Explainer startup from Study Library")
     CPBigBoxDashboardMoveFocus("Right")
     TestAssert(CPBigBoxFocusFrame["key"] = "exp_alwaysOnTop", "Right reaches the other startup option")
+    CPBigBoxDashboardMoveFocus("Up")
+    TestAssert(CPBigBoxFocusFrame["key"] = "exp_screenshots",
+        "Up from Always on top follows the visual column to Source screenshots")
+    CPBigBoxDashboardMoveFocus("Down")
+    TestAssert(CPBigBoxFocusFrame["key"] = "exp_alwaysOnTop",
+        "Down from Source screenshots returns to the aligned startup option")
+
+    for overlayPage in ["translationWindow", "explanationWindow"] {
+        CPBigBoxSetPage(overlayPage, false)
+        CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls["ov_position"]))
+        CPBigBoxDashboardMoveFocus("Up")
+        TestAssert(CPBigBoxFocusFrame["key"] = "ov_size",
+            overlayPage " Move / Resize moves up to the aligned Font size tile")
+        CPBigBoxDashboardMoveFocus("Down")
+        TestAssert(CPBigBoxFocusFrame["key"] = "ov_position",
+            overlayPage " Font size moves down to the aligned Move / Resize tile")
+    }
+
+    CPBigBoxSetPage("explanation", false)
     CPBigBoxControls["exp_plainText"].Focus()
     Sleep(30)
     TestAssert(CPBigBoxFocusFrame["key"] = "exp_plainText", "Native mouse-style focus updates the accent frame")
@@ -2770,6 +2824,32 @@ TestGroupedFocusAndPainting() {
         Sleep(70)
         TestAssert(TestPaintCounts[CPBigBoxControls["audioToggle"].Hwnd]["paint"] > 0,
             "Paint probe detects a deliberately forced whole-window repaint")
+        for handle, counts in TestPaintCounts
+            counts["paint"] := 0
+        ; Drive the core transition directly: the off-screen test window is
+        ; intentionally non-active, so the public L/R guard rejects input.
+        CPBigBoxCurrentPage := "translationWindow"
+        CPBigBoxDashboardRelayoutAndUpdate()
+        CPBigBoxApplyPageVisibility()
+        Sleep(70)
+        for key in ["ov_bg", "ov_txt", "ov_name", "ov_font", "ov_size", "ov_bold", "ov_opacity", "ov_position"]
+            TestAssert(TestPaintCounts[CPBigBoxControls[key].Hwnd]["paint"] > 0,
+                "L/R page reveal immediately paints the complete overlay tile: " key)
+        for handle, counts in TestPaintCounts
+            counts["paint"] := 0
+        CPBigBoxCurrentPage := "controls"
+        CPBigBoxDashboardRelayoutAndUpdate()
+        CPBigBoxApplyPageVisibility()
+        Sleep(70)
+        for key in ["ctrl_keyboard", "ctrl_controller", "ctrl_enabled", "ctrl_dpad"]
+            TestAssert(TestPaintCounts[CPBigBoxControls[key].Hwnd]["paint"] > 0,
+                "L/R page reveal immediately paints the complete Controls tile: " key)
+        TestAssert(CPBigBoxControls["ctrl_status"].Enabled,
+            "Controller status uses normal high-contrast text instead of disabled embossing")
+        CPBigBoxCurrentPage := "home"
+        CPBigBoxDashboardRelayoutAndUpdate()
+        CPBigBoxApplyPageVisibility()
+        Sleep(70)
         for handle, counts in TestPaintCounts
             counts["paint"] := 0
         ; Invoke the final focus operation directly: the foreground guard must
@@ -2852,8 +2932,9 @@ TestGroupedFocusAndPainting() {
         CPBigBoxGui.Hide()
     }
     CPBigBoxDashboardHide(false)
-    for key in CPBigBoxFocusFrameKeys()
-        TestAssert(!TestControlShown(CPBigBoxControls[key]), "Hiding dashboard clears focus decoration: " key)
+    for index, part in CPBigBoxFocusFrame["parts"]
+        TestAssert(!DllCall("user32\IsWindowVisible", "ptr", part.Hwnd, "int"),
+            "Hiding dashboard clears focus decoration: " index)
     CPBigBoxRestorePageFocus()
     TestAssert(CPBigBoxFocusFrame["key"] != "", "Focus frame restores without creating a new GUI")
     CPBigBoxSetPage("home", false)
@@ -2981,6 +3062,23 @@ TestBigBoxTerminologyProfiles() {
     FileAppend("[profile]`r`nschemaVersion=1`r`nname=Other`r`n", gameProfilesDir "\Other.ini", "UTF-8")
     CPBigBoxSetPage("profiles", false)
     TestStartupOverlays()
+    CPBigBoxGui.Show("Hide w1280 h720")
+    CPBigBoxDashboardResize(CPBigBoxGui, 0, 1280, 720)
+    profileHelpSeen := Map()
+    for profileHelpKey in CPBigBoxSettingsKeys("profiles") {
+        CPBigBoxUpdateSettingsHint(profileHelpKey)
+        profileHelpText := CPBigBoxControls["modeBody"].Text
+        profileHelpLines := StrSplit(profileHelpText, "`n", "`r")
+        TestAssert(profileHelpText = CPBigBoxProfilesHelp(profileHelpKey)
+            && profileHelpLines.Length = 2 && !profileHelpSeen.Has(profileHelpText),
+            "Profile action has unique two-line help at 720p: " profileHelpKey)
+        profileHelpSeen[profileHelpText] := true
+        CPBigBoxControls["modeBody"].GetPos(,,, &profileHelpHeight)
+        TestAssert(TestTextHeight(CPBigBoxControls["modeBody"]) <= profileHelpHeight,
+            "Profile action help fits at 720p: " profileHelpKey)
+    }
+    CPBigBoxGui.Show("Hide w1920 h1080")
+    CPBigBoxDashboardResize(CPBigBoxGui, 0, 1920, 1080)
     TestLayout(1920, 1080)
     TestCapture("profiles-settings-1920.png", 1920, 1080)
     TestAssert(CPBigBoxGroupedSettingsActive(), "Profiles is a complete grouped Big Box page")
@@ -3123,15 +3221,48 @@ TestPaintProbe(hwnd, msg, wParam, lParam, subclassId, refData) {
 }
 
 TestFocusFrameBounds() {
-    global CPBigBoxControls, CPBigBoxFocusFrame
-    CPBigBoxControls[CPBigBoxFocusFrame["key"]].GetPos(&x, &y, &w, &h)
-    for key in CPBigBoxFocusFrameKeys() {
-        control := CPBigBoxControls[key]
-        control.GetPos(&frameX, &frameY, &frameW, &frameH)
-        TestAssert(TestControlShown(control) && !control.Enabled, "Focus frame is visible but non-interactive: " key)
-        TestAssert(frameX + frameW <= x || frameX >= x + w || frameY + frameH <= y || frameY >= y + h,
-            "Focus frame never covers the button: " key)
-        TestAssert(Min(frameW, frameH) >= 3, "Focus border remains at least three pixels thick: " key)
+    global CPBigBoxControls, CPBigBoxFocusFrame, CPBigBoxPaintButtons, controlDarkMode
+    target := CPBigBoxControls[CPBigBoxFocusFrame["key"]]
+    TestAssert(CPBigBoxPaintButtons.Has(target.Hwnd),
+        "Dashboard button is registered for flat owner-draw painting")
+    style := DllCall("user32\GetWindowLongPtrW", "ptr", target.Hwnd, "int", -16, "ptr")
+    TestAssert((style & 0xF) = 0xB, "Dashboard button uses BS_OWNERDRAW")
+    for index, part in CPBigBoxFocusFrame["parts"] {
+        TestAssert(!DllCall("user32\IsWindowVisible", "ptr", part.Hwnd, "int"),
+            "Painted buttons do not need a second overlay border: " index)
+    }
+
+    clientRect := Buffer(16, 0)
+    DllCall("user32\GetClientRect", "ptr", target.Hwnd, "ptr", clientRect.Ptr)
+    w := NumGet(clientRect, 8, "int"), h := NumGet(clientRect, 12, "int")
+    screenDc := DllCall("user32\GetDC", "ptr", 0, "ptr")
+    memoryDc := DllCall("gdi32\CreateCompatibleDC", "ptr", screenDc, "ptr")
+    bitmap := DllCall("gdi32\CreateCompatibleBitmap", "ptr", screenDc, "int", w, "int", h, "ptr")
+    oldBitmap := DllCall("gdi32\SelectObject", "ptr", memoryDc, "ptr", bitmap, "ptr")
+    try {
+        drawItem := Buffer(A_PtrSize = 8 ? 64 : 48, 0)
+        hwndOffset := A_PtrSize = 8 ? 24 : 20
+        hdcOffset := A_PtrSize = 8 ? 32 : 24
+        rectOffset := A_PtrSize = 8 ? 40 : 28
+        NumPut("uint", 4, drawItem, 0) ; ODT_BUTTON
+        NumPut("ptr", target.Hwnd, drawItem, hwndOffset)
+        NumPut("ptr", memoryDc, drawItem, hdcOffset)
+        NumPut("int", 0, "int", 0, "int", w, "int", h, drawItem, rectOffset)
+        TestAssert(CPBigBoxDrawButton(drawItem.Ptr), "Owner-draw button paints successfully")
+        blue := CPColorRef(CPBigBoxFocusColor())
+        TestAssert(DllCall("gdi32\GetPixel", "ptr", memoryDc, "int", 0,
+            "int", Floor(h / 2), "uint") = blue,
+            "Focused button has one solid blue outer border")
+        thickness := CPBigBoxFocusFrame["thickness"]
+        innerPixel := DllCall("gdi32\GetPixel", "ptr", memoryDc,
+            "int", thickness + 2, "int", thickness + 2, "uint")
+        TestAssert(innerPixel = CPColorRef(CPPalette(controlDarkMode)["surfaceAlt"]),
+            "Blue border transitions directly to the flat button fill without a gray inset")
+    } finally {
+        DllCall("gdi32\SelectObject", "ptr", memoryDc, "ptr", oldBitmap, "ptr")
+        DllCall("gdi32\DeleteObject", "ptr", bitmap)
+        DllCall("gdi32\DeleteDC", "ptr", memoryDc)
+        DllCall("user32\ReleaseDC", "ptr", 0, "ptr", screenDc)
     }
 }
 TestSnapshot(token := "") {
@@ -3143,6 +3274,8 @@ TestControlShown(control) {
 }
 TestHomeHeaderContent() {
     global CPBigBoxControls, CPBigBoxPageFocus, CPBigBoxActionNotice
+    global CP_GAME_BOX_ART, CP_GAME_CLEAR_LOGO, CP_PLATFORM_CLEAR_LOGO
+    global CP_PLATFORM_DEVICE_IMAGE, CP_PLATFORM_DEFAULT_ART
     CPBigBoxDashboardUpdateContent()
     TestAssert(CPBigBoxControls["status_translation_model"].Text = "Gemini · gemini-test",
         "Header shows the effective screenshot model")
@@ -3162,6 +3295,24 @@ TestHomeHeaderContent() {
         && CPBigBoxControls["capture"].Text = "Capture…`nRegion",
         "Home retains useful short audio and capture states")
     TestAssert(FileExist(CPBigBoxBrandLogoPath()), "Big Box brand asset is bundled with source")
+    savedArtwork := [CP_GAME_BOX_ART, CP_GAME_CLEAR_LOGO, CP_PLATFORM_CLEAR_LOGO,
+        CP_PLATFORM_DEVICE_IMAGE, CP_PLATFORM_DEFAULT_ART]
+    try {
+        CP_GAME_BOX_ART := "", CP_GAME_CLEAR_LOGO := "", CP_PLATFORM_CLEAR_LOGO := ""
+        CP_PLATFORM_DEVICE_IMAGE := "", CP_PLATFORM_DEFAULT_ART := ""
+        neutralArtwork := CPBigBoxDashboardArtworkChoice()
+        StudyLibraryImageDimensions(neutralArtwork["path"], &neutralW, &neutralH)
+        TestAssert(neutralArtwork["kind"] = "neutral"
+            && FileExist(neutralArtwork["path"]),
+            "Missing game art uses the bundled neutral game-media placeholder")
+        TestAssert(neutralW = neutralH && neutralW >= 512,
+            "Neutral game-media placeholder is a square high-resolution asset")
+    } finally {
+        CP_GAME_BOX_ART := savedArtwork[1], CP_GAME_CLEAR_LOGO := savedArtwork[2]
+        CP_PLATFORM_CLEAR_LOGO := savedArtwork[3]
+        CP_PLATFORM_DEVICE_IMAGE := savedArtwork[4]
+        CP_PLATFORM_DEFAULT_ART := savedArtwork[5]
+    }
     CPBigBoxActionNotice := "Test action feedback"
     CPBigBoxUpdateHomeHint("audioToggle")
     TestAssert(CPBigBoxControls["modeBody"].Text = CPBigBoxActionNotice,
@@ -3216,7 +3367,7 @@ TestHomeHeaderLongNames(width, height) {
 }
 
 TestLayout(width, height) {
-    global CPBigBoxControls, CPBigBoxNavigationControls, CPBigBoxCurrentPage
+    global CPBigBoxControls, CPBigBoxNavigationControls, CPBigBoxCurrentPage, CPBigBoxSetupState
     for control in CPBigBoxNavigationControls {
         control.GetPos(&x, &y, &w, &h)
         TestAssert(x >= 0 && y >= 0 && x + w <= width && y + h <= height,
@@ -3360,6 +3511,25 @@ TestLayout(width, height) {
         CPBigBoxControls["mg_confirm"].GetPos(, &confirmY,, &confirmH)
         TestAssert(confirmY >= bodyY + bodyH && confirmY + confirmH <= bottomY + confirmH,
             "Modern confirmation actions fit below their explanation")
+    } else if CPBigBoxCurrentPage = "setupEdit" {
+        editKey := CPBigBoxSetupState.Get("flow", "") = "apiKey" ? "setup_secret"
+            : CPBigBoxSetupState.Get("flow", "") = "promptText" ? "setup_raw" : "setup_edit"
+        CPBigBoxControls[editKey].GetPos(&editX, &editY, &editW, &editH)
+        TestAssert(editX >= 0 && editY >= bodyY + bodyH && editX + editW <= width,
+            "Setup editor field stays within the fullscreen work area")
+        previousRight := -1
+        actionY := -1
+        for key in ["setup_save", "setup_delete", "setup_cancel"] {
+            if !CPBigBoxControls[key].Enabled
+                continue
+            CPBigBoxControls[key].GetPos(&actionX, &thisActionY, &actionW, &actionH)
+            TestAssert(actionX >= previousRight && actionX + actionW <= width
+                && (actionY < 0 || thisActionY = actionY),
+                "Visible setup actions share one non-overlapping row: " key)
+            previousRight := actionX + actionW
+            actionY := thisActionY
+        }
+        TestAssert(editY + editH <= actionY, "Setup editor field fits above its action row")
     } else if CPBigBoxAIListActive() {
         listBottom := bodyY + bodyH
         for row, key in CPBigBoxAIListKeys() {

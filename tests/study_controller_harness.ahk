@@ -48,6 +48,7 @@ global CPStudyCandidateState := 0
 global __CP_STUDY_NAV_ITEMS := []
 global CPStudySyntheticKeyDepth := 0
 global CPStudyComboTransactions := Map()
+global CPComboSeparatorBefore := Map()
 global CPControllerLastNativeNavigationAt := Map()
 global CPThemedDialogHwnds := Map()
 global controlDarkMode := true
@@ -950,21 +951,67 @@ TestRecommendationWorkflow(libraryState) {
 
 TestRecommendationFrame(state, control) {
     control.Focus()
-    Sleep(85)
+    ; Force one complete production paint before sampling synthetic popup
+    ; pixels; DWM can otherwise defer a single unchanged strip past capture.
+    state["bigBoxFocusRect"] := ""
+    StudyBigBoxFocusFrameUpdate(state, control.Hwnd)
+    frameDeadline := A_TickCount + 500
+    Loop {
+        Sleep(25)
+        readyEdges := 0
+        if state.Get("bigBoxFocusTarget", 0) = control.Hwnd {
+            for part in state["bigBoxFocusFrame"] {
+                if !DllCall("user32\IsWindowVisible", "ptr", part.Hwnd, "int")
+                    continue
+                part.GetPos(,, &sampleW, &sampleH)
+                dc := DllCall("user32\GetDC", "ptr", part.Hwnd, "ptr")
+                try {
+                    if DllCall("gdi32\GetPixel", "ptr", dc,
+                        "int", Max(0, sampleW // 2),
+                        "int", Max(0, sampleH // 2), "uint") = 0xFFC762
+                        readyEdges += 1
+                } finally DllCall("user32\ReleaseDC", "ptr", part.Hwnd, "ptr", dc)
+            }
+        }
+        if readyEdges = 4 || A_TickCount >= frameDeadline
+            break
+    }
     TestAssert(state.Has("bigBoxFocusWatch")
         && state.Get("bigBoxFocusTarget", 0) = control.Hwnd,
         "Recommendation focus watcher follows " state["kind"] " / " control.Type)
+    targetRect := Buffer(16, 0)
+    DllCall("user32\GetWindowRect", "ptr", control.Hwnd, "ptr", targetRect.Ptr)
+    targetX := NumGet(targetRect, 0, "int"), targetY := NumGet(targetRect, 4, "int")
+    targetW := NumGet(targetRect, 8, "int") - targetX
+    targetH := NumGet(targetRect, 12, "int") - targetY
+    thickness := Max(3, Round(3 * CPBigBoxDashboardDpiScale(state["gui"])))
+    expected := CPFocusBorderPositions(targetX, targetY, targetW, targetH, thickness)
     visibleBlue := 0
-    for part in state["bigBoxFocusFrame"] {
+    for index, part in state["bigBoxFocusFrame"] {
         if !DllCall("user32\IsWindowVisible", "ptr", part.Hwnd, "int")
             continue
+        part.GetPos(&partX, &partY, &partW, &partH)
+        edge := expected[index]
+        TestAssert(partX = edge[1] && partY = edge[2]
+            && partW = edge[3] && partH = edge[4],
+            "Study focus border replaces the active control's neutral border")
         dc := DllCall("user32\GetDC", "ptr", part.Hwnd, "ptr")
         try {
-            if DllCall("gdi32\GetPixel", "ptr", dc, "int", 1, "int", 1, "uint") = 0xFFC762
+            if DllCall("gdi32\GetPixel", "ptr", dc,
+                "int", Max(0, partW // 2),
+                "int", Max(0, partH // 2), "uint") = 0xFFC762
                 visibleBlue += 1
         } finally DllCall("user32\ReleaseDC", "ptr", part.Hwnd, "ptr", dc)
     }
-    TestAssert(visibleBlue = 4, "All four blue frame edges are painted on " state["kind"])
+    virtualX := SysGet(76), virtualY := SysGet(77)
+    virtualW := SysGet(78), virtualH := SysGet(79)
+    targetOnScreen := targetX >= virtualX && targetY >= virtualY
+        && targetX + targetW <= virtualX + virtualW
+        && targetY + targetH <= virtualY + virtualH
+    TestAssert(visibleBlue = 4 || !targetOnScreen,
+        targetOnScreen
+            ? "All four blue frame edges are painted on " state["kind"]
+            : "Off-screen synthetic focus frame retains all four edge geometries on " state["kind"])
 }
 
 TestRecommendationConfirmVisible() {
@@ -1305,7 +1352,7 @@ TestLibraryOpeningAndImageNavigation() {
     state["list"].Add(, "Fixture explanation", 1)
     state["list"].Modify(1, "Select Focus")
     state["list"].OnEvent("Focus", TestLibraryTableFocused)
-    for key in ["newLibraryButton", "searchButton", "refreshButton", "filterButton", "columnsButton",
+    for key in ["searchButton", "refreshButton", "filterButton", "columnsButton",
         "editDetailsButton", "studyButton", "ankiButton", "currentChapterButton", "previousVersion", "nextVersion",
         "removeVersionButton", "previousImage", "nextImage", "openImage", "exportButton", "storageButton", "bigBoxReturnButton"]
         state[key] := fixtureGui.AddButton("x0 y0 w100 h30", key)
@@ -1356,7 +1403,11 @@ TestLibraryOpeningAndImageNavigation() {
             state["nextImage"].GetPos(&nx, &ny, &nw, &nh)
             state["previousImage"].GetPos(&px, &py, &pw, &ph)
             state["imageInfo"].GetPos(&ix, &iy, &iw, &ih)
-            state["imageFrame"].GetPos(&fx,, &fw)
+            state["imageFrame"].GetPos(&fx, &fy, &fw, &fh)
+            state["search"].GetPos(, &searchY, , &searchH)
+            state["libraryDdl"].GetPos(, &libraryY, , &libraryH)
+            state["metadata"].GetPos(, &metadataY, , &metadataH)
+            state["imageLabel"].GetPos(, &imageLabelY)
             TestAssert(TestControlTextWidth(state["openImage"]) + 20 <= ow
                 && TestTextHeight(state["openImage"]) <= oh,
                 "Open full image fits on one line with padding at " size[1])
@@ -1365,6 +1416,15 @@ TestLibraryOpeningAndImageNavigation() {
                 "Screenshot controls remain aligned, within the image pane, and non-overlapping at " size[1])
             TestAssert(TestControlTextWidth(state["imageInfo"]) <= iw && pw >= 28,
                 "Compact counter stays readable and navigation arrows remain usable at " size[1])
+            if size[2] = 720 {
+                TestAssert(Abs(searchY - libraryY) <= 2
+                    && Abs(searchH - libraryH) <= 1,
+                    "720p search field matches the visible Library selector face: search="
+                        searchY "/" searchH " library=" libraryY "/" libraryH)
+                TestAssert(metadataY + metadataH <= imageLabelY
+                    && fh >= 40,
+                    "720p metadata clears the screenshot label without shrinking the image area")
+            }
             TestStudyCapture(fixtureGui, "library-image-navigation-" size[1] ".png", size[1], size[2])
         }
         TestAssert(StudyLibraryImageCounterText(state, 2, 12) = "2 / 12"
@@ -1400,22 +1460,32 @@ TestManagementAnswer() {
 TestManagementWorkflow() {
     global CPStudyLibraryState, studyLibrariesRoot, studyLibrariesArchiveRoot, studyLibraryDefaultDir
     global TestManagementReply, TestAnkiMessageState, TestManagementMessages
+    global CPComboSeparatorBefore
     previous := CPStudyLibraryState
     DirCreate(studyLibraryDefaultDir)
     DirCreate(studyLibrariesRoot "\Fixture")
     FileAppend("fixture database content", studyLibrariesRoot "\Fixture\marker.txt")
     rootGui := Gui("+AlwaysOnTop", "Library management root fixture")
-    selector := rootGui.AddDropDownList("x10 y10 w180", ["Default", "Fixture"])
+    selector := rootGui.AddDropDownList("x10 y10 w260", ["Default", "Fixture"])
     selector.Choose(1)
-    launch := rootGui.AddButton("x210 y10 w160 h40", "Libraries...")
     root := Map("gui", rootGui, "libraryDdl", selector, "libraryName", "Default",
         "bigBoxPresentation", true, "outputDir", A_ScriptDir "\management-output", "closed", false)
     CPStudyLibraryState := root
-    rootGui.Show("w400 h90")
-    launch.Focus()
+    rootGui.Show("w300 h70")
+    StudyLibraryRefreshLibrarySelector(root, "Default")
+    TestAssert(selector.Text = "Default" && SendMessage(0x146, 0, 0, selector.Hwnd) = 3,
+        "Library selector lists real libraries plus one management action")
+    TestAssert(CPComboSeparatorBefore.Get(selector.Hwnd, -1) = 2,
+        "Library management action is separated after the real libraries")
+    selector.Choose(3)
+    selector.Focus()
     manager := 0
     try {
-        manager := StudyLibraryOpenManager(root)
+        StudyLibraryLibraryChanged(root)
+        manager := root.Get("managementChild", 0)
+        TestAssert(IsObject(manager) && selector.Text = "Default"
+            && root["libraryName"] = "Default",
+            "Management dropdown action opens the manager without changing the active library")
         TestAssert(manager["gui"].HasOwnProp("StudyLibraryManagementForm"), "Library manager opens as a fullscreen form")
         TestAssert(StudyLibraryOpenManager(root) = manager, "Duplicate manager launch reuses the existing page")
         TestRecommendationFrame(manager, manager["list"])
@@ -1526,8 +1596,8 @@ TestManagementWorkflow() {
         TestAssert(StudyControllerFocusedHwnd(manager["gui"].Hwnd) = manager["newButton"].Hwnd,
             "Create returns to its manager action with no root-library focus detour")
         StudyControllerDispatchNavigation("Cancel", manager["gui"].Hwnd)
-        TestAssert(StudyControllerFocusedHwnd(rootGui.Hwnd) = launch.Hwnd && !root.Has("managementChild"),
-            "Closing management restores Libraries focus and clears its child registration")
+        TestAssert(StudyControllerFocusedHwnd(rootGui.Hwnd) = selector.Hwnd && !root.Has("managementChild"),
+            "Closing management restores Library-selector focus and clears its child registration")
         root["bigBoxPresentation"] := false
         StudyLibraryOpenManager(root)
         desktop := GuiFromHwnd(WinExist("Study Libraries ahk_class AutoHotkeyGUI"))
@@ -1774,6 +1844,10 @@ TestDateFilters(libraryState) {
     filterGui := form["gui"]
     from := form["controls"]["fromDate"]
     to := form["controls"]["toDate"]
+    TestAssert(StudyBigBoxRefreshComboFaces(form) = 6,
+        "Fullscreen filter focus settling invalidates all six combo faces")
+    TestAssert(form.Get("bigBoxRevealPending", false),
+        "Fullscreen filter stays cloaked until the combo repaint is ready")
     TestAssert(from.Type = "Button" && to.Type = "Button"
         && from.Enabled && to.Enabled,
         "Fullscreen From/To are accessible themed buttons even for Any time")
@@ -2060,7 +2134,10 @@ TestAnkiExampleNavigation(preview, width) {
         "A reaches the existing example action once, without an AI call, at " width)
     for key in ["front", "back"] {
         editor := controls[key], original := editor.Value
-        editor.Value := TestMultilineText()
+        longEditorText := TestMultilineText()
+        Loop 7
+            longEditorText .= "`r`n" TestMultilineText()
+        editor.Value := longEditorText
         StudyControllerSetFocus(hwnd, editor.Hwnd)
         SendMessage(0xB1, 0, 0, editor.Hwnd)
         SendMessage(0xB7, 0, 0, editor.Hwnd)

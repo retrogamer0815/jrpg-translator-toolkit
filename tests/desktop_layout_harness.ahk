@@ -77,8 +77,8 @@ for testProfile in ["Demo profile", "Alternate profile"] {
 IniWrite("", iniPath, "game_profiles", "active")
 global defGuiW := 1120, defGuiH := 760, pad := 12, gap := 8
 global tabNames := ["Game Text Translation", "Audio Translation", "Translation Window", "Explanation",
-    "Explanation Window", "Terminology Overrides", "Profiles", "Controls", "API Keys", "Paths"]
-global CPTabVisiblePages := [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    "Explanation Window", "Terminology Overrides", "Profiles", "Controls", "API Keys"]
+global CPTabVisiblePages := [1, 2, 3, 4, 5, 6, 7, 8, 9]
 ; Begin with a real native caption, just like production. The desktop shell
 ; removes it; PrintWindow(PW_CLIENTONLY) excludes the retained resize frame.
 global ui := Gui("+Resize +0x300000", "Synthetic desktop layout")
@@ -141,7 +141,7 @@ try {
         "Legacy classic-layout preference migrates to modern")
     DesktopAssert(TestColdStartProfilesGuard && ddlStartupOverlays.Value = 1,
         "Cold-start synchronizers tolerate Profiles controls that are not constructed yet")
-    DesktopAssert(CPDesktop["pages"].Count = 10, "Desktop registry contains every main page")
+    DesktopAssert(CPDesktop["pages"].Count = 9, "Desktop registry contains every main page")
     expectedPages := Map(
         1, ["screenshot", "Game Text Translation", "screenshot"],
         2, ["audio", "Audio Translation", "audioPage"],
@@ -151,14 +151,13 @@ try {
         6, ["terminology", "Settings", "settings"],
         7, ["profiles", "Profiles", "profiles"],
         8, ["controls", "Settings", "settings"],
-        9, ["apiKeys", "Settings", "settings"],
-        10, ["paths", "Settings", "settings"])
+        9, ["apiKeys", "Settings", "settings"])
     expectedControls := Map(1, CPDesktop["shot"], 2, CPDesktop["audioPage"],
         3, CPDesktop["overlayPages"][3], 4, CPDesktop["explanationPage"],
         5, CPDesktop["overlayPages"][5], 6, CPDesktop["organizePages"][6],
         7, CPDesktop["organizePages"][7], 8, CPDesktop["organizePages"][8],
-        9, CPDesktop["organizePages"][9], 10, CPDesktop["organizePages"][10])
-    ownedMinimums := Map(1, 30, 2, 24, 3, 28, 4, 29, 5, 26, 6, 23, 7, 18, 8, 97, 9, 23, 10, 30)
+        9, CPDesktop["organizePages"][9])
+    ownedMinimums := Map(1, 29, 2, 24, 3, 28, 4, 28, 5, 26, 6, 22, 7, 18, 8, 96, 9, 18)
     registryPageKeys := Map()
     for registryPageId, registryExpected in expectedPages {
         registryDescriptor := CPDesktopPage(registryPageId)
@@ -209,7 +208,7 @@ try {
             || DesktopHitAt(testW - 34, 28) = 1,
             "Close button is not a drag target")
         DesktopAssert(DesktopHitAt(300, 100) = 1, "Page content is not a drag target")
-        DesktopAssert(CPDesktopIsCombo(ddlProv.Hwnd) && CPDesktopIsCombo(ddlSpeaker.Hwnd) && CPDesktopIsCombo(ddlEPr.Hwnd) && CPDesktopIsCombo(ddlFont.Hwnd) && CPDesktopIsCombo(ddlFont_EW.Hwnd) && CPDesktopIsCombo(ddlGameProfile.Hwnd) && CPDesktopIsCombo(ddlJPG.Hwnd), "Rounded dropdown rendering covers the refreshed pages")
+        DesktopAssert(CPDesktopIsCombo(ddlProv.Hwnd) && CPDesktopIsCombo(ddlSpeaker.Hwnd) && CPDesktopIsCombo(ddlEPr.Hwnd) && CPDesktopIsCombo(ddlFont.Hwnd) && CPDesktopIsCombo(ddlFont_EW.Hwnd) && CPDesktopIsCombo(ddlGameProfile.Hwnd) && CPDesktopIsCombo(ddlJPG.Hwnd) && CPDesktopIsCombo(CPDesktop["chrome"]["profile"].Hwnd), "Rounded dropdown rendering covers the refreshed pages and header profile selector")
         DesktopAssert((DllCall("user32\GetWindowLongPtr", "ptr", ui.Hwnd, "int", -20, "ptr") & 0x02000000) != 0, "Modern desktop buffers parent and child painting together")
         DesktopAssert((DllCall("user32\GetClassLongPtr", "ptr", ui.Hwnd, "int", -26, "ptr") & 0xE0) = 0, "Desktop window class supports native composited painting")
         for desktopArrow in CPComboArrowOverlays {
@@ -227,12 +226,24 @@ try {
         ddlIMG.GetPos(, &modelRowY)
         ddlPrompt.GetPos(, &promptRowY)
         DesktopAssert(testW >= 1120 ? modelRowY = promptRowY : promptRowY > modelRowY, "AI fields reflow on narrow windows")
-        DesktopAssert(CPDesktop["chrome"]["profile"].Text = "Current settings", "Header describes current settings without applying a profile")
+        profileSelector := CPDesktop["chrome"]["profile"]
+        profileItemCount := SendMessage(0x146, 0, 0, profileSelector.Hwnd)
+        profileManageLength := SendMessage(0x149, profileItemCount - 1, 0, profileSelector.Hwnd)
+        profileManageText := Buffer((profileManageLength + 1) * 2, 0)
+        SendMessage(0x148, profileItemCount - 1, profileManageText.Ptr, profileSelector.Hwnd)
+        DesktopAssert(profileSelector.Text = "Current settings"
+            && StrGet(profileManageText, "UTF-16") = "Manage profiles…"
+            && CPDesktop["combos"][profileSelector.Hwnd]["separatorBefore"] = profileItemCount - 1,
+            "Header profile selector shows current settings with a separated Manage profiles action")
         DesktopAssert(DllCall("user32\GetNextDlgTabItem", "ptr", ui.Hwnd, "ptr", ddlProv.Hwnd, "int", 0, "ptr") = ddlIMG_GM.Hwnd, "Keyboard Tab reaches the active model")
         DesktopAssert(DllCall("user32\GetNextDlgTabItem", "ptr", ui.Hwnd, "ptr", ddlIMG_GM.Hwnd, "int", 0, "ptr") = CPDesktop["shot"]["models"].Hwnd, "Keyboard Tab reaches model management next")
         DesktopAssert(DesktopShown(ddlIMG_GM) && !DesktopShown(ddlIMG), "Only active Gemini model is shown")
         DesktopAssert(!DesktopShown(chkDel) && !DesktopShown(eCapMax), "Advanced options start collapsed")
         DesktopAssert(ddlPrompt.Text = "default_with_kanji_reading_en", "Prompt choice preserved")
+        DesktopAssert(!CPDesktop["shot"].Has("editPrompt") && CPDesktop["shot"]["prompts"].Text = "Manage…",
+            "Game Text exposes prompt editing only through Manage")
+        DesktopAssert(DllCall("user32\GetNextDlgTabItem", "ptr", ui.Hwnd, "ptr", ddlPrompt.Hwnd, "int", 0, "ptr") = CPDesktop["shot"]["prompts"].Hwnd,
+            "Game Text prompt selector tabs directly to Manage")
         DesktopAssert(!DesktopShown(btnOv) && DesktopShown(CPDesktop["chrome"]["translator"]), "Compact footer replaces paired buttons")
         btnST.GetPos(&firstX, &firstY, &firstW)
         btnTS.GetPos(&secondX, &secondY)
@@ -283,6 +294,7 @@ try {
     DesktopTestOwnerDrawFocusCues()
     DesktopTestOwnerDrawNavigationStability()
     DesktopTestSectionNavigationOrder()
+    DesktopTestControllerPageScrollNavigation()
     DesktopTestActionMenus()
     DesktopTestOverlayPages()
     DesktopTestOrganizePages()
@@ -319,6 +331,15 @@ try {
     ; paints a test window over the user's desktop or takes foreground focus.
     ui.Opt("+E0x08000000")
     CPSetWindowCloaked(ui.Hwnd, true)
+    ui.Show("Hide x20 y20 w651 h505")
+    CPDesktopLayout(ui, 0, 651, 505)
+    DesktopAssert(CPPrepareDesktopAfterBigBox(), "Fullscreen return prepares the desktop before reveal")
+    ui.GetClientPos(,, &desktopRestoredW, &desktopRestoredH)
+    DesktopAssert(desktopRestoredW > 651 && desktopRestoredH > 505,
+        "Fullscreen return replaces a compact hidden measurement with normal desktop bounds")
+    DesktopAssert(CPDesktop["width"] = desktopRestoredW && CPDesktop["height"] = desktopRestoredH,
+        "Fullscreen return immediately relayouts the modern desktop at its restored size: layout "
+            CPDesktop["width"] "x" CPDesktop["height"] ", client " desktopRestoredW "x" desktopRestoredH)
     CPDesktopWindowAction("maximize")
     DesktopAssert(DllCall("user32\IsZoomed", "ptr", ui.Hwnd), "Custom maximize invokes native maximization")
     DesktopAssert(CPDesktop["chrome"]["maximize"].Text = "Restore", "Maximized header exposes Restore")
@@ -333,7 +354,7 @@ try {
     DesktopAssert(ObjPtr(CPDesktop["shot"]["captureTranslate"]) = ObjPtr(btnST)
         && ObjPtr(CPDesktop["shot"]["providerChoice"]) = ObjPtr(ddlProv),
         "Screenshot page registry owns the shared behavior aliases")
-    for desktopTestPage in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1] {
+    for desktopTestPage in [1, 2, 3, 4, 5, 6, 7, 8, 9, 1] {
         CPDesktopNavigate(desktopTestPage)
         DesktopAssert(tab.Value = desktopTestPage, "Grouped navigation reaches existing page " desktopTestPage)
     }
@@ -516,26 +537,49 @@ DesktopRecordRootCancel(*) {
 }
 
 DesktopTestSectionNavigationOrder() {
-    global ui, tab, CPTabVisiblePages
+    global ui, tab, CPTabVisiblePages, CPDesktop, CPFocusVisualHwnd
 
-    expected := [1, 2, 4, 3, 5, 7, 6, 8, 9, 10]
+    expected := [1, 2, 4, 3, 5, "study", 7, 8, 6, 9]
     CPDesktopNavigate(expected[1])
+    displayedPage := expected[1]
     Loop expected.Length - 1 {
+        expectedStop := expected[A_Index + 1]
         CPNavSwitchTab(1)
-        DesktopAssert(tab.Value = expected[A_Index + 1],
-            "Forward section navigation follows the modern sidebar order")
+        if expectedStop = "study" {
+            UpdateCPFocusRing()
+            DesktopAssert(tab.Value = displayedPage
+                && DllCall("user32\GetFocus", "ptr") = CPDesktop["chrome"]["study"].Hwnd,
+                "Forward section navigation focuses Study Library without opening or changing the page")
+            DesktopAssert(CPFocusVisualHwnd = CPDesktop["chrome"]["study"].Hwnd
+                && !CPDesktop["paint"][CPDesktop["chrome"]["study"].Hwnd]["selected"],
+                "Study Library receives only the blue navigation border")
+        } else {
+            displayedPage := expectedStop
+            DesktopAssert(tab.Value = expectedStop,
+                "Forward section navigation follows the modern sidebar order")
+        }
     }
     CPNavSwitchTab(1)
     DesktopAssert(tab.Value = expected[1],
-        "Forward section navigation wraps from Paths to Screenshot")
+        "Forward section navigation wraps from API Keys to Screenshot")
 
     CPNavSwitchTab(-1)
-    DesktopAssert(tab.Value = expected[expected.Length],
-        "Backward section navigation wraps from Screenshot to Paths")
+    DesktopAssert(tab.Value = expected[-1],
+        "Backward section navigation wraps from Screenshot to API Keys")
+    displayedPage := expected[-1]
     Loop expected.Length - 1 {
+        expectedStop := expected[expected.Length - A_Index]
         CPNavSwitchTab(-1)
-        DesktopAssert(tab.Value = expected[expected.Length - A_Index],
-            "Backward section navigation follows the modern sidebar order")
+        if expectedStop = "study" {
+            UpdateCPFocusRing()
+            DesktopAssert(tab.Value = displayedPage
+                && DllCall("user32\GetFocus", "ptr") = CPDesktop["chrome"]["study"].Hwnd,
+                "Backward section navigation focuses Study Library without opening or changing the page")
+        } else {
+            displayedPage := expectedStop
+            DesktopAssert(tab.Value = expectedStop,
+                "Backward section navigation follows the modern sidebar order")
+        }
     }
 
     CPDesktopNavigate(2)
@@ -546,19 +590,133 @@ DesktopTestSectionNavigationOrder() {
     DesktopAssert(tab.Value = 2,
         "Controller previous-section navigation returns from Explanation to Audio")
 
-    CPTabVisiblePages.Pop()
-    try {
-        CPDesktopNavigate(9)
-        CPNavSwitchTab(1)
-        DesktopAssert(tab.Value = 1,
-            "Section navigation skips an unavailable Paths page")
-        CPNavSwitchTab(-1)
-        DesktopAssert(tab.Value = 9,
-            "Reverse section navigation skips an unavailable Paths page")
-    } finally {
-        CPTabVisiblePages.Push(10)
+    CPDesktopNavigate(7)
+    for spec in [[8, "controlsTab"], [6, "termsTab"], [9, "apiTab"]] {
+        CPControllerDispatchNavigation("NextTab", ui.Hwnd)
+        DesktopAssert(tab.Value = spec[1],
+            "Controller R follows the visible Settings order to page " spec[1])
+        DesktopAssert(DllCall("user32\GetFocus", "ptr")
+            = CPDesktop["organizePages"][spec[1]][spec[2]].Hwnd,
+            "Controller R focuses the selected Settings button: " spec[2])
     }
+    for spec in [[6, "termsTab"], [8, "controlsTab"]] {
+        CPControllerDispatchNavigation("PreviousTab", ui.Hwnd)
+        DesktopAssert(tab.Value = spec[1],
+            "Controller L reverses the visible Settings order to page " spec[1])
+        DesktopAssert(DllCall("user32\GetFocus", "ptr")
+            = CPDesktop["organizePages"][spec[1]][spec[2]].Hwnd,
+            "Controller L focuses the selected Settings button: " spec[2])
+    }
+    CPControllerDispatchNavigation("PreviousTab", ui.Hwnd)
+    DesktopAssert(tab.Value = 7
+        && DllCall("user32\GetFocus", "ptr") = CPDesktop["chrome"]["profiles"].Hwnd,
+        "Controller L returns from Controls to Profiles in visible sidebar order")
+
+    CPDesktopNavigate(5)
+    CPControllerDispatchNavigation("NextTab", ui.Hwnd)
+    DesktopAssert(tab.Value = 5
+        && DllCall("user32\GetFocus", "ptr") = CPDesktop["chrome"]["study"].Hwnd,
+        "Controller R pauses on Study Library after Explanation Window")
+    CPControllerDispatchNavigation("NextTab", ui.Hwnd)
+    DesktopAssert(tab.Value = 7
+        && DllCall("user32\GetFocus", "ptr") = CPDesktop["chrome"]["profiles"].Hwnd,
+        "Controller R continues from Study Library to Profiles")
+    CPControllerDispatchNavigation("PreviousTab", ui.Hwnd)
+    DesktopAssert(tab.Value = 7
+        && DllCall("user32\GetFocus", "ptr") = CPDesktop["chrome"]["study"].Hwnd,
+        "Controller L pauses on Study Library before Explanation Window")
+    CPControllerDispatchNavigation("PreviousTab", ui.Hwnd)
+    DesktopAssert(tab.Value = 5
+        && DllCall("user32\GetFocus", "ptr") = CPDesktop["overlayPages"][5]["explainer"].Hwnd,
+        "Controller L returns from Study Library to the already displayed Explanation Window page")
+
     CPDesktopNavigate(1)
+}
+
+DesktopTestControllerPageScrollNavigation() {
+    global ui, tab, CPDesktop, CPCanvasScrollY, CPCanvasScrollMaxY
+    global chkGuess, chkName
+
+    ui.Show("NA x-9000 y-9000 w1120 h720")
+    CPDesktop["advanced"] := false
+    CPDesktop["audioHelpOpen"] := false
+    CPDesktop["explanationStartupOpen"] := false
+
+    ; These are the two reported short-window transitions. In both cases the
+    ; fixed footer is physically nearer than the next page row at scroll zero.
+    for testCase in [[1, chkGuess, chkName, "Game Text"],
+        [2, CPDesktop["audioPage"]["troubleshoot"], CPDesktop["audioPage"]["power"], "Audio"]] {
+        CPDesktopNavigate(testCase[1])
+        CPDesktopLayout(ui, 0, 1120, 720)
+        CPCanvasScrollTo(0, 0)
+        CPSetFocusHwnd(testCase[2].Hwnd)
+        CPNavMove("Down")
+        Sleep(30)
+        DesktopAssert(DllCall("user32\GetFocus", "ptr") = testCase[3].Hwnd,
+            testCase[4] " D-pad Down reaches the next offscreen page control before the footer")
+        DesktopAssert(CPCanvasScrollY > 0,
+            testCase[4] " D-pad focus automatically scrolls the lower control into view")
+    }
+
+    ; Exercise the same rule on every scrollable desktop page. Pick the lowest
+    ; currently visible page control that still has a lower logical row; Down
+    ; must stay in page content, and Up from the footer must return to the final
+    ; page row instead of whichever control happens to be nearest onscreen.
+    for page in [1, 2, 3, 4, 5, 6, 7, 8, 9] {
+        CPDesktopNavigate(page)
+        CPDesktopLayout(ui, 0, 1120, 720)
+        CPCanvasScrollTo(0, 0)
+        if CPCanvasScrollMaxY <= 0
+            continue
+        pageHwnds := CPDesktopPageNavigationHwnds()
+        footerHwnds := CPDesktopFooterNavigationHwnds()
+        if !pageHwnds.Length || !footerHwnds.Length
+            continue
+        footerTop := CPGetHwndRect(footerHwnds[1])["t"]
+        source := 0, sourceBottom := 0
+        for hwnd in pageHwnds {
+            rect := CPGetHwndRect(hwnd)
+            if rect["b"] > footerTop || rect["b"] <= sourceBottom
+                continue
+            hasLower := false
+            for candidate in pageHwnds {
+                if candidate != hwnd && CPGetHwndRect(candidate)["t"] >= rect["b"] - 4 {
+                    hasLower := true
+                    break
+                }
+            }
+            if hasLower
+                source := hwnd, sourceBottom := rect["b"]
+        }
+        if source {
+            CPSetFocusHwnd(source)
+            CPNavMove("Down")
+            Sleep(30)
+            focused := DllCall("user32\GetFocus", "ptr")
+            DesktopAssert(CPHwndArrayIndex(focused, CPDesktopPageNavigationHwnds()) > 0,
+                "Scrollable page " page " keeps D-pad Down in page content before its footer")
+        }
+
+        CPCanvasScrollTo(0, 0)
+        bottom := -2147483648
+        for hwnd in CPDesktopPageNavigationHwnds()
+            bottom := Max(bottom, CPGetHwndRect(hwnd)["b"])
+        finalRow := Map()
+        for hwnd in CPDesktopPageNavigationHwnds() {
+            if CPGetHwndRect(hwnd)["b"] >= bottom - 8
+                finalRow[hwnd] := true
+        }
+        CPSetFocusHwnd(footerHwnds[1])
+        CPNavMove("Up")
+        Sleep(30)
+        focused := DllCall("user32\GetFocus", "ptr")
+        DesktopAssert(finalRow.Has(focused),
+            "Scrollable page " page " returns from the footer to its final content row")
+    }
+
+    CPDesktopNavigate(1)
+    ui.Show("NA x-9000 y-9000 w1400 h820")
+    CPDesktopLayout(ui, 0, 1400, 820)
 }
 
 DesktopActionMenuRecord(action, *) {
@@ -676,7 +834,7 @@ DesktopTestExitWithLiveWindow() {
     dialogs.Push(CPDesktopWelcomeDialogCreate(reader["gui"].Hwnd, false))
     dialogs.Push(CPDesktopAboutDialogCreate(reader["gui"].Hwnd))
     dialogs.Push(StudyDesktopMessageCreate(reader["gui"].Hwnd,
-        "The Paths tab contains unsaved edits.", "Unsaved paths", "yesnocancel",
+        "The current settings contain unsaved edits.", "Unsaved settings", "yesnocancel",
         "Choose what to do with these changes.",
         "Save changes", "Discard changes", "Cancel"))
     for state in dialogs {
@@ -793,6 +951,13 @@ DesktopTopChildAtCenter(parentHwnd, ctrl) {
     DllCall("user32\ScreenToClient", "ptr", parentHwnd, "ptr", point.Ptr)
     return DllCall("user32\ChildWindowFromPointEx", "ptr", parentHwnd,
         "int64", NumGet(point, 0, "int64"), "uint", 7, "ptr")
+}
+DesktopWindowAtCenter(ctrl) {
+    rect := Buffer(16, 0), point := Buffer(8, 0)
+    DllCall("user32\GetWindowRect", "ptr", ctrl.Hwnd, "ptr", rect.Ptr)
+    NumPut("int", Floor((NumGet(rect, 0, "int") + NumGet(rect, 8, "int")) / 2), point, 0)
+    NumPut("int", Floor((NumGet(rect, 4, "int") + NumGet(rect, 12, "int")) / 2), point, 4)
+    return DllCall("user32\WindowFromPoint", "int64", NumGet(point, 0, "int64"), "ptr")
 }
 DesktopHitAt(x, y) {
     global ui
@@ -1053,7 +1218,7 @@ DesktopExplanationClicked(*) {
 }
 
 DesktopTestExplanationPage() {
-    global ui, tab, CPDesktop, ddlEProv, ddlEGem, ddlEOpenAI, ddlEPr, btnEPrEdit
+    global ui, tab, CPDesktop, ddlEProv, ddlEGem, ddlEOpenAI, ddlEPr
     global btnExplainNow, btnOpenStudyLibrary, DesktopExplanationClicks
     global saveLibraryChk, saveLibraryScreenshotsChk, saveExplChk, chkOpenEW, chkTop_EW, iniPath
     global ddlProv, ddlPrompt, ddlAProv, ddlAudioTarget
@@ -1072,6 +1237,8 @@ DesktopTestExplanationPage() {
         DesktopAssert(DesktopShown(ddlEProv), "Explanation uses its page-owned grouped layout")
         DesktopAssert(DesktopShown(ddlEGem) && !DesktopShown(ddlEOpenAI), "Explanation shows only the active provider's model")
         DesktopAssert(DesktopShown(expPage["models"]) && DesktopShown(expPage["prompts"]), "Explanation management is consolidated into page-owned links")
+        DesktopAssert(!expPage.Has("editPrompt") && expPage["prompts"].Text = "Manage…",
+            "Explanation exposes prompt editing only through Manage")
         DesktopAssert(CPDesktop["paint"][CPDesktop["chrome"]["explanation"].Hwnd]["selected"], "Explanation sidebar row is selected")
         DesktopAssert(!DesktopShown(chkOpenEW) && !DesktopShown(chkTop_EW), "Explanation startup choices begin collapsed")
         DesktopAssert(CPDesktop["paint"][btnExplainNow.Hwnd]["kind"] = "primary" && btnExplainNow.Text = "Explain latest text", "Explanation has one clear primary action")
@@ -1079,6 +1246,8 @@ DesktopTestExplanationPage() {
         DesktopAssert(w >= 1120 ? modelY = promptY : promptY > modelY, "Explanation AI fields reflow at narrow widths")
         DesktopAssert(DllCall("user32\GetNextDlgTabItem", "ptr", ui.Hwnd, "ptr", ddlEProv.Hwnd, "int", 0, "ptr") = ddlEGem.Hwnd, "Explanation keyboard order reaches the active model")
         DesktopAssert(DllCall("user32\GetNextDlgTabItem", "ptr", ui.Hwnd, "ptr", ddlEGem.Hwnd, "int", 0, "ptr") = expPage["models"].Hwnd, "Explanation keyboard order reaches model management")
+        DesktopAssert(DllCall("user32\GetNextDlgTabItem", "ptr", ui.Hwnd, "ptr", ddlEPr.Hwnd, "int", 0, "ptr") = expPage["prompts"].Hwnd,
+            "Explanation prompt selector tabs directly to Manage")
         btnExplainNow.GetPos(&actionX, &actionY, &actionW)
         btnOpenStudyLibrary.GetPos(&libraryX, &libraryY)
         DesktopAssert(libraryY = actionY && libraryX >= actionX + actionW + 12, "Explanation and Library actions do not overlap")
@@ -1164,17 +1333,16 @@ DesktopBuildOrganizeFixtures() {
 }
 
 DesktopTestOrganizePages() {
-    global ui, tab, CPDesktop, CPTabVisiblePages, CPCanvasScrollMaxY, CPControlsCurrentView
+    global ui, tab, tabNames, CPDesktop, CPTabVisiblePages, CPCanvasScrollMaxY, CPControlsCurrentView
     global ddlGameProfile, ddlStartupOverlays, txtGameProfileState, btnGameProfileApply, btnGameProfileSave, btnGameProfileAdd, btnGameProfileDelete
     global ddlENG, ddlJPG, btnENG_Edit, btnJPG_Edit, chkUseTerminologyOverrides
-    global eGemini, eOpenAI, cbApiInApp, btnSaveEnv, btnDelEnv, btnOpenEnvVars, btnAbout
+    global eGemini, eOpenAI, cbApiInApp, btnSaveEnv, btnDelEnv, btnOpenEnvVars
     global hkEdits, hkBtnChg, hotkeyActions, hotkeyLabels, hkConflictText, CPControllerBindingEdits, CPControllerAssignButtons, cbControllerInputsEnabled, cbControllerDpadNavigationEnabled
-    global rbControlsKeyboard, rbControlsController, CPHotkeyNotice
+    global rbControlsKeyboard, rbControlsController, CPHotkeyNotice, CPApiKeysNotice
+    global CPToastGui
     global TestApiKeysLoaded, envSavedOpenAI, envSavedGemini
-    global ePython, eOverlay, eImg, eAudio, eExplain
-    global bPy, bOvSel, bImgSel, bAud, bExplainSel, btnSavePaths
-    global cbDirectModelOutput, cbDebug, iniPath, pathsDirty
-    global pythonExe, overlayAhk, imgScript, audioScript, explainScript
+    global iniPath, pythonExe, directModelOutput, debugMode
+    global chkGuess
     termPage := CPDesktop["organizePages"][6]
     DesktopAssert(CPDesktopPage(6)["adaptedControls"].Length = 0,
         "Terminology page has no adapted legacy controls")
@@ -1219,23 +1387,13 @@ DesktopTestOrganizePages() {
     DesktopAssert(apiPage["inAppEntry"] = cbApiInApp
         && apiPage["geminiKey"] = eGemini && apiPage["openAIKey"] = eOpenAI
         && apiPage["saveKeys"] = btnSaveEnv && apiPage["deleteEnv"] = btnDelEnv
-        && apiPage["openEnvironmentVariables"] = btnOpenEnvVars
-        && apiPage["aboutAction"] = btnAbout,
+        && apiPage["openEnvironmentVariables"] = btnOpenEnvVars,
         "API Keys registry owns its shared control aliases")
     DesktopAssert(TestApiKeysLoaded,
         "Page-owned API key controls load and enable an existing .env")
-    pathsPage := CPDesktop["organizePages"][10]
-    DesktopAssert(CPDesktopPage(10)["adaptedControls"].Length = 0,
-        "Paths page has no adapted legacy controls")
-    DesktopAssert(pathsPage["pythonPath"] = ePython && pathsPage["pythonBrowse"] = bPy
-        && pathsPage["overlayPath"] = eOverlay && pathsPage["overlayBrowse"] = bOvSel
-        && pathsPage["imagePath"] = eImg && pathsPage["imageBrowse"] = bImgSel
-        && pathsPage["audioPath"] = eAudio && pathsPage["audioBrowse"] = bAud
-        && pathsPage["explainerPath"] = eExplain && pathsPage["explainerBrowse"] = bExplainSel
-        && pathsPage["savePaths"] = btnSavePaths
-        && pathsPage["directOutput"] = cbDirectModelOutput && pathsPage["debugMode"] = cbDebug,
-        "Paths registry owns its shared control aliases")
-    for page in [6, 7, 8, 9, 10] {
+    DesktopAssert(!CPDesktopPage(10) && !CPDesktop["organizePages"].Has(10),
+        "The retired Paths page is absent from the desktop registry")
+    for page in [6, 7, 8, 9] {
         tab.Value := page
         for dimensions in [[1120, 760], [820, 560], [1400, 820]] {
             testWidth := dimensions[1], testHeight := dimensions[2]
@@ -1250,7 +1408,8 @@ DesktopTestOrganizePages() {
                         DesktopAssert(!DesktopShown(ctrl), "Inactive organize controls stay hidden")
             }
             if page != 7 {
-                DesktopAssert(DesktopShown(p["controlsTab"]) && DesktopShown(p["pathsTab"]), "Settings sections are directly reachable")
+                DesktopAssert(DesktopShown(p["controlsTab"]) && DesktopShown(p["termsTab"])
+                    && DesktopShown(p["apiTab"]), "All Settings sections are directly reachable")
                 DesktopAssert(!p.Has("classic"), "Settings exposes no classic-layout action")
             }
             for panelKey in CPDesktop["organizePanels"][page] {
@@ -1295,6 +1454,20 @@ DesktopTestOrganizePages() {
     DesktopAssert(InStr(txtGameProfileState.Text, "Alternate profile")
         && IniRead(iniPath, "game_profiles", "active", "") = activeProfileBeforeSelection,
         "Selecting a profile does not apply it")
+    dirtyFixtureName := "Header selector dirty fixture"
+    dirtyFixturePath := GameProfilePath(dirtyFixtureName)
+    originalGuessValue := chkGuess.Value
+    IniWriteRetry(originalGuessValue ? 1 : 0, dirtyFixturePath, "screenshot", "highlightGuessed")
+    DesktopAssert(!GameProfileHasUnsavedChanges(dirtyFixtureName),
+        "Saved profile values match the current header-switch state")
+    chkGuess.Value := originalGuessValue ? 0 : 1
+    DesktopAssert(GameProfileHasUnsavedChanges(dirtyFixtureName),
+        "Header profile switching detects a changed profile-owned setting")
+    chkGuess.Value := originalGuessValue
+    try FileDelete(dirtyFixturePath)
+    try FileDelete(dirtyFixturePath ".bak")
+    IniWriteRetry(activeProfileBeforeSelection, iniPath, "game_profiles", "active")
+    RefreshGameProfilesList("Alternate profile")
     ddlStartupOverlays.Choose(4)
     ddlENG.Choose(2), ddlJPG.Choose(1)
     CPDesktopNavigate(8)
@@ -1334,11 +1507,16 @@ DesktopTestOrganizePages() {
     CPHotkeyClearNotice(hotkeyNotice)
     DesktopAssert(CPHotkeyNotice = "" && CPDesktop["chrome"]["subtitle"].Text = CPDesktopPageSubtitle(8),
         "Keyboard shortcut feedback restores the normal page subtitle cleanly")
+    ui.Show("NA x-9000 y-9000 w1120 h760")
     CPDesktopNavigate(9)
+    CPDesktopLayout(ui, 0, 1120, 760)
+    CPCanvasScrollTo(0, 0)
     for ctrl in [eGemini, eOpenAI] {
+        DesktopAssert(DesktopWindowAtCenter(ctrl) = ctrl.Hwnd,
+            "API key edit receives real pointer input through its decorative field frame")
         passwordChar := SendMessage(0xD2, 0, 0, ctrl.Hwnd)
         DesktopAssert(passwordChar != 0, "API key field keeps its password mask (character: " passwordChar ")")
-        DesktopAssert(!ctrl.Enabled, "API key field is disabled when in-app entry is off")
+        DesktopAssert(ctrl.Enabled, "Opening API Keys refreshes and enables a saved in-app key")
         style := WinGetStyle(ctrl.Hwnd), exStyle := WinGetExStyle(ctrl.Hwnd)
         DesktopAssert(!(style & 0x00800000) && !(style & 0x00200000)
             && !(exStyle & 0x00000200),
@@ -1346,47 +1524,65 @@ DesktopTestOrganizePages() {
         DesktopAssert(CPDesktop["inputFrames"].Has(ctrl.Hwnd),
             "API key field uses the app-painted field frame")
     }
-    DesktopAssert(!btnSaveEnv.Enabled && !btnDelEnv.Enabled && eGemini.Value = "synthetic-gemini", "API layout preserves values and dirty/enabled state")
+    DesktopAssert(cbApiInApp.Value = 1 && !btnSaveEnv.Enabled && btnDelEnv.Enabled
+        && eGemini.Value = "synthetic-gemini" && eOpenAI.Value = "synthetic-openai",
+        "API page navigation reloads both masked values and their enabled state from .env")
+    cbApiInApp.Value := 0
+    ToggleApiKeyControls()
+    DesktopAssert(!eGemini.Enabled && !eOpenAI.Enabled && !btnDelEnv.Enabled,
+        "Explicitly turning off in-app entry still disables its editors")
     cbApiInApp.Value := 1
     ToggleApiKeyControls()
     DesktopAssert(eGemini.Enabled && eOpenAI.Enabled && btnDelEnv.Enabled && !btnSaveEnv.Enabled,
         "In-app key enablement restores both masked fields without creating a false dirty state")
-    eGemini.Value := "synthetic-gemini-edited"
-    UpdateEnvDirty()
-    DesktopAssert(btnSaveEnv.Enabled, "Editing a page-owned API key enables Save keys")
-    eGemini.Value := envSavedGemini
-    eOpenAI.Value := envSavedOpenAI
-    UpdateEnvDirty()
-    DesktopAssert(!btnSaveEnv.Enabled, "Restoring saved API key values clears the dirty state")
+    savedGeminiBeforeEdit := eGemini.Value
+    DllCall("user32\SetFocus", "ptr", eGemini.Hwnd)
+    SendMessage(0x00B1, StrLen(savedGeminiBeforeEdit), StrLen(savedGeminiBeforeEdit), eGemini.Hwnd) ; EM_SETSEL
+    SendMessage(0x0102, Ord("x"), 0, eGemini.Hwnd) ; WM_CHAR through the native editor
+    Sleep(10)
+    DesktopAssert(eGemini.Value = savedGeminiBeforeEdit "x" && btnSaveEnv.Enabled,
+        "A pointer-reachable API key edit accepts keyboard input and enables Save keys")
+    CPDesktopNavigate(9)
+    DesktopAssert(eGemini.Value = savedGeminiBeforeEdit "x" && btnSaveEnv.Enabled,
+        "Re-entering API Keys does not overwrite a deliberate unsaved desktop edit")
+    SaveApiEnv()
+    savedBody := FileRead(envPath, "UTF-8")
+    DesktopAssert(ParseEnvLine(savedBody, "GEMINI_API_KEY") = savedGeminiBeforeEdit "x"
+        && ParseEnvLine(savedBody, "GOOGLE_API_KEY") = savedGeminiBeforeEdit "x"
+        && !btnSaveEnv.Enabled,
+        "Saving from the desktop editor persists both Gemini aliases and clears dirty state")
+    DesktopAssert(CPApiKeysNotice = "In-app API keys saved."
+        && CPDesktop["chrome"]["subtitle"].Text = CPApiKeysNotice
+        && !IsObject(CPToastGui),
+        "API key save feedback stays inside the Settings page without a floating toast")
+    ui.GetPos(,, &noticeW, &noticeH)
+    noticeDpi := GetWindowDPI(ui.Hwnd) / 96
+    TestCapture("desktop-api-save-notice-1120.png",
+        Round(noticeW * noticeDpi), Round(noticeH * noticeDpi))
+    CPApiKeysClearNotice(CPApiKeysNotice)
+    DesktopAssert(CPApiKeysNotice = ""
+        && CPDesktop["chrome"]["subtitle"].Text = CPDesktopPageSubtitle(9),
+        "API key feedback restores the normal Settings subtitle")
+    CPBigBoxWriteApiKey("gemini", "synthetic-fullscreen-gemini")
+    eGemini.Value := "", eOpenAI.Value := "", cbApiInApp.Value := 0
+    ToggleApiKeyControls()
+    CPDesktopNavigate(9)
+    DesktopAssert(eGemini.Value = "synthetic-fullscreen-gemini"
+        && eOpenAI.Value = "synthetic-openai" && cbApiInApp.Value = 1
+        && eGemini.Enabled && eOpenAI.Enabled && !btnSaveEnv.Enabled,
+        "Desktop API page recovers both providers after a fullscreen save and stale hidden state")
+    for ctrl in [eGemini, eOpenAI]
+        DesktopAssert(SendMessage(0xD2, 0, 0, ctrl.Hwnd) != 0,
+            "Fullscreen-to-desktop synchronization preserves the password mask")
     cbApiInApp.Value := 0
     ToggleApiKeyControls()
-    CPDesktopNavigate(10)
-    DesktopAssert(ePython.Value = pythonExe && eOverlay.Value = overlayAhk
-        && eImg.Value = imgScript && eAudio.Value = audioScript && eExplain.Value = explainScript
-        && !btnSavePaths.Enabled && !pathsDirty,
-        "Page-owned path controls initialize from the shared runtime values")
-    unsavedPython := A_ScriptDir "\synthetic-python-next.exe"
-    if !FileExist(unsavedPython)
-        FileAppend("synthetic", unsavedPython, "UTF-8")
-    ePython.Value := unsavedPython
-    UpdatePathsDirtyState()
-    cbDebug.Value := 1
-    CPDesktopLayout(ui, 0, 1400, 820)
-    DesktopAssert(ePython.Value = unsavedPython && btnSavePaths.Enabled && pathsDirty
-        && btnSavePaths.Text = "Save paths *" && cbDebug.Value,
-        "Path edits, dirty state and diagnostic choices survive a modern relayout without saving")
-    DesktopAssert(SaveEditedPaths(false) && pythonExe = unsavedPython
-        && IniRead(iniPath, "cfg", "pythonExe", "") = unsavedPython
-        && !pathsDirty && !btnSavePaths.Enabled && btnSavePaths.Text = "Save paths",
-        "Saving page-owned path fields persists values and clears the dirty state")
+    DesktopAssert(CPTabVisiblePages.Length = 9 && tabNames.Length = 9,
+        "Desktop navigation contains no Paths tab")
+    DesktopAssert(IniRead(iniPath, "cfg", "pythonExe", pythonExe) = pythonExe
+        && Integer(IniRead(iniPath, "cfg", "directModelOutput", directModelOutput)) = directModelOutput
+        && Integer(IniRead(iniPath, "cfg", "debugMode", debugMode)) = debugMode,
+        "Advanced runtime settings remain available through control.ini")
     DesktopAssert(ddlGameProfile.Text = "Alternate profile" && ddlStartupOverlays.Value = 4 && ddlENG.Value = 2 && ddlJPG.Value = 1, "Independent profile, startup and glossary selections are preserved")
-    CPTabVisiblePages.Pop()
-    CPDesktopNavigate(9)
-    DesktopAssert(!DesktopShown(CPDesktop["organizePages"][9]["pathsTab"]), "Hidden Paths stays hidden in modern settings")
-    CPDesktop["lastSettingsPage"] := 10
-    CPDesktopSettingsMenu()
-    DesktopAssert(tab.Value = 8, "Settings falls back safely when Paths is unavailable")
-    CPTabVisiblePages.Push(10)
     tab.Value := 1
     ui.Show("NA x-9000 y-9000 w1400 h820"), CPDesktopLayout(ui, 0, 1400, 820)
 }
@@ -1404,7 +1600,7 @@ DesktopTestNativeWheelAndFocus() {
     global CPCanvasWheelWindows
     ui.Show("NA x-9000 y-9000 w900 h640")
     CPDesktopNavigate(8), CPDesktopLayout(ui, 0, 900, 640)
-    for spec in [[6, "termsTab"], [9, "apiTab"], [10, "pathsTab"], [8, "controlsTab"]] {
+    for spec in [[6, "termsTab"], [9, "apiTab"], [8, "controlsTab"]] {
         beforePage := tab.Value
         button := CPDesktop["organizePages"][beforePage][spec[2]]
         DllCall("user32\SetFocus", "ptr", button.Hwnd)
@@ -1415,11 +1611,6 @@ DesktopTestNativeWheelAndFocus() {
         DesktopAssert(CPDesktop["paint"][target.Hwnd]["selected"], "Only the selected section receives initial focus")
         if spec[1] != 8
             DesktopAssert(DllCall("user32\GetFocus", "ptr") != CPDesktop["organizePages"][spec[1]]["controlsTab"].Hwnd, "Controls has no extra focus outline on another page")
-        if spec[1] = 10 {
-            ui.GetPos(,, &focusCaptureW, &focusCaptureH)
-            dpi := GetWindowDPI(ui.Hwnd) / 96
-            TestCapture("desktop-settings-paths-focus.png", Round(focusCaptureW * dpi), Round(focusCaptureH * dpi))
-        }
     }
     CPDesktopNavigate(6)
     CPDesktopLayout(ui, 0, 900, 640)
@@ -1454,7 +1645,7 @@ DesktopTestNativeWheelAndFocus() {
     DesktopAssert(!CPCanvasAcceptsWheel(ddlENG.Hwnd, DesktopWheelPoint(ddlENG)), "An open dropdown retains native wheel input")
     SendMessage(0x14F, 0, 0, ddlENG.Hwnd)
     CPCanvasQueueWheel(-120)
-    CPDesktopNavigate(10)
+    CPDesktopNavigate(9)
     Sleep(30)
     DesktopAssert(!CPCanvasPendingScrollValid && CPCanvasScrollY = 0, "A queued wheel frame never scrolls the next page")
     CPDesktopNavigate(3)
@@ -1484,7 +1675,7 @@ DesktopTestScrollTransitionClipping() {
         }
     }
     try {
-        for page in [6, 8, 10, 3] {
+        for page in [6, 8, 9, 3] {
             CPDesktopNavigate(page), CPDesktopLayout(ui, 0, 900, 640)
             for transparent in [false, true] {
                 WinSetTransparent(transparent ? 230 : "Off", ui.Hwnd)
@@ -1560,7 +1751,7 @@ DesktopTestScrollPainting() {
             throw Error("Could not install scroll paint probe")
     }
     try {
-        for page in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] {
+        for page in [1, 2, 3, 4, 5, 6, 7, 8, 9] {
             tab.Value := page
             CPDesktop["advanced"] := true, CPDesktop["audioHelpOpen"] := true
             CPDesktop["explanationStartupOpen"] := true
@@ -1774,6 +1965,7 @@ TestDesktopStudyReader() {
 
 TestDesktopStudyWindows() {
     global controlDarkMode, CPStudyLibraryState, CPStudyReaderState
+    global CPComboSeparatorBefore
     controlDarkMode := 1
     TestDesktopStudyDialogs()
     DesktopTestStudyIdle()
@@ -1792,7 +1984,10 @@ TestDesktopStudyWindows() {
         s["detailTitle"].Text := "Saved explanation"
         s["openImage"].Enabled := true
         if kind = "library" {
-            s["libraryDdl"].Add(["Test library", "Another library"]), s["libraryDdl"].Choose(1)
+            s["libraryDdl"].Add(["Test library", "Another library", "Manage Study Libraries…"])
+            s["libraryDdl"].Choose(1)
+            CPComboSeparatorBefore[s["libraryDdl"].Hwnd] := 2
+            s["desktop"]["combos"][s["libraryDdl"].Hwnd]["separatorBefore"] := 2
             s["status"].Text := "2 sources · 3 explanations · 1 not linked to Anki"
             s["storageButton"].Text := "Storage: 1.4 MB"
             s["currentChapterStatus"].Text := "New entries: Chapter 2"
@@ -1839,6 +2034,15 @@ TestDesktopStudyWindows() {
             DesktopAssert(!(WinGetExStyle(s["source"].Hwnd) & 0x200), kind " read-only source has no desktop frame")
             if kind = "library"
                 DesktopAssert(CPDesktopIsCombo(s["libraryDdl"].Hwnd), "Library picker uses modern dropdown renderer")
+            if kind = "library" {
+                DesktopAssert(!s.Has("newLibraryButton"), "Library manager has no standalone toolbar button")
+                DesktopAssert(SendMessage(0x146, 0, 0, s["libraryDdl"].Hwnd) = 3,
+                    "Library picker includes one integrated management action")
+                s["libraryDdl"].GetPos(, , &libraryPickerW)
+                DesktopAssert(libraryPickerW >= 300, "Library picker uses the space freed by the removed button")
+                DesktopAssert(CPComboSeparatorBefore.Get(s["libraryDdl"].Hwnd, -1) = 2,
+                    "Library management action is visually separated from libraries")
+            }
             if kind = "library"
                 DesktopAssert(!(SendMessage(0x1037, 0, 0, s["list"].Hwnd) & 1), "Modern table removes native grid lines")
             DesktopAssert(!(WinGetExStyle(hwnd) & 0x02000000), kind " avoids whole-window compositing during native movement")
@@ -2429,7 +2633,7 @@ TestDesktopSecondaryStudyDialogs(library, reader) {
     }
     DesktopDialogTestClose(bulk)
     version := TestDesktopNewVersionControls(reader), c := version["controls"]
-    DesktopTestStudyToolSizes(version, [[820, 700], [920, 740], [1200, 900]])
+    DesktopTestStudyToolSizes(version, [[820, 620], [820, 680], [920, 740], [1200, 900]])
     for provider in ["openai", "gemini"] {
         c["provider"].Choose(provider = "gemini" ? 1 : 2)
         StudyReaderNewVersionProviderChanged(version)
@@ -2439,7 +2643,17 @@ TestDesktopSecondaryStudyDialogs(library, reader) {
     }
     for mode in ["name", "edit"] {
         prompt := StudyReaderPromptDialogCreate(version, mode, mode = "edit" ? "Explain Japanese. 日本語 {jp}" : "", "fixture")
-        DesktopTestStudyToolSizes(prompt, mode = "edit" ? [[820, 650], [1000, 780]] : [[680, 450], [760, 480]])
+        DesktopTestStudyToolSizes(prompt, mode = "edit" ? [[820, 620], [1000, 680], [1000, 780]] : [[680, 450], [760, 480]])
+        if mode = "edit" {
+            editor := prompt["controls"]["editor"]
+            editor.Focus()
+            SendMessage(0x00B1, 0, -1, editor.Hwnd) ; Select all, then verify the open-page caret policy.
+            StudyReaderPromptPlaceInitialCaret(prompt)
+            selection := Buffer(8, 0)
+            SendMessage(0x00B0, selection.Ptr, selection.Ptr + 4, editor.Hwnd)
+            DesktopAssert(NumGet(selection, 0, "uint") = 0 && NumGet(selection, 4, "uint") = 0,
+                "Explanation prompt opens with a caret instead of selecting all text")
+        }
         prompt["controls"]["editor"].Value := "Unsaved changes"
         DesktopDialogTestClose(prompt)
         DesktopAssert(prompt["result"].Result = "Cancel", "Prompt close discards unconfirmed result: " mode)
@@ -2776,7 +2990,7 @@ TestSharedDialogs(library, reader) {
     CPFullscreenMenuClose(s)
     DesktopAssert(s["result"] = 0, "Fullscreen Back makes no selection")
     threeWay := StudyDesktopMessageCreate(child.Hwnd,
-        "The Paths tab contains unsaved edits.", "Unsaved paths", "yesnocancel",
+        "The current settings contain unsaved edits.", "Unsaved settings", "yesnocancel",
         "Choose what to do with these changes.",
         "Save changes", "Discard changes", "Cancel")
     for size in [[640, 400], [760, 520], [1040, 700]] {
@@ -3088,9 +3302,13 @@ TestAppearanceDialogs(reader) {
                 DesktopDialogFixtureShow(appearance, w, h)
                 DesktopDialogAssertChrome(appearance, w, h)
                 ac["opacity"].GetPos(&x, &y, &cw, &ch)
+                ac["about"].GetPos(&aboutX, &aboutY, &aboutW, &aboutH)
                 ac["done"].GetPos(&doneX, &doneY, &doneW, &doneH)
                 DesktopAssert(x = 40 && cw = w - 80 && y + ch < h - 66,
                     "Window opacity slider remains responsive and above the footer")
+                DesktopAssert(ac["about"].Text = "About JRPG Translator…"
+                    && aboutX = 24 && aboutY = doneY && aboutX + aboutW < doneX,
+                    "About action remains left-aligned and separate from Done")
                 DesktopAssert(doneX + doneW = w - 24 && doneY + doneH <= h - 16,
                     "Window preference action remains aligned in the footer")
                 if dark && w = 760 {
@@ -3596,7 +3814,7 @@ TestSharedMessageRoute(owner, presentation, buttons, icon, action := "default") 
     try {
         if buttons = "yesnocancel"
             result := CPAdaptiveOwnedMessage(owner,
-                "The Paths tab contains unsaved edits. 日本語 & names remain literal.",
+                "The current settings contain unsaved edits. 日本語 & names remain literal.",
                 "Shared message test", buttons, icon, 620,
                 "Save changes", "Discard changes", "Cancel")
         else

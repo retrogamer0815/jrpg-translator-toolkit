@@ -15,7 +15,7 @@ $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
     -Configuration $Configuration `
     -SkipTests:$SkipTests
 
-$outputDir = Join-Path $projectDir "bin\$Configuration\net9.0-windows"
+$outputDir = Join-Path $projectDir "bin\$Configuration\net10.0-windows"
 $distDir = Join-Path $projectDir "dist"
 $packageDir = Join-Path $distDir "JRPG Translator Integration"
 $archivePath = Join-Path $distDir "JRPG_Translator_LaunchBox_Plugin_v$Version.zip"

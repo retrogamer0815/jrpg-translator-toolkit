@@ -42,7 +42,7 @@ $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = "1"
 
 if (-not $dotnet) {
-    throw "A .NET 9 SDK was not found. Install it or place a workspace SDK in .dotnet-sdk."
+    throw "A .NET 10 SDK was not found. Install it or place a workspace SDK in .dotnet-sdk."
 }
 
 if (-not $LaunchBoxRoot -or -not (Test-Path -LiteralPath (Join-Path $LaunchBoxRoot "Core\Unbroken.LaunchBox.Plugins.dll"))) {

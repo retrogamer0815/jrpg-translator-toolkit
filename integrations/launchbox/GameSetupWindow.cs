@@ -10,8 +10,10 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Markup;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
+using Ellipse = System.Windows.Shapes.Ellipse;
 
 // Companion source snapshot: JRPG Translator v0.9.5.
 
@@ -19,12 +21,15 @@ namespace JrpgTranslator.LaunchBox
 {
     public sealed class GameSetupWindow : Window
     {
-        private static readonly Brush WindowBackground = BrushFrom("#202124");
-        private static readonly Brush PanelBackground = BrushFrom("#292A2D");
-        private static readonly Brush ControlBackground = BrushFrom("#333438");
-        private static readonly Brush PrimaryForeground = BrushFrom("#F3F4F6");
-        private static readonly Brush MutedForeground = BrushFrom("#AEB3BC");
-        private static readonly Brush ControlBorderBrush = BrushFrom("#686B72");
+        private static readonly Brush WindowBackground = BrushFrom("#202127");
+        private static readonly Brush PanelBackground = BrushFrom("#292C34");
+        private static readonly Brush ControlBackground = BrushFrom("#242730");
+        private static readonly Brush PrimaryForeground = BrushFrom("#ECEEF3");
+        private static readonly Brush MutedForeground = BrushFrom("#AEB8C9");
+        private static readonly Brush ControlBorderBrush = BrushFrom("#4B5260");
+        private static readonly Brush AccentBrush = BrushFrom("#168ED1");
+        private static readonly Brush ReadyBrush = BrushFrom("#54C88A");
+        private static readonly Brush WarningBrush = BrushFrom("#F2B45B");
         private static readonly object CurrentSettingsProfile = new CurrentSettingsProfileChoice();
 
         // A distinct item keeps the display label from colliding with a real
@@ -50,6 +55,18 @@ namespace JrpgTranslator.LaunchBox
         private readonly TextBlock _translatorProfileStatus;
         private readonly TextBlock _joyToKeyProfileStatus;
         private readonly TextBlock _readiness;
+        private readonly TextBlock _translatorReadiness;
+        private readonly TextBlock _joyToKeyReadiness;
+        private readonly Ellipse _translatorReadinessDot;
+        private readonly Ellipse _joyToKeyReadinessDot;
+        private readonly TextBlock _translatorPathValue;
+        private readonly TextBlock _joyToKeyPathValue;
+        private readonly TextBlock _joyToKeyProfilesPathValue;
+        private readonly StackPanel _translatorSettings;
+        private readonly StackPanel _joyToKeySettings;
+        private readonly StackPanel _locationsPanel;
+        private readonly Button _locationsToggle;
+        private readonly Button _detectAgain;
         private readonly ScrollViewer _contentScroller;
         private readonly List<Control[]> _focusRows;
         private readonly DispatcherTimer _controllerTimer;
@@ -62,6 +79,7 @@ namespace JrpgTranslator.LaunchBox
         private bool _controllerBaselineReady;
         private ComboBox? _guardedControllerProfile;
         private long _guardedControllerProfileUntil;
+        private bool _locationsExpanded;
 
         public GameConfiguration Result { get; private set; }
 
@@ -75,10 +93,10 @@ namespace JrpgTranslator.LaunchBox
             Rect workArea = SystemParameters.WorkArea;
             double availableWidth = Math.Max(1, workArea.Width - 24);
             double availableHeight = Math.Max(1, workArea.Height - 24);
-            Width = Math.Min(840, availableWidth);
-            Height = Math.Min(900, availableHeight);
-            MinWidth = Math.Min(720, availableWidth);
-            MinHeight = Math.Min(500, availableHeight);
+            Width = Math.Min(920, availableWidth);
+            Height = Math.Min(800, availableHeight);
+            MinWidth = Math.Min(760, availableWidth);
+            MinHeight = Math.Min(560, availableHeight);
             MaxWidth = availableWidth;
             MaxHeight = availableHeight;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
@@ -89,9 +107,9 @@ namespace JrpgTranslator.LaunchBox
             Cursor = Cursors.Arrow;
             ForceCursor = true;
             FontFamily = new FontFamily("Segoe UI");
-            FontSize = 18;
+            FontSize = 16;
 
-            Grid root = new Grid { Margin = new Thickness(28, 24, 28, 24) };
+            Grid root = new Grid { Margin = new Thickness(30, 24, 30, 22) };
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -101,7 +119,7 @@ namespace JrpgTranslator.LaunchBox
             TextBlock heading = new TextBlock
             {
                 Text = game.GameTitle,
-                FontSize = 25,
+                FontSize = 28,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = PrimaryForeground,
                 TextTrimming = TextTrimming.CharacterEllipsis,
@@ -114,7 +132,7 @@ namespace JrpgTranslator.LaunchBox
                 Text = "Choose what should be prepared automatically whenever this game is launched.",
                 Foreground = MutedForeground,
                 TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 0, 0, 18)
+                Margin = new Thickness(0, 0, 0, 20)
             };
             Grid.SetRow(introduction, 1);
             root.Children.Add(introduction);
@@ -134,159 +152,200 @@ namespace JrpgTranslator.LaunchBox
             Grid.SetRow(_contentScroller, 2);
             root.Children.Add(_contentScroller);
 
-            StackPanel options = new StackPanel
-            {
-                Background = PanelBackground,
-                Margin = new Thickness(0, 0, 0, 14)
-            };
-            scrollingContent.Children.Add(options);
+            Border translatorCard = MakeCard();
+            StackPanel translatorCardContent = new StackPanel();
+            translatorCard.Child = translatorCardContent;
+            scrollingContent.Children.Add(translatorCard);
 
-            _translatorEnabled = MakeCheckBox("Use JRPG Translator with this game", game.TranslatorEnabled);
-            _translatorEnabled.Margin = new Thickness(18, 17, 18, 10);
+            _translatorReadinessDot = MakeStatusDot();
+            _translatorReadiness = MakeStatusText();
+            _translatorEnabled = MakeToggle(game.TranslatorEnabled);
             _translatorEnabled.Checked += (_, _) => UpdateTranslatorControls();
             _translatorEnabled.Unchecked += (_, _) => UpdateTranslatorControls();
-            options.Children.Add(_translatorEnabled);
+            translatorCardContent.Children.Add(MakeIntegrationHeader(
+                MakeTranslatorIcon(),
+                "JRPG Translator",
+                "Capture and translate game text automatically.",
+                _translatorReadinessDot,
+                _translatorReadiness,
+                _translatorEnabled));
 
-            Grid translatorProfileRow = MakeProfileRow(out _translatorProfile, out _refreshTranslatorProfiles);
+            _translatorSettings = new StackPanel
+            {
+                Margin = new Thickness(96, 0, 24, 22)
+            };
+            translatorCardContent.Children.Add(_translatorSettings);
+            _translatorSettings.Children.Add(MakeProfileSection(
+                out _translatorProfile,
+                out _translatorProfileStatus));
             _translatorProfile.DropDownClosed += HandleProfileDropDownClosed;
+            _translatorProfile.DropDownOpened += (_, _) =>
+                RefreshTranslatorProfiles(SelectedTranslatorProfile());
+            _refreshTranslatorProfiles = MakeButton("Refresh", 116);
+            _refreshTranslatorProfiles.Visibility = Visibility.Collapsed;
             _refreshTranslatorProfiles.Click += (_, _) => RefreshTranslatorProfiles(SelectedTranslatorProfile());
-            options.Children.Add(translatorProfileRow);
-
-            _translatorProfileStatus = new TextBlock
-            {
-                Foreground = MutedForeground,
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(54, 0, 18, 12)
-            };
-            options.Children.Add(_translatorProfileStatus);
-
-            Grid openTranslatorRow = new Grid
-            {
-                Margin = new Thickness(54, 0, 18, 12)
-            };
-            openTranslatorRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            openTranslatorRow.ColumnDefinitions.Add(new ColumnDefinition
-            {
-                Width = new GridLength(1, GridUnitType.Star)
-            });
-            options.Children.Add(openTranslatorRow);
 
             _openTranslator = MakeButton("Open JRPG Translator…", 224);
-            _openTranslator.VerticalAlignment = VerticalAlignment.Top;
+            _openTranslator.HorizontalAlignment = HorizontalAlignment.Left;
+            _openTranslator.Margin = new Thickness(0, 14, 0, 10);
             _openTranslator.Click += OpenTranslatorClicked;
-            openTranslatorRow.Children.Add(_openTranslator);
+            _translatorSettings.Children.Add(_openTranslator);
 
             TextBlock openTranslatorHelp = new TextBlock
             {
-                Text = "First time? Open JRPG Translator to configure API keys and settings. "
-                    + "During games, its control panel stays hidden; show it with your configured "
-                    + "controller button or keyboard hotkey.",
+                Text = "Configure API keys, translation models, and controller shortcuts in the main app.",
                 Foreground = MutedForeground,
-                TextWrapping = TextWrapping.Wrap,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(16, 0, 0, 0)
+                TextWrapping = TextWrapping.Wrap
             };
-            Grid.SetColumn(openTranslatorHelp, 1);
-            openTranslatorRow.Children.Add(openTranslatorHelp);
+            _translatorSettings.Children.Add(openTranslatorHelp);
 
-            _joyToKeyEnabled = MakeCheckBox("Use JoyToKey with this game", game.JoyToKeyEnabled);
-            _joyToKeyEnabled.Margin = new Thickness(18, 10, 18, 14);
+            Border joyToKeyCard = MakeCard();
+            StackPanel joyToKeyCardContent = new StackPanel();
+            joyToKeyCard.Child = joyToKeyCardContent;
+            scrollingContent.Children.Add(joyToKeyCard);
+
+            _joyToKeyReadinessDot = MakeStatusDot();
+            _joyToKeyReadiness = MakeStatusText();
+            _joyToKeyEnabled = MakeToggle(game.JoyToKeyEnabled);
             _joyToKeyEnabled.Checked += (_, _) => UpdateJoyToKeyControls();
             _joyToKeyEnabled.Unchecked += (_, _) => UpdateJoyToKeyControls();
-            options.Children.Add(_joyToKeyEnabled);
+            joyToKeyCardContent.Children.Add(MakeIntegrationHeader(
+                MakeJoyToKeyIcon(),
+                "JoyToKey",
+                "Apply a controller mapping when this game starts.",
+                _joyToKeyReadinessDot,
+                _joyToKeyReadiness,
+                _joyToKeyEnabled));
 
-            Grid joyToKeyProfileRow = MakeProfileRow(out _joyToKeyProfile, out _refreshJoyToKeyProfiles);
+            _joyToKeySettings = new StackPanel
+            {
+                Margin = new Thickness(96, 0, 24, 22)
+            };
+            joyToKeyCardContent.Children.Add(_joyToKeySettings);
+            _joyToKeySettings.Children.Add(MakeProfileSection(
+                out _joyToKeyProfile,
+                out _joyToKeyProfileStatus));
             _joyToKeyProfile.DropDownClosed += HandleProfileDropDownClosed;
+            _joyToKeyProfile.DropDownOpened += (_, _) =>
+                RefreshJoyToKeyProfiles(_joyToKeyProfile.Text);
+            _refreshJoyToKeyProfiles = MakeButton("Refresh", 116);
+            _refreshJoyToKeyProfiles.Visibility = Visibility.Collapsed;
             _refreshJoyToKeyProfiles.Click += (_, _) => RefreshJoyToKeyProfiles(_joyToKeyProfile.Text);
-            options.Children.Add(joyToKeyProfileRow);
 
-            _joyToKeyProfileStatus = new TextBlock
-            {
-                Foreground = MutedForeground,
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(54, 0, 18, 12)
-            };
-            options.Children.Add(_joyToKeyProfileStatus);
+            Border locationsCard = MakeCard();
+            locationsCard.Margin = new Thickness(0, 0, 0, 4);
+            StackPanel locationsCardContent = new StackPanel();
+            locationsCard.Child = locationsCardContent;
+            scrollingContent.Children.Add(locationsCard);
 
-            TextBlock locationHeading = new TextBlock
-            {
-                Text = "Application locations",
-                Foreground = MutedForeground,
-                Margin = new Thickness(18, 4, 18, 8)
-            };
-            options.Children.Add(locationHeading);
+            Grid locationsHeader = new Grid { Margin = new Thickness(18, 12, 18, 12) };
+            locationsHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            locationsHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            locationsCardContent.Children.Add(locationsHeader);
 
-            WrapPanel locationButtons = new WrapPanel
-            {
-                Orientation = Orientation.Horizontal,
-                Margin = new Thickness(18, 0, 18, 16)
-            };
-            options.Children.Add(locationButtons);
-
-            _browseTranslator = MakeButton("Translator EXE...", 150);
-            _browseTranslator.Click += BrowseTranslatorClicked;
-            locationButtons.Children.Add(_browseTranslator);
-
-            _browseJoyToKey = MakeButton("JoyToKey EXE...", 150);
-            _browseJoyToKey.Margin = new Thickness(10, 0, 0, 0);
-            _browseJoyToKey.Click += BrowseJoyToKeyClicked;
-            locationButtons.Children.Add(_browseJoyToKey);
-
-            _browseProfiles = MakeButton("JoyToKey Profiles...", 178);
-            _browseProfiles.Margin = new Thickness(10, 0, 0, 0);
-            _browseProfiles.Click += BrowseProfilesClicked;
-            locationButtons.Children.Add(_browseProfiles);
-
-            StackPanel statusPanel = new StackPanel();
-            scrollingContent.Children.Add(statusPanel);
+            _locationsToggle = MakeDisclosureButton("Application locations");
+            _locationsToggle.Click += (_, _) => SetLocationsExpanded(!_locationsExpanded);
+            locationsHeader.Children.Add(_locationsToggle);
 
             _readiness = new TextBlock
             {
                 Foreground = MutedForeground,
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 0, 0, 8),
-                Text = BuildReadinessText()
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = TextAlignment.Right,
+                Margin = new Thickness(16, 0, 0, 0)
             };
-            statusPanel.Children.Add(_readiness);
+            Grid.SetColumn(_readiness, 1);
+            locationsHeader.Children.Add(_readiness);
+
+            _locationsPanel = new StackPanel
+            {
+                Margin = new Thickness(24, 0, 24, 22),
+                Visibility = Visibility.Collapsed
+            };
+            locationsCardContent.Children.Add(_locationsPanel);
+            _locationsPanel.Children.Add(new TextBlock
+            {
+                Text = "Locations are detected automatically. Choose a different file or folder only when detection needs help.",
+                Foreground = MutedForeground,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 14)
+            });
+
+            _browseTranslator = MakeButton("Browse…", 108);
+            _browseTranslator.Click += BrowseTranslatorClicked;
+            _translatorPathValue = MakePathValue();
+            _locationsPanel.Children.Add(MakeLocationRow(
+                "JRPG Translator executable", _translatorPathValue, _browseTranslator));
+
+            _browseJoyToKey = MakeButton("Browse…", 108);
+            _browseJoyToKey.Click += BrowseJoyToKeyClicked;
+            _joyToKeyPathValue = MakePathValue();
+            _locationsPanel.Children.Add(MakeLocationRow(
+                "JoyToKey executable", _joyToKeyPathValue, _browseJoyToKey));
+
+            _browseProfiles = MakeButton("Browse…", 108);
+            _browseProfiles.Click += BrowseProfilesClicked;
+            _joyToKeyProfilesPathValue = MakePathValue();
+            _locationsPanel.Children.Add(MakeLocationRow(
+                "JoyToKey profiles folder", _joyToKeyProfilesPathValue, _browseProfiles));
+
+            Grid locationActions = new Grid { Margin = new Thickness(0, 4, 0, 0) };
+            locationActions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            locationActions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            _locationsPanel.Children.Add(locationActions);
 
             TextBlock stageNotice = new TextBlock
             {
                 Text = "Plugin-started tools are closed or restored automatically after the game exits.",
                 Foreground = MutedForeground,
                 FontStyle = FontStyles.Italic,
-                TextWrapping = TextWrapping.Wrap
+                TextWrapping = TextWrapping.Wrap,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 16, 0)
             };
-            statusPanel.Children.Add(stageNotice);
+            locationActions.Children.Add(stageNotice);
+
+            _detectAgain = MakeButton("Detect again", 132);
+            _detectAgain.Click += DetectAgainClicked;
+            Grid.SetColumn(_detectAgain, 1);
+            locationActions.Children.Add(_detectAgain);
 
             StackPanel buttons = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
-                HorizontalAlignment = HorizontalAlignment.Left,
+                HorizontalAlignment = HorizontalAlignment.Right,
                 Margin = new Thickness(0, 18, 0, 0)
             };
             Grid.SetRow(buttons, 3);
             root.Children.Add(buttons);
 
-            _save = MakeButton("Save", 150);
-            _save.IsDefault = true;
-            _save.Click += SaveClicked;
-            buttons.Children.Add(_save);
-
             _cancel = MakeButton("Cancel", 150);
             _cancel.IsCancel = true;
-            _cancel.Margin = new Thickness(12, 0, 0, 0);
             _cancel.Click += (_, _) => { DialogResult = false; };
             buttons.Children.Add(_cancel);
+
+            _save = MakeButton("Save", 150);
+            _save.IsDefault = true;
+            _save.Margin = new Thickness(12, 0, 0, 0);
+            _save.Background = AccentBrush;
+            _save.BorderBrush = AccentBrush;
+            _save.Style = MakePrimaryButtonStyle();
+            _save.Click += SaveClicked;
+            buttons.Children.Add(_save);
 
             _focusRows = new List<Control[]>
             {
                 new Control[] { _translatorEnabled },
-                new Control[] { _translatorProfile, _refreshTranslatorProfiles },
+                new Control[] { _translatorProfile },
                 new Control[] { _openTranslator },
                 new Control[] { _joyToKeyEnabled },
-                new Control[] { _joyToKeyProfile, _refreshJoyToKeyProfiles },
-                new Control[] { _browseTranslator, _browseJoyToKey, _browseProfiles },
-                new Control[] { _save, _cancel }
+                new Control[] { _joyToKeyProfile },
+                new Control[] { _locationsToggle },
+                new Control[] { _browseTranslator },
+                new Control[] { _browseJoyToKey },
+                new Control[] { _browseProfiles },
+                new Control[] { _detectAgain },
+                new Control[] { _cancel, _save }
             };
 
             foreach (Control control in _focusRows.SelectMany(row => row))
@@ -302,6 +361,7 @@ namespace JrpgTranslator.LaunchBox
 
             PreviewKeyDown += HandlePreviewKeyDown;
             PreviewKeyUp += HandlePreviewKeyUp;
+            SourceInitialized += (_, _) => ApplyDarkTitleBar();
             Loaded += (_, _) =>
             {
                 FitWindowToVisibleWorkArea();
@@ -313,7 +373,13 @@ namespace JrpgTranslator.LaunchBox
                 _translatorEnabled.Focus();
                 _controllerTimer.Start();
             };
-            Activated += (_, _) => ResetControllerNavigation();
+            Activated += (_, _) =>
+            {
+                RefreshTranslatorProfiles(SelectedTranslatorProfile());
+                RefreshJoyToKeyProfiles(_joyToKeyProfile.Text);
+                UpdatePathStatus();
+                ResetControllerNavigation();
+            };
             Deactivated += (_, _) => ResetControllerNavigation();
             Closed += HandleClosed;
 
@@ -321,6 +387,7 @@ namespace JrpgTranslator.LaunchBox
             RefreshJoyToKeyProfiles(game.JoyToKeyProfile);
             UpdateTranslatorControls();
             UpdateJoyToKeyControls();
+            UpdatePathStatus();
         }
 
         private void BringFocusedControlIntoView(object sender, KeyboardFocusChangedEventArgs e)
@@ -473,6 +540,38 @@ namespace JrpgTranslator.LaunchBox
             int height,
             uint flags);
 
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(
+            IntPtr windowHandle,
+            int attribute,
+            ref int value,
+            int valueSize);
+
+        private void ApplyDarkTitleBar()
+        {
+            IntPtr windowHandle = new WindowInteropHelper(this).Handle;
+            if (windowHandle == IntPtr.Zero)
+            {
+                return;
+            }
+
+            int enabled = 1;
+            const int immersiveDarkMode = 20;
+            if (DwmSetWindowAttribute(
+                    windowHandle,
+                    immersiveDarkMode,
+                    ref enabled,
+                    sizeof(int)) != 0)
+            {
+                const int immersiveDarkModeBefore20H1 = 19;
+                DwmSetWindowAttribute(
+                    windowHandle,
+                    immersiveDarkModeBefore20H1,
+                    ref enabled,
+                    sizeof(int));
+            }
+        }
+
         private void RefreshTranslatorProfiles(string preferredProfile)
         {
             IReadOnlyList<string> profiles = TranslatorProfileDiscovery.GetProfiles(_configuration);
@@ -486,10 +585,11 @@ namespace JrpgTranslator.LaunchBox
 
             string directory = TranslatorProfileDiscovery.GetProfilesDirectory(_configuration);
             _translatorProfileStatus.Text = profiles.Count == 0
-                ? "No Profiles were found in " + DisplayPath(directory)
-                : profiles.Count + (profiles.Count == 1 ? " Profile" : " Profiles")
-                    + " found in " + DisplayPath(directory);
-            _translatorProfileStatus.Text += "\nNone uses JRPG Translator's current settings without applying a Profile.";
+                ? "No saved Profiles found"
+                : profiles.Count + (profiles.Count == 1 ? " Profile available" : " Profiles available");
+            _translatorProfileStatus.ToolTip = profiles.Count == 0
+                ? "No Profile files were found in " + DisplayPath(directory)
+                : DisplayPath(directory);
         }
 
         private string SelectedTranslatorProfile()
@@ -508,17 +608,24 @@ namespace JrpgTranslator.LaunchBox
             _joyToKeyProfile.SelectedItem = selected ?? profiles.FirstOrDefault();
 
             _joyToKeyProfileStatus.Text = profiles.Count == 0
-                ? "No .cfg profiles were found in " + DisplayPath(_configuration.JoyToKeyProfilesDirectory)
-                : profiles.Count + (profiles.Count == 1 ? " profile" : " profiles")
-                    + " found in " + DisplayPath(_configuration.JoyToKeyProfilesDirectory);
+                ? "No profiles found"
+                : profiles.Count + (profiles.Count == 1 ? " profile available" : " profiles available");
+            _joyToKeyProfileStatus.ToolTip = DisplayPath(_configuration.JoyToKeyProfilesDirectory);
         }
 
         private string BuildReadinessText()
         {
             string translator = PluginPaths.ResolveTranslatorExecutable(_configuration);
-            string translatorState = File.Exists(translator) ? "ready" : "not found";
-            string joyToKeyState = File.Exists(_configuration.JoyToKeyExecutable) ? "ready" : "not found";
-            return "JRPG Translator: " + translatorState + "    |    JoyToKey: " + joyToKeyState;
+            bool translatorReady = File.Exists(translator);
+            bool joyToKeyReady = File.Exists(_configuration.JoyToKeyExecutable)
+                && Directory.Exists(_configuration.JoyToKeyProfilesDirectory);
+            if (translatorReady && joyToKeyReady)
+            {
+                return "Everything ready";
+            }
+
+            int missing = (translatorReady ? 0 : 1) + (joyToKeyReady ? 0 : 1);
+            return missing == 1 ? "1 item needs setup" : "2 items need setup";
         }
 
         private static string DisplayPath(string path)
@@ -531,6 +638,8 @@ namespace JrpgTranslator.LaunchBox
             bool enabled = _joyToKeyEnabled.IsChecked == true;
             _joyToKeyProfile.IsEnabled = enabled;
             _refreshJoyToKeyProfiles.IsEnabled = enabled;
+            _joyToKeyEnabled.Content = enabled ? "On" : "Off";
+            _joyToKeySettings.Visibility = enabled ? Visibility.Visible : Visibility.Collapsed;
         }
 
         private void UpdateTranslatorControls()
@@ -538,6 +647,8 @@ namespace JrpgTranslator.LaunchBox
             bool enabled = _translatorEnabled.IsChecked == true;
             _translatorProfile.IsEnabled = enabled;
             _refreshTranslatorProfiles.IsEnabled = enabled;
+            _translatorEnabled.Content = enabled ? "On" : "Off";
+            _translatorSettings.Visibility = enabled ? Visibility.Visible : Visibility.Collapsed;
 
             if (enabled && _translatorProfile.SelectedItem == null && _translatorProfile.Items.Count > 0)
             {
@@ -573,7 +684,7 @@ namespace JrpgTranslator.LaunchBox
             {
                 MessageBox.Show(
                     this,
-                    "JRPG Translator.exe was not found. Use \"Translator EXE...\" below to select it.",
+                    "JRPG Translator.exe was not found. Open Application locations and select it with Browse.",
                     "JRPG Translator Setup",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
@@ -714,7 +825,78 @@ namespace JrpgTranslator.LaunchBox
 
         private void UpdatePathStatus()
         {
+            string translatorPath = PluginPaths.ResolveTranslatorExecutable(_configuration);
+            bool translatorReady = File.Exists(translatorPath);
+            bool joyToKeyExecutableReady = File.Exists(_configuration.JoyToKeyExecutable);
+            bool joyToKeyProfilesReady = Directory.Exists(_configuration.JoyToKeyProfilesDirectory);
+            bool joyToKeyReady = joyToKeyExecutableReady && joyToKeyProfilesReady;
+
+            SetReadinessBadge(
+                _translatorReadiness,
+                _translatorReadinessDot,
+                translatorReady,
+                translatorReady ? "Ready" : "Needs setup");
+            SetReadinessBadge(
+                _joyToKeyReadiness,
+                _joyToKeyReadinessDot,
+                joyToKeyReady,
+                joyToKeyReady ? "Ready" : "Needs setup");
+
+            SetPathValue(_translatorPathValue, translatorPath, translatorReady);
+            SetPathValue(
+                _joyToKeyPathValue,
+                _configuration.JoyToKeyExecutable,
+                joyToKeyExecutableReady);
+            SetPathValue(
+                _joyToKeyProfilesPathValue,
+                _configuration.JoyToKeyProfilesDirectory,
+                joyToKeyProfilesReady);
             _readiness.Text = BuildReadinessText();
+            _readiness.Foreground = translatorReady && joyToKeyReady
+                ? ReadyBrush
+                : WarningBrush;
+            if (!translatorReady || !joyToKeyReady)
+            {
+                SetLocationsExpanded(true);
+            }
+        }
+
+        private void DetectAgainClicked(object sender, RoutedEventArgs e)
+        {
+            string translatorProfile = SelectedTranslatorProfile();
+            string joyToKeyProfile = _joyToKeyProfile.Text;
+            _configuration.TranslatorExecutable = string.Empty;
+            _configuration.JoyToKeyExecutable = string.Empty;
+            _configuration.JoyToKeyProfilesDirectory = string.Empty;
+            PluginPaths.PopulateDetectedPaths(_configuration);
+            RefreshTranslatorProfiles(translatorProfile);
+            RefreshJoyToKeyProfiles(joyToKeyProfile);
+            UpdatePathStatus();
+        }
+
+        private void SetLocationsExpanded(bool expanded)
+        {
+            _locationsExpanded = expanded;
+            _locationsPanel.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
+            _locationsToggle.Content = (expanded ? "▾  " : "▸  ") + "Application locations";
+        }
+
+        private static void SetReadinessBadge(
+            TextBlock label,
+            Ellipse dot,
+            bool ready,
+            string text)
+        {
+            label.Text = text;
+            label.Foreground = ready ? ReadyBrush : WarningBrush;
+            dot.Fill = ready ? ReadyBrush : WarningBrush;
+        }
+
+        private static void SetPathValue(TextBlock label, string path, bool ready)
+        {
+            label.Text = string.IsNullOrWhiteSpace(path) ? "Not detected" : path;
+            label.Foreground = ready ? PrimaryForeground : WarningBrush;
+            label.ToolTip = label.Text;
         }
 
         private void SaveClicked(object sender, RoutedEventArgs e)
@@ -1093,66 +1275,40 @@ namespace JrpgTranslator.LaunchBox
 
         private bool ActivateFocusedControl()
         {
-            if (_translatorEnabled.IsKeyboardFocused)
+            Control? focused = _focusRows
+                .SelectMany(row => row)
+                .FirstOrDefault(control => control.IsKeyboardFocusWithin);
+            return focused != null && ActivateControl(focused);
+        }
+
+        private bool ActivateControl(Control control)
+        {
+            if (ReferenceEquals(control, _translatorEnabled))
             {
                 _translatorEnabled.IsChecked = _translatorEnabled.IsChecked != true;
                 return true;
             }
-            else if (_translatorProfile.IsKeyboardFocusWithin)
+            if (ReferenceEquals(control, _translatorProfile))
             {
                 OpenProfileDropDown(_translatorProfile);
                 return true;
             }
-            else if (_refreshTranslatorProfiles.IsKeyboardFocused)
-            {
-                _refreshTranslatorProfiles.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                return true;
-            }
-            else if (_openTranslator.IsKeyboardFocused)
-            {
-                _openTranslator.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                return true;
-            }
-            else if (_joyToKeyEnabled.IsKeyboardFocused)
+            if (ReferenceEquals(control, _joyToKeyEnabled))
             {
                 _joyToKeyEnabled.IsChecked = _joyToKeyEnabled.IsChecked != true;
                 return true;
             }
-            else if (_joyToKeyProfile.IsKeyboardFocusWithin)
+            if (ReferenceEquals(control, _joyToKeyProfile))
             {
                 OpenProfileDropDown(_joyToKeyProfile);
                 return true;
             }
-            else if (_refreshJoyToKeyProfiles.IsKeyboardFocused)
+            if (control is Button button && button.IsEnabled)
             {
-                _refreshJoyToKeyProfiles.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 return true;
             }
-            else if (_browseTranslator.IsKeyboardFocused)
-            {
-                _browseTranslator.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                return true;
-            }
-            else if (_browseJoyToKey.IsKeyboardFocused)
-            {
-                _browseJoyToKey.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                return true;
-            }
-            else if (_browseProfiles.IsKeyboardFocused)
-            {
-                _browseProfiles.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                return true;
-            }
-            else if (_save.IsKeyboardFocused)
-            {
-                _save.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                return true;
-            }
-            else if (_cancel.IsKeyboardFocused)
-            {
-                _cancel.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                return true;
-            }
+
             return false;
         }
 
@@ -1221,7 +1377,7 @@ namespace JrpgTranslator.LaunchBox
         private static bool IsAvailableForNavigation(Control control)
         {
             return control.IsEnabled
-                && control.Visibility == Visibility.Visible
+                && control.IsVisible
                 && control.Focusable;
         }
 
@@ -1238,25 +1394,199 @@ namespace JrpgTranslator.LaunchBox
             }
         }
 
-        private static Grid MakeProfileRow(out ComboBox profile, out Button refresh)
+        private static Border MakeCard()
         {
-            Grid row = new Grid { Margin = new Thickness(54, 0, 18, 10) };
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            return new Border
+            {
+                Background = PanelBackground,
+                BorderBrush = BrushFrom("#343A46"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Margin = new Thickness(0, 0, 0, 14),
+                ClipToBounds = true
+            };
+        }
+
+        private static Grid MakeIntegrationHeader(
+            FrameworkElement icon,
+            string title,
+            string subtitle,
+            Ellipse readinessDot,
+            TextBlock readiness,
+            CheckBox toggle)
+        {
+            Grid header = new Grid { Margin = new Thickness(24, 20, 24, 16) };
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(72) });
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            icon.HorizontalAlignment = HorizontalAlignment.Left;
+            icon.VerticalAlignment = VerticalAlignment.Center;
+            header.Children.Add(icon);
+
+            StackPanel heading = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            heading.Children.Add(new TextBlock
+            {
+                Text = title,
+                Foreground = PrimaryForeground,
+                FontSize = 22,
+                FontWeight = FontWeights.SemiBold
+            });
+            heading.Children.Add(new TextBlock
+            {
+                Text = subtitle,
+                Foreground = MutedForeground,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 3, 0, 0)
+            });
+            Grid.SetColumn(heading, 1);
+            header.Children.Add(heading);
+
+            StackPanel status = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(18, 0, 18, 0)
+            };
+            status.Children.Add(readinessDot);
+            status.Children.Add(readiness);
+            Grid.SetColumn(status, 2);
+            header.Children.Add(status);
+
+            Grid.SetColumn(toggle, 3);
+            header.Children.Add(toggle);
+            return header;
+        }
+
+        private static FrameworkElement MakeTranslatorIcon()
+        {
+            ImageSource? source = LoadEmbeddedIconSource(
+                "JrpgTranslator.LaunchBox.Assets.menu-icon.png");
+            if (source != null)
+            {
+                return new Image
+                {
+                    Source = source,
+                    Width = 58,
+                    Height = 58,
+                    Stretch = Stretch.Uniform
+                };
+            }
+
+            return MakeMonogramIcon("JRPG");
+        }
+
+        private static ImageSource? LoadEmbeddedIconSource(string resourceName)
+        {
+            try
+            {
+                using Stream? stream = typeof(GameSetupWindow).Assembly.GetManifestResourceStream(
+                    resourceName);
+                if (stream == null)
+                {
+                    return null;
+                }
+
+                BitmapImage image = new BitmapImage();
+                image.BeginInit();
+                image.CacheOption = BitmapCacheOption.OnLoad;
+                image.DecodePixelWidth = 128;
+                image.StreamSource = stream;
+                image.EndInit();
+                image.Freeze();
+                return image;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static FrameworkElement MakeJoyToKeyIcon()
+        {
+            ImageSource? source = LoadEmbeddedIconSource(
+                "JrpgTranslator.LaunchBox.Assets.joytokey-icon.png");
+            if (source != null)
+            {
+                return new Image
+                {
+                    Source = source,
+                    Width = 58,
+                    Height = 58,
+                    Stretch = Stretch.Uniform
+                };
+            }
+
+            return MakeMonogramIcon("JTK");
+        }
+
+        private static Border MakeMonogramIcon(string text)
+        {
+            return new Border
+            {
+                Width = 54,
+                Height = 54,
+                Background = ControlBackground,
+                BorderBrush = ControlBorderBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Child = new TextBlock
+                {
+                    Text = text,
+                    Foreground = MutedForeground,
+                    FontWeight = FontWeights.SemiBold,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                }
+            };
+        }
+
+        private static Ellipse MakeStatusDot()
+        {
+            return new Ellipse
+            {
+                Width = 8,
+                Height = 8,
+                Fill = MutedForeground,
+                Margin = new Thickness(0, 1, 7, 0)
+            };
+        }
+
+        private static TextBlock MakeStatusText()
+        {
+            return new TextBlock
+            {
+                Text = "Checking…",
+                Foreground = MutedForeground,
+                FontWeight = FontWeights.SemiBold,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+        }
+
+        private static StackPanel MakeProfileSection(
+            out ComboBox profile,
+            out TextBlock status)
+        {
+            StackPanel section = new StackPanel();
 
             TextBlock label = new TextBlock
             {
-                Text = "Profile:",
+                Text = "Profile",
                 Foreground = PrimaryForeground,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 14, 0)
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(0, 0, 0, 7)
             };
-            row.Children.Add(label);
+            section.Children.Add(label);
+
+            Grid row = new Grid();
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            section.Children.Add(row);
 
             profile = new ComboBox
             {
-                MinHeight = 40,
+                MinHeight = 42,
                 Background = ControlBackground,
                 Foreground = PrimaryForeground,
                 BorderBrush = ControlBorderBrush,
@@ -1265,27 +1595,90 @@ namespace JrpgTranslator.LaunchBox
                 VerticalContentAlignment = VerticalAlignment.Center,
                 Style = MakeProfileComboBoxStyle()
             };
-            Grid.SetColumn(profile, 1);
             row.Children.Add(profile);
 
-            refresh = MakeButton("Refresh", 116);
-            refresh.Margin = new Thickness(12, 0, 0, 0);
-            Grid.SetColumn(refresh, 2);
-            row.Children.Add(refresh);
-            return row;
+            status = new TextBlock
+            {
+                Foreground = MutedForeground,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(16, 0, 0, 0),
+                MinWidth = 138
+            };
+            Grid.SetColumn(status, 1);
+            row.Children.Add(status);
+            return section;
         }
 
-        private static CheckBox MakeCheckBox(string text, bool isChecked)
+        private static CheckBox MakeToggle(bool isChecked)
         {
             return new CheckBox
             {
-                Content = text,
+                Content = isChecked ? "On" : "Off",
                 IsChecked = isChecked,
                 Foreground = PrimaryForeground,
-                FontSize = 19,
+                FontSize = 16,
                 VerticalContentAlignment = VerticalAlignment.Center,
-                Style = MakeCheckBoxStyle()
+                Style = MakeToggleStyle()
             };
+        }
+
+        private static Button MakeDisclosureButton(string text)
+        {
+            Button button = MakeButton("▸  " + text, 250);
+            button.HorizontalAlignment = HorizontalAlignment.Left;
+            button.HorizontalContentAlignment = HorizontalAlignment.Left;
+            button.Background = Brushes.Transparent;
+            button.BorderBrush = Brushes.Transparent;
+            button.FontWeight = FontWeights.SemiBold;
+            button.Padding = new Thickness(4, 5, 8, 5);
+            return button;
+        }
+
+        private static TextBlock MakePathValue()
+        {
+            return new TextBlock
+            {
+                Foreground = PrimaryForeground,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+        }
+
+        private static StackPanel MakeLocationRow(
+            string label,
+            TextBlock value,
+            Button browse)
+        {
+            StackPanel section = new StackPanel { Margin = new Thickness(0, 0, 0, 12) };
+            section.Children.Add(new TextBlock
+            {
+                Text = label,
+                Foreground = PrimaryForeground,
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(0, 0, 0, 6)
+            });
+
+            Grid row = new Grid();
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            section.Children.Add(row);
+
+            Border field = new Border
+            {
+                Background = ControlBackground,
+                BorderBrush = ControlBorderBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(12, 10, 12, 10),
+                Child = value
+            };
+            row.Children.Add(field);
+
+            browse.Margin = new Thickness(10, 0, 0, 0);
+            Grid.SetColumn(browse, 1);
+            row.Children.Add(browse);
+            return section;
         }
 
         private static Button MakeButton(string text, double width)
@@ -1294,13 +1687,13 @@ namespace JrpgTranslator.LaunchBox
             {
                 Content = text,
                 Width = width,
-                MinHeight = 46,
+                MinHeight = 42,
                 Padding = new Thickness(16, 7, 16, 7),
                 Background = ControlBackground,
                 Foreground = PrimaryForeground,
                 BorderBrush = ControlBorderBrush,
                 BorderThickness = new Thickness(1),
-                FontSize = 18,
+                FontSize = 16,
                 Style = MakeButtonStyle()
             };
             return button;
@@ -1315,9 +1708,9 @@ namespace JrpgTranslator.LaunchBox
 <Style xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation""
        xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml""
        TargetType=""{x:Type ComboBox}"">
-  <Setter Property=""Background"" Value=""#333438"" />
-  <Setter Property=""Foreground"" Value=""#F3F4F6"" />
-  <Setter Property=""BorderBrush"" Value=""#686B72"" />
+  <Setter Property=""Background"" Value=""#242730"" />
+  <Setter Property=""Foreground"" Value=""#ECEEF3"" />
+  <Setter Property=""BorderBrush"" Value=""#4B5260"" />
   <Setter Property=""BorderThickness"" Value=""1"" />
   <Setter Property=""Padding"" Value=""10,5,10,5"" />
   <Setter Property=""MaxDropDownHeight"" Value=""280"" />
@@ -1325,8 +1718,8 @@ namespace JrpgTranslator.LaunchBox
   <Setter Property=""ItemContainerStyle"">
     <Setter.Value>
       <Style TargetType=""{x:Type ComboBoxItem}"">
-        <Setter Property=""Background"" Value=""#333438"" />
-        <Setter Property=""Foreground"" Value=""#F3F4F6"" />
+        <Setter Property=""Background"" Value=""#242730"" />
+        <Setter Property=""Foreground"" Value=""#ECEEF3"" />
         <Setter Property=""Padding"" Value=""10,7"" />
         <Setter Property=""HorizontalContentAlignment"" Value=""Stretch"" />
         <Setter Property=""Template"">
@@ -1340,11 +1733,11 @@ namespace JrpgTranslator.LaunchBox
               </Border>
               <ControlTemplate.Triggers>
                 <Trigger Property=""IsHighlighted"" Value=""True"">
-                  <Setter TargetName=""ItemBorder"" Property=""Background"" Value=""#1683D8"" />
+                  <Setter TargetName=""ItemBorder"" Property=""Background"" Value=""#168ED1"" />
                   <Setter Property=""Foreground"" Value=""#FFFFFF"" />
                 </Trigger>
                 <Trigger Property=""IsSelected"" Value=""True"">
-                  <Setter TargetName=""ItemBorder"" Property=""Background"" Value=""#126CB2"" />
+                  <Setter TargetName=""ItemBorder"" Property=""Background"" Value=""#1476AD"" />
                   <Setter Property=""Foreground"" Value=""#FFFFFF"" />
                 </Trigger>
                 <Trigger Property=""IsEnabled"" Value=""False"">
@@ -1362,18 +1755,19 @@ namespace JrpgTranslator.LaunchBox
       <ControlTemplate TargetType=""{x:Type ComboBox}"">
         <Grid SnapsToDevicePixels=""True"">
           <Border x:Name=""FieldBorder""
-                  Background=""#333438""
-                  BorderBrush=""#686B72""
-                  BorderThickness=""1"">
+                  Background=""#242730""
+                  BorderBrush=""#4B5260""
+                  BorderThickness=""1""
+                  CornerRadius=""4"">
             <Grid>
               <TextBlock x:Name=""SelectionText""
                          Text=""{TemplateBinding SelectionBoxItem}""
-                         Foreground=""#F3F4F6""
+                         Foreground=""#ECEEF3""
                          Margin=""10,5,38,5""
                          VerticalAlignment=""Center""
                          TextTrimming=""CharacterEllipsis"" />
               <Path Data=""M 0 0 L 5 5 L 10 0 Z""
-                    Fill=""#F3F4F6""
+                    Fill=""#ECEEF3""
                     HorizontalAlignment=""Right""
                     VerticalAlignment=""Center""
                     Margin=""0,0,13,0"" />
@@ -1396,9 +1790,10 @@ namespace JrpgTranslator.LaunchBox
                  Focusable=""False""
                  IsOpen=""{TemplateBinding IsDropDownOpen}""
                  PopupAnimation=""Fade"">
-            <Border Background=""#333438""
-                    BorderBrush=""#686B72""
+            <Border Background=""#242730""
+                    BorderBrush=""#4B5260""
                     BorderThickness=""1""
+                    CornerRadius=""4""
                     MinWidth=""{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}""
                     MaxHeight=""{TemplateBinding MaxDropDownHeight}"">
               <ScrollViewer CanContentScroll=""True"">
@@ -1409,15 +1804,15 @@ namespace JrpgTranslator.LaunchBox
         </Grid>
         <ControlTemplate.Triggers>
           <Trigger Property=""IsKeyboardFocusWithin"" Value=""True"">
-            <Setter TargetName=""FieldBorder"" Property=""BorderBrush"" Value=""#1683D8"" />
+            <Setter TargetName=""FieldBorder"" Property=""BorderBrush"" Value=""#56C4F5"" />
             <Setter TargetName=""FieldBorder"" Property=""BorderThickness"" Value=""2"" />
           </Trigger>
           <Trigger Property=""IsMouseOver"" Value=""True"">
-            <Setter TargetName=""FieldBorder"" Property=""BorderBrush"" Value=""#1683D8"" />
+            <Setter TargetName=""FieldBorder"" Property=""BorderBrush"" Value=""#56C4F5"" />
           </Trigger>
           <Trigger Property=""IsEnabled"" Value=""False"">
             <Setter TargetName=""FieldBorder"" Property=""Opacity"" Value=""0.48"" />
-            <Setter TargetName=""SelectionText"" Property=""Foreground"" Value=""#AEB3BC"" />
+            <Setter TargetName=""SelectionText"" Property=""Foreground"" Value=""#AEB8C9"" />
           </Trigger>
         </ControlTemplate.Triggers>
       </ControlTemplate>
@@ -1434,9 +1829,9 @@ namespace JrpgTranslator.LaunchBox
 <Style xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation""
        xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml""
        TargetType=""{x:Type Button}"">
-  <Setter Property=""Background"" Value=""#333438"" />
-  <Setter Property=""Foreground"" Value=""#F3F4F6"" />
-  <Setter Property=""BorderBrush"" Value=""#686B72"" />
+  <Setter Property=""Background"" Value=""#242730"" />
+  <Setter Property=""Foreground"" Value=""#ECEEF3"" />
+  <Setter Property=""BorderBrush"" Value=""#4B5260"" />
   <Setter Property=""BorderThickness"" Value=""1"" />
   <Setter Property=""Template"">
     <Setter.Value>
@@ -1446,6 +1841,7 @@ namespace JrpgTranslator.LaunchBox
                 BorderBrush=""{TemplateBinding BorderBrush}""
                 BorderThickness=""{TemplateBinding BorderThickness}""
                 Padding=""{TemplateBinding Padding}""
+                CornerRadius=""5""
                 SnapsToDevicePixels=""True"">
           <ContentPresenter HorizontalAlignment=""Center""
                             VerticalAlignment=""Center""
@@ -1453,16 +1849,16 @@ namespace JrpgTranslator.LaunchBox
         </Border>
         <ControlTemplate.Triggers>
           <Trigger Property=""IsMouseOver"" Value=""True"">
-            <Setter TargetName=""ButtonBorder"" Property=""Background"" Value=""#3D3F44"" />
-            <Setter TargetName=""ButtonBorder"" Property=""BorderBrush"" Value=""#8A8E96"" />
+            <Setter TargetName=""ButtonBorder"" Property=""Background"" Value=""#323743"" />
+            <Setter TargetName=""ButtonBorder"" Property=""BorderBrush"" Value=""#778191"" />
           </Trigger>
           <Trigger Property=""IsKeyboardFocused"" Value=""True"">
-            <Setter TargetName=""ButtonBorder"" Property=""Background"" Value=""#234A68"" />
-            <Setter TargetName=""ButtonBorder"" Property=""BorderBrush"" Value=""#4FB3FF"" />
+            <Setter TargetName=""ButtonBorder"" Property=""Background"" Value=""#263C50"" />
+            <Setter TargetName=""ButtonBorder"" Property=""BorderBrush"" Value=""#56C4F5"" />
             <Setter TargetName=""ButtonBorder"" Property=""BorderThickness"" Value=""2"" />
           </Trigger>
           <Trigger Property=""IsPressed"" Value=""True"">
-            <Setter TargetName=""ButtonBorder"" Property=""Background"" Value=""#126CB2"" />
+            <Setter TargetName=""ButtonBorder"" Property=""Background"" Value=""#1476AD"" />
           </Trigger>
           <Trigger Property=""IsEnabled"" Value=""False"">
             <Setter TargetName=""ButtonBorder"" Property=""Opacity"" Value=""0.48"" />
@@ -1476,13 +1872,61 @@ namespace JrpgTranslator.LaunchBox
             return (Style)XamlReader.Parse(xaml);
         }
 
-        private static Style MakeCheckBoxStyle()
+        private static Style MakePrimaryButtonStyle()
+        {
+            const string xaml = @"
+<Style xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation""
+       xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml""
+       TargetType=""{x:Type Button}"">
+  <Setter Property=""Background"" Value=""#168ED1"" />
+  <Setter Property=""Foreground"" Value=""#FFFFFF"" />
+  <Setter Property=""BorderBrush"" Value=""#168ED1"" />
+  <Setter Property=""BorderThickness"" Value=""1"" />
+  <Setter Property=""Template"">
+    <Setter.Value>
+      <ControlTemplate TargetType=""{x:Type Button}"">
+        <Border x:Name=""ButtonBorder""
+                Background=""{TemplateBinding Background}""
+                BorderBrush=""{TemplateBinding BorderBrush}""
+                BorderThickness=""{TemplateBinding BorderThickness}""
+                Padding=""{TemplateBinding Padding}""
+                CornerRadius=""5""
+                SnapsToDevicePixels=""True"">
+          <ContentPresenter HorizontalAlignment=""Center""
+                            VerticalAlignment=""Center""
+                            RecognizesAccessKey=""True"" />
+        </Border>
+        <ControlTemplate.Triggers>
+          <Trigger Property=""IsMouseOver"" Value=""True"">
+            <Setter TargetName=""ButtonBorder"" Property=""Background"" Value=""#20A2E6"" />
+            <Setter TargetName=""ButtonBorder"" Property=""BorderBrush"" Value=""#56C4F5"" />
+          </Trigger>
+          <Trigger Property=""IsKeyboardFocused"" Value=""True"">
+            <Setter TargetName=""ButtonBorder"" Property=""BorderBrush"" Value=""#B8E9FF"" />
+            <Setter TargetName=""ButtonBorder"" Property=""BorderThickness"" Value=""2"" />
+          </Trigger>
+          <Trigger Property=""IsPressed"" Value=""True"">
+            <Setter TargetName=""ButtonBorder"" Property=""Background"" Value=""#1476AD"" />
+          </Trigger>
+          <Trigger Property=""IsEnabled"" Value=""False"">
+            <Setter TargetName=""ButtonBorder"" Property=""Opacity"" Value=""0.48"" />
+          </Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate>
+    </Setter.Value>
+  </Setter>
+</Style>";
+
+            return (Style)XamlReader.Parse(xaml);
+        }
+
+        private static Style MakeToggleStyle()
         {
             const string xaml = @"
 <Style xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation""
        xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml""
        TargetType=""{x:Type CheckBox}"">
-  <Setter Property=""Foreground"" Value=""#F3F4F6"" />
+  <Setter Property=""Foreground"" Value=""#ECEEF3"" />
   <Setter Property=""Template"">
     <Setter.Value>
       <ControlTemplate TargetType=""{x:Type CheckBox}"">
@@ -1490,46 +1934,43 @@ namespace JrpgTranslator.LaunchBox
                 Background=""Transparent""
                 BorderBrush=""Transparent""
                 BorderThickness=""2""
-                Padding=""6,4""
+                CornerRadius=""6""
+                Padding=""5,4""
                 SnapsToDevicePixels=""True"">
-          <Grid>
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width=""Auto"" />
-              <ColumnDefinition Width=""*"" />
-            </Grid.ColumnDefinitions>
-            <Border x:Name=""CheckBoxBorder""
-                    Width=""18""
-                    Height=""18""
-                    Background=""#333438""
-                    BorderBrush=""#858991""
+          <StackPanel Orientation=""Horizontal"">
+            <Border x:Name=""ToggleTrack""
+                    Width=""54""
+                    Height=""30""
+                    Background=""#3A3F4A""
+                    BorderBrush=""#687282""
                     BorderThickness=""1""
+                    CornerRadius=""15""
                     VerticalAlignment=""Center"">
-              <Path x:Name=""CheckMark""
-                    Data=""M 3 8 L 7 12 L 15 3""
-                    Stroke=""#FFFFFF""
-                    StrokeThickness=""2""
-                    StrokeStartLineCap=""Round""
-                    StrokeEndLineCap=""Round""
-                    Visibility=""Collapsed"" />
+              <Ellipse x:Name=""ToggleKnob""
+                       Width=""22""
+                       Height=""22""
+                       Fill=""#E8EBF0""
+                       HorizontalAlignment=""Left""
+                       VerticalAlignment=""Center""
+                       Margin=""3,0"" />
             </Border>
-            <ContentPresenter Grid.Column=""1""
-                              Margin=""10,0,0,0""
+            <ContentPresenter Margin=""10,0,0,0""
                               VerticalAlignment=""Center""
                               RecognizesAccessKey=""True"" />
-          </Grid>
+          </StackPanel>
         </Border>
         <ControlTemplate.Triggers>
           <Trigger Property=""IsChecked"" Value=""True"">
-            <Setter TargetName=""CheckBoxBorder"" Property=""Background"" Value=""#1683D8"" />
-            <Setter TargetName=""CheckBoxBorder"" Property=""BorderBrush"" Value=""#4FB3FF"" />
-            <Setter TargetName=""CheckMark"" Property=""Visibility"" Value=""Visible"" />
+            <Setter TargetName=""ToggleTrack"" Property=""Background"" Value=""#168ED1"" />
+            <Setter TargetName=""ToggleTrack"" Property=""BorderBrush"" Value=""#56C4F5"" />
+            <Setter TargetName=""ToggleKnob"" Property=""HorizontalAlignment"" Value=""Right"" />
           </Trigger>
           <Trigger Property=""IsMouseOver"" Value=""True"">
-            <Setter TargetName=""FocusBorder"" Property=""Background"" Value=""#303238"" />
+            <Setter TargetName=""FocusBorder"" Property=""Background"" Value=""#30343E"" />
           </Trigger>
           <Trigger Property=""IsKeyboardFocused"" Value=""True"">
-            <Setter TargetName=""FocusBorder"" Property=""Background"" Value=""#233748"" />
-            <Setter TargetName=""FocusBorder"" Property=""BorderBrush"" Value=""#4FB3FF"" />
+            <Setter TargetName=""FocusBorder"" Property=""Background"" Value=""#263C50"" />
+            <Setter TargetName=""FocusBorder"" Property=""BorderBrush"" Value=""#56C4F5"" />
           </Trigger>
           <Trigger Property=""IsEnabled"" Value=""False"">
             <Setter TargetName=""FocusBorder"" Property=""Opacity"" Value=""0.48"" />
