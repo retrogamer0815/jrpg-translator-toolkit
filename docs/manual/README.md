@@ -43,7 +43,7 @@ Instructions that send content to an AI service are identified as AI operations.
 
 ## Screenshots
 
-Screenshot locations are reserved with visible, numbered callouts. They are deliberately not broken image links. The [screenshot checklist](SCREENSHOTS.md) lists the required shots, proposed filenames, and privacy checks for adding real images later.
+The first screenshot batch is included, with an annotated desktop overview. Numbered callouts remain for missing images and for lower-page details still needed. The [screenshot checklist](SCREENSHOTS.md) tracks completed, partial, and pending figures, filenames, and privacy checks.
 
 ## Maintaining this manual
 

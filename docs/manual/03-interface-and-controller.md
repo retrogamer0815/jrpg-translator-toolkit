@@ -20,7 +20,9 @@ The header's **Profile** dropdown is a quick way to apply a saved Profile. Its *
 
 The footer provides current Translator, Explainer, and Audio controls, plus **Window options...** for the desktop control panel. These desktop window options are separate from the appearance of the output overlays.
 
-> **Screenshot S05 — Desktop orientation (to be added).** Label the sidebar, header Profile selector, page content, and footer.
+![Annotated desktop overview identifying 1 Sidebar, 2 Header Profile selector, 3 Page content, and 4 Footer](images/desktop-orientation.png)
+
+*Figure S05. Desktop orientation: (1) sidebar navigation, (2) the header Profile selector, (3) the selected page's content, and (4) footer controls. Labels have been added for the manual; see the [original screenshot](images/game-text-page.png) without annotations.*
 
 ## Native controller navigation
 
@@ -57,7 +59,11 @@ A native controller binding does not consume the button for the game. The game c
 
 To assign a direct action, open the controller binding list, select the action, choose its assignment command, and press the intended controller button or trigger. Use **Disable** to clear an action you do not want. Test the result in a safe game scene.
 
-> **Screenshot S06 — Controls and bindings (to be added).** Show detection status and examples of navigation/direct-action settings without implying that every controller has Xbox labels.
+![Controls page with the Controller binding list, Capture + Translate on Right trigger, and Explain last translation on Left trigger](images/controls-and-bindings.png)
+
+*Figure S06a. Direct controller-action assignments. The bindings shown are an example; use Assign or Disable to customize your setup.*
+
+> **Screenshot S06b — Controller options and detection (to be added).** Show the lower-page direct-action and D-pad navigation switches, plus controller detection status.
 
 ## Default keyboard shortcuts
 

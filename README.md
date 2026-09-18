@@ -12,8 +12,8 @@ Input, or DS4Windows remain optional for custom and multi-function mappings.
 
 Read the **[complete user manual for v0.9.9 (in testing)](docs/manual/README.md)**
 for setup, controllers, every main feature, LaunchBox / Big Box, Study Library,
-Anki, troubleshooting, and backups. The manual includes clearly marked screenshot
-placeholders; real screenshots will be added later.
+Anki, troubleshooting, and backups. The manual includes real screenshots, a labeled
+desktop overview, and clearly marked placeholders for the remaining screenshots.
 
 New users can start with **[Setup and your first translation](docs/manual/02-setup.md)**.
 The manual describes the current interface; older screenshots and development notes

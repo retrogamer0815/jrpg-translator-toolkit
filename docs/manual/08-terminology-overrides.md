@@ -8,7 +8,11 @@ Names, places, and invented terms can be translated inconsistently. A glossary h
 
 Open **Settings → Terminology** and enable **Use terminology overrides**. There are two different kinds of rules, with independent selected glossary profiles.
 
-> **Screenshot S14 — Terminology overview (to be added).** Show the enable switch and the separate local-correction and Japanese-to-target-language sections.
+![Terminology settings showing Use terminology overrides and the Local corrections target-language-to-target-language section](images/terminology-overview.png)
+
+*Figure S14a. The master switch and local-correction glossary. The independent Japanese-to-target-language rule section is farther down the page.*
+
+> **Screenshot S14b — Both terminology rule selections (to be added).** Show the local-correction and Japanese-to-target-language glossary selectors and their management controls; use two crops if needed.
 
 ## The two rule types
 

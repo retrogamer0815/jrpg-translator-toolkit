@@ -16,7 +16,9 @@ There are three independent AI functions:
 
 Translation can be used on its own. The Explainer, Study Library, recommendations, and Anki integration are optional.
 
-> **Screenshot S01 — Overall workflow (to be added).** Show a game with readable Translator and Explainer overlays. Use a short sample, with no personal account information.
+![Japanese game dialogue with the Explainer on the left and the Translator transcript and translation on the right](images/overall-workflow.png)
+
+*Figure S01. A playing session with the original game dialogue, a Japanese transcript and translation on the right, and a learning explanation on the left.*
 
 ## A typical playing session
 

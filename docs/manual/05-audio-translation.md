@@ -22,7 +22,11 @@ The input is playback audio, not automatically a microphone. Other applications 
 
 On a shorter screen, the start button may be below the initial view. Scroll or continue downward through the page controls.
 
-> **Screenshot S09 — Audio setup and input check (to be added).** Show device selection, Test audio, its result, and the start control.
+![Audio Translation page showing AI provider and model, output language, Windows Default audio input, Refresh devices, and Test audio](images/audio-setup-and-input-check.png)
+
+*Figure S09a. Audio AI, language, and playback-device selection. The input-check result and start control are farther down the page.*
+
+> **Screenshot S09b — Audio test result and start control (to be added).** Show a completed local input check and the Start audio translation button.
 
 **Test audio** checks local audio capture; it is not an AI translation request and does not prove that the provider key or model works. A successful input test followed by a provider error usually points to the AI configuration rather than the selected output device.
 

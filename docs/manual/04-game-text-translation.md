@@ -8,7 +8,11 @@ Choose a capture target, display the next line of dialogue, then use **Capture &
 
 The game does not need to provide selectable text. Image quality still matters: very small characters, stylized fonts, animation, overlapping effects, or a region that cuts off text can reduce accuracy.
 
-> **Screenshot S07 — Game Text page (to be added).** Include AI settings, Capture & Translate, formatting, and the collapsed advanced section. Use a second crop if necessary at 720p.
+![Game Text page showing provider, model, prompt, and the Capture & Translate, Make Capture, and Translate Captures actions](images/game-text-page.png)
+
+*Figure S07a. Game Text AI settings and capture actions. Formatting and startup settings continue farther down the page.*
+
+> **Screenshot S07b — Lower Game Text settings (to be added).** Show Formatting and Startup & advanced capture, including the capture image size limit.
 
 ## Provider, model, and prompt
 
@@ -56,7 +60,9 @@ Window titles and availability can change after a game restarts. Reselect the ta
 
 **Selecting a region or window does not capture or translate anything by itself.** It only changes the target for subsequent actions.
 
-> **Screenshot S08 — Capture choices (to be added).** Show region, window, and maximum capture-image-size controls, with the help text for one focused option.
+![Change capture menu offering Capture region, Capture window, and Cancel](images/capture-choices.png)
+
+*Figure S08. The desktop Change capture menu selects the capture target. The image-size limit is in the desktop's advanced capture settings; the full-screen Capture page also exposes that limit.*
 
 ## Three capture actions
 

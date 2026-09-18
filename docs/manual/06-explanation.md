@@ -22,8 +22,10 @@ It uses its own provider, model, and prompt. A fast translation model and a diff
 If no Japanese source is available, check the translation prompt and output format rather than repeatedly requesting explanations. A translation-only response may not provide the source the Explainer needs.
 
 > **Screenshot S10 — Explanation settings (to be added).** Show the AI choices, Explain latest text, and saving options.
->
-> **Screenshot S11 — Explainer output (to be added).** Show a short example with Japanese source and recognizable learning sections.
+
+![Explainer analysis on the left of a Japanese game, with the Translator's Japanese transcript and English translation on the right](images/explainer-output.png)
+
+*Figure S11. The Explainer breaks down the latest Japanese source while the Translator shows the transcript and translation. This is a real output example, not a guarantee of AI accuracy.*
 
 ## Explain versus show/hide
 

@@ -20,7 +20,9 @@ LaunchBox, Big Box, JoyToKey, and Anki are optional, separate applications.
 
 Do not move only the executable: scripts, overlay components, Python, and settings are part of the application layout. If Windows blocks a downloaded archive or file, verify that it came from the expected repository before using Windows' unblock option. Do not disable system-wide security protection to run the tool.
 
-> **Screenshot S02 — Extracted application (to be added).** Show the executable alongside its supporting folders; crop the personal parent path.
+![Extracted portable application showing assets, bin, fonts, python, scripts, Settings, and the JRPG Translator executables](images/extracted-application.png)
+
+*Figure S02. Keep the complete extracted folder together. Start JRPG Translator.exe for the main application.*
 
 ## Obtain an API key
 
@@ -48,7 +50,9 @@ An API key is a credential. Do not include it in screenshots, exported support f
 4. Choose **Save keys**.
 5. Check the displayed storage/status information.
 
-> **Screenshot S03 — API-key settings (to be added).** Show the controls and status using masked or empty fields. Never use a real visible key.
+![In-app API-key settings with masked Gemini and OpenAI fields, Save keys, and Delete .env](images/api-key-settings.png)
+
+*Figure S03. In-app key entry with both credentials masked. Save keys writes the local .env file; Delete .env is a separate action.*
 
 In-app storage writes a local `Settings\.env` file. It is convenient, but it is a plain-text file, not an encrypted password vault. Masking a field on screen does not encrypt the saved value.
 
@@ -86,7 +90,9 @@ Use **Manage models...** if your intended model is absent. Models must support t
 
 For an initial test, a clearly readable, small dialogue region is easier to diagnose than a full desktop capture. Avoid cutting off the speaker name or part of a character.
 
-> **Screenshot S04 — First capture and result (to be added).** Show the chosen game-dialogue region and the matching translated output.
+![Japanese dialogue in the game's lower text box and its English translation in the overlay on the right](images/first-capture-and-result.png)
+
+*Figure S04. A first translation result: the original dialogue remains in the game, while the Translator displays its translation on the right.*
 
 If nothing appears, check the capture target, provider key, selected model, and whether the Translator overlay is visible. See [Troubleshooting](12-troubleshooting-and-advanced.md).
 

@@ -11,7 +11,9 @@ Open **Overlay windows**, then choose **Translator** or **Explainer**. Each has 
 
 These are not the desktop control panel. **Window options...** in the desktop footer changes the main interface, not the two output overlays.
 
-> **Screenshot S12 — Overlay appearance and typography (to be added).** Show color, opacity, font, size, and bold controls for one overlay.
+![Translator overlay settings for opacity, window color, text color, speaker-name color, font, size, and bold](images/overlay-appearance-and-typography.png)
+
+*Figure S12. Appearance and typography for the Translator overlay. Opacity affects the entire overlay, including its text.*
 
 ## Appearance
 
@@ -37,7 +39,9 @@ Use the **Move / Resize...** action for the intended overlay. The positioning mo
 
 In controller positioning mode, the left stick moves the window and the right stick resizes it. Confirm to keep the bounds or cancel to restore the previous position. Keyboard/mouse controls and any modifier used for keyboard resizing are shown in the positioning instructions.
 
-> **Screenshot S13 — Overlay positioning (to be added).** Show the positioning instructions and a window placed clear of dialogue and HUD elements.
+![Translator positioning mode over a game, with an adjustable translucent window and controller and keyboard move, resize, save, and cancel instructions](images/overlay-positioning.png)
+
+*Figure S13. Positioning mode shows the window being adjusted and the controls to move, resize, save, or cancel. Move the window clear of important dialogue before saving.*
 
 Test placement with both a short and a longer result. Leave enough width for the expected line length and enough height to avoid covering essential gameplay.
 
