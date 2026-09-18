@@ -8,6 +8,17 @@ The control panel works with a mouse and keyboard or directly from an
 XInput-compatible controller. Keyboard mapping tools such as JoyToKey, Steam
 Input, or DS4Windows remain optional for custom and multi-function mappings.
 
+## User manual
+
+Read the **[complete user manual for v0.9.9 (in testing)](docs/manual/README.md)**
+for setup, controllers, every main feature, LaunchBox / Big Box, Study Library,
+Anki, troubleshooting, and backups. The manual includes clearly marked screenshot
+placeholders; real screenshots will be added later.
+
+New users can start with **[Setup and your first translation](docs/manual/02-setup.md)**.
+The manual describes the current interface; older screenshots and development notes
+elsewhere in this README may show previous versions.
+
 ## See It in Action
 
 ### Live Audio Translation
