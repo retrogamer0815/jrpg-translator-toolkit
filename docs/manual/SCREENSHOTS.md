@@ -2,7 +2,7 @@
 
 [Manual contents](README.md)
 
-The first two batches illustrate **26 of 28 topics: 18 complete, 8 partial, and 2 awaiting a publishable image**. Partial topics have a published image plus a numbered placeholder for the missing companion view. S18 is held for complete path redaction; S10 has not yet been supplied. No nonexistent image is embedded.
+The first two batches illustrate **27 of 28 topics: 19 complete, 8 partial, and 1 awaiting its first image**. Partial topics have a published image plus a numbered placeholder for the missing companion view. S10 has not yet been supplied. No nonexistent image is embedded.
 
 S05 is an annotated overview based on the supplied S07 screenshot; the unannotated original is retained. All other published images are the supplied screenshots, unmodified. Click an image filename below to inspect the full-resolution asset. Screenshot coverage last updated: 20 September 2026.
 
@@ -39,7 +39,7 @@ S05 is an annotated overview based on the supplied S07 screenshot; the unannotat
 | S15 | Complete | [Glossary entries](08-terminology-overrides.md) | [glossary-entry-editor.png](images/glossary-entry-editor.png) | Added: local-corrections manager with translation-output/replacement columns and Add/Edit entry controls. |
 | S16 | Complete | [Profile management](09-profiles.md) | [profile-management.png](images/profile-management.png) | Added: selection, Apply profile, Save current, New/Delete profile, and Startup overlays choice. |
 | S17 | Complete | [Per-game plugin setup](10-launchbox-and-big-box.md) | [per-game-plugin-setup.png](images/per-game-plugin-setup.png) | Added: both app icons, enable controls, separate Profile selections, readiness, and Save/Cancel. |
-| S18 | Pending | [Expanded application locations](10-launchbox-and-big-box.md) | `expanded-application-locations.png` | Supplied but **not published**: the JoyToKey profiles path still exposes a personal account name. Supply a fully redacted replacement. |
+| S18 | Complete | [Expanded application locations](10-launchbox-and-big-box.md) | [expanded-application-locations.png](images/expanded-application-locations.png) | Added: all three locations, Browse controls, Detect again, and Everything ready status. The supplied replacement redacts personal account names in both user-specific paths. |
 | S19 | Complete | [Full-screen dashboard](10-launchbox-and-big-box.md) | [full-screen-dashboard.png](images/full-screen-dashboard.png) | Added: running game, Home, contextual help, focused tile, and navigation hints. Original is 3840×2160; a separate 1280×720 capture remains useful for small-screen documentation. |
 | S20 | Complete | [Study Library overview](11-study-library.md) | [study-library-overview.png](images/study-library-overview.png) | Added: Library selection, search, table, selected source, version controls, and screenshot preview. |
 | S21 | Partial | [Library dropdown and management](11-study-library.md) | [library-dropdown-and-management.png](images/library-dropdown-and-management.png) | S21a added: separated Manage Study Libraries command. **Still needed S21b:** Library manager with create, rename, archive, and restore options. |

@@ -58,7 +58,9 @@ If automatic detection cannot find something, expand **Application locations** a
 
 Refresh profile lists after creating or moving profiles if they are not yet visible.
 
-> **Screenshot S18 — Expanded application locations (redacted replacement pending).** Show the three file/folder locations, Browse controls, and readiness status. Remove personal account names from every displayed path before publication.
+![Expanded Application locations section with JRPG Translator and JoyToKey executable paths, JoyToKey profiles folder, Browse buttons, Detect again, and Everything ready status; personal account names are redacted](images/expanded-application-locations.png)
+
+*Figure S18. Expand Application locations to correct a detected file or folder. Browse selects a replacement location; Detect again reruns automatic detection. Personal account names are redacted in this example.*
 
 The readiness indicators help identify missing executables or configuration resources. **Ready is not an API-key or network test.** Use the main application to configure keys and make a test translation.
 

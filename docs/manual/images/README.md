@@ -2,7 +2,7 @@
 
 The unannotated source is [game-text-page.png](game-text-page.png), supplied by the project owner. The built-in image-generation/editing tool was used to add the four navigation callouts in [desktop-orientation.png](desktop-orientation.png). The annotated image is an instructional derivative; the original screenshot is retained separately and used for S07.
 
-All other published images from the first two batches are the supplied screenshots copied without modification. S21's supplied filename duplicated the overview title; it is stored as `library-dropdown-and-management.png` to describe its actual content. S18 is not included until all personal paths have been redacted.
+All other published images from the first two batches are the supplied screenshots copied without modification. S21's supplied filename duplicated the overview title; it is stored as `library-dropdown-and-management.png` to describe its actual content. S18 uses the corrected screenshot supplied on 20 September 2026, with personal account names redacted by the project owner in both user-specific paths.
 
 The screenshot models, settings, Profile names, and controller bindings are examples, not a recommended or permanent default configuration. The full-screen dashboard image is the supplied 3840×2160 capture; it is not evidence of the 1280×720 layout.
 
