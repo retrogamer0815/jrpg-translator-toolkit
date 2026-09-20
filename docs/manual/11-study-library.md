@@ -19,7 +19,9 @@ The Library is useful without Anki or AI recommendations. Reading, searching, or
 7. Capture/translate Japanese text, then generate an explanation.
 8. Return to the Library and refresh if the new entry is not yet shown.
 
-> **Screenshot S20 — Study Library overview (to be added).** Show Library selection, search, table, selected source, version controls, and screenshot preview.
+![Study Library with Library selector, search and filter controls, saved-explanations table, selected-entry version information, and source screenshot preview](images/study-library-overview.png)
+
+*Figure S20. Select a row to inspect its saved explanation and source context on the right. Open in Reader provides a dedicated reading view.*
 
 The selected Library is the storage destination. The active Profile is the game/context label attached to the material. A Library can contain entries from multiple Profiles.
 
@@ -29,7 +31,11 @@ Open the **Library** dropdown and select its final **Manage Study Libraries...**
 
 Use the manager to create, rename, archive, or restore named Libraries.
 
-> **Screenshot S21 — Library dropdown and management (to be added).** Show the separated Manage Study Libraries entry and the management options.
+![Open Library dropdown with Default and demo Libraries above a separator and the Manage Study Libraries command](images/library-dropdown-and-management.png)
+
+*Figure S21a. Manage Study Libraries is the final, separated command in the Library dropdown.*
+
+> **Screenshot S21b — Library manager (to be added).** Show the create, rename, archive, and restore options for named Libraries.
 
 - **Default** is a special built-in Library; it cannot be renamed or archived like a named Library.
 - **Archive** moves a Library out of the active list. It is not the same as deleting all its data.
@@ -58,7 +64,11 @@ The table can display:
 
 Use **Columns...** to choose the useful columns and their presentation. Column visibility/order and width preferences help keep the table usable on a smaller screen. Original Japanese remains the essential source identifier.
 
-> **Screenshot S22 — Table filters and columns (to be added).** Show an example filtered result with Profile, Chapter, Japanese, Key grammar, and Versions.
+![Study Library narrowed to three entries, with the visible portion of Library filters showing selected Profile and speaker and the other filter fields](images/table-filters-and-columns.png)
+
+*Figure S22a. Profile and speaker filters narrow the table to matching dialogue. This crop shows the filter choices, not the complete dialog or column settings.*
+
+> **Screenshot S22b — Complete filters and column selection (to be added).** Show the full Filters dialog, including its action buttons, and the Columns settings or a table displaying Profile, Chapter, Japanese, Key grammar, and Versions. Use separate images if needed.
 
 An Anki link-check result such as **Found in Anki**, **Not found**, or **Not checked** is not interchangeable with a manually edited “Added to Anki” flag. See the [Anki chapter](11b-anki.md).
 
@@ -70,7 +80,11 @@ Changing the current chapter does not retroactively move every previous entry in
 
 A practical tagging system is small and consistent: for example, `grammar-past`, `quest-main`, or `review-later`. Too many nearly identical tags make filtering harder.
 
-> **Screenshot S23 — Metadata and current chapter (to be added).** Show future-entry chapter selection and a separate existing-entry details example.
+![Current chapter dialog with the Library and Profile context, Chapter 2 entered, and Save, Cancel, and chapter-history controls](images/metadata-and-current-chapter.png)
+
+*Figure S23a. Set a chapter for future explanations in the Library and Profile identified by the dialog. Existing entries are not changed by this setting.*
+
+> **Screenshot S23b — Edit existing-entry details (to be added).** Show editing chapter, speaker, or tags for a selected saved explanation.
 
 ## Read an explanation
 
@@ -82,7 +96,9 @@ The **Copy...** menu can copy the current section or full explanation. When view
 
 Source screenshots retain the game's original context. If more than one is attached, use the image arrows; **Open full image** shows the selected image at a useful size.
 
-> **Screenshot S24 — Study Reader (to be added).** Show Japanese source, a learning section, version navigation, and screenshot context.
+![Study Reader showing original Japanese, English translation and analysis, version and section navigation, and the source screenshot beside the explanation](images/study-reader.png)
+
+*Figure S24. Read the saved explanation alongside its game context. Version controls are at the top, entry navigation is at the bottom, and Add to Anki opens a separate review step.*
 
 No screenshot is available if it was not saved with the entry or its file is missing. Turning on screenshot saving now cannot recreate old images from an earlier game scene.
 

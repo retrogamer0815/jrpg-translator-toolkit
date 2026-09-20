@@ -25,7 +25,9 @@ In the Study Library, choose **Anki... → Anki connection and link check...**.
 7. Choose **Save mapping**.
 8. Run **Refresh Anki status** when you want to compare Library entries with Anki.
 
-> **Screenshot S27 — Anki connection and mapping (to be added).** Show a successful test, sample deck/note type, and the Japanese/Explanation field mapping.
+![Anki connection dialog reporting a successful AnkiConnect test, with Study Profile, deck, Basic note type, and Front and Back field mappings](images/anki-connection-and-mapping.png)
+
+*Figure S27. This example maps Japanese to Front and the explanation to Back in the Basic note type. Use the fields that match your own note type, then save the mapping.*
 
 Use the exact fields in your own note type. A note type can call them Front/Back, Japanese/Explanation, or something else; the mapping tells JRPG Translator which ones have the relevant meaning.
 
@@ -61,7 +63,9 @@ For an existing Library entry, select one explanation and choose **Anki... → A
 6. Choose **Add to Anki**.
 7. Confirm success, then inspect the card in Anki.
 
-> **Screenshot S28 — Card preview and explicit add (to be added).** Show editable front/back, destination deck, optional screenshot, and Add to Anki. Use a small fictional study example.
+![Review explanation card dialog with Japanese front, explanation back, destination deck, optional source screenshot, and Add to Anki and Cancel buttons](images/card-preview-and-explicit-add.png)
+
+*Figure S28. Review the card text, destination, and optional screenshot before choosing Add to Anki. Opening this preview does not send the card.*
 
 A good card usually asks one clear question. A complete multi-section explanation can be useful as reference on the back, but you do not have to keep every generated paragraph.
 

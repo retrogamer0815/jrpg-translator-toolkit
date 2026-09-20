@@ -17,7 +17,9 @@ It is a snapshot of selected settings, not a copy of the entire installation. So
 5. Check the selected Profile and use **Save current** when you want to store the current configuration.
 6. To load an existing Profile from this page, select it and choose **Apply profile**.
 
-> **Screenshot S16 — Profile management (to be added).** Show selection, Apply profile, Save current, New profile, and startup overlays.
+![Profiles page with the selected game Profile, New profile, Apply profile, Save current, Delete profile, and Startup overlays](images/profile-management.png)
+
+*Figure S16. Select a saved Profile before applying or updating it. The Startup overlays choice controls which overlays open at the next tool start.*
 
 ### Selecting is not always applying
 

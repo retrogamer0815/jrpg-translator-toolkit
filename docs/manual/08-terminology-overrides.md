@@ -56,7 +56,9 @@ Restart Audio Translation after switching the selected local glossary or editing
 7. Test with a known line.
 8. Save the selection in the game's JRPG Translator Profile.
 
-> **Screenshot S15 — Glossary entry editor (to be added).** Show two or three fictional names and the source/replacement columns.
+![Local corrections manager with translation-output and local-replacement columns, including Esuteru replaced by Estelle](images/glossary-entry-editor.png)
+
+*Figure S15. The local-corrections glossary lists exact translation outputs and their replacements. Use Add entry or Edit entry to change a rule; these are local corrections, not Japanese-source hints sent to the model.*
 
 The two dropdowns are independent. You can combine one Japanese-source glossary with another local-correction glossary. Do not assume that selecting a name in one dropdown changes the other.
 

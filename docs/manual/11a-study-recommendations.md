@@ -10,7 +10,9 @@ Opening or refreshing this window builds/reads the candidate list locally. It do
 
 Open **Anki... → Review Anki candidates...** in the Study Library.
 
-> **Screenshot S25 — Candidate review (to be added).** Show the Sentences/Vocabulary selectors, review scope, ratings/reasons, and explicit generation/add actions.
+![Review for Anki window with review-scope and AI-assessment filters, Sentences and Vocabulary tabs, candidate ratings, a recommendation reason, and explicit review actions](images/candidate-review.png)
+
+*Figure S25. The selected sentence has a recommendation score and an explanation of the assessment. Add to Anki, Open in Reader, and Finish review are separate actions.*
 
 ## Choose what to review
 
@@ -36,6 +38,10 @@ Known Anki matches and ignored vocabulary are excluded from relevant assessment/
 6. Customize the criteria if needed.
 7. Confirm **Generate**.
 
+![Generate recommendations dialog showing candidate counts and AI model, the open Learner level dropdown, Selection style, Customize, and Generate](images/recommendation-preferences.png)
+
+*Figure S26a. Check the assessment scope, choose a learner level and selection style, then explicitly select Generate. Customize opens the additional learning criteria.*
+
 Generation uses the **Explanation provider/model**. It is an AI request and can consume provider usage. The confirmation identifies what will be assessed.
 
 Normal generation targets candidates not yet assessed under the applicable configuration. **Regenerate** replaces assessments for the targeted candidates; use it intentionally if you change your criteria or disagree with earlier results.
@@ -55,7 +61,7 @@ Keep at least one focus area enabled. Set the learner level honestly: an easy se
 
 You can supply additional criteria, such as preferring everyday dialogue or avoiding very game-specific names. Selection style affects how broadly the model recommends material; it does not change how many cards Anki will add automatically, because adding remains a separate action.
 
-> **Screenshot S26 — Recommendation preferences (to be added).** Show level/style, focus areas, and optional custom instructions.
+> **Screenshot S26b — Customized recommendation criteria (to be added).** Show the focus areas and optional custom instructions inside Customize.
 
 If you edit the custom recommendation prompt, follow its **Save draft** and **Apply preferences** steps. Saving a draft is not the same as applying it and running a new assessment.
 

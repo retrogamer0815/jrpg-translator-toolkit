@@ -43,7 +43,7 @@ Instructions that send content to an AI service are identified as AI operations.
 
 ## Screenshots
 
-The first screenshot batch is included, with an annotated desktop overview. Numbered callouts remain for missing images and for lower-page details still needed. The [screenshot checklist](SCREENSHOTS.md) tracks completed, partial, and pending figures, filenames, and privacy checks.
+The first two screenshot batches are included, with an annotated desktop overview and examples of Profiles, LaunchBox, Study Library, recommendations, and Anki. There are published images for 26 of the 28 topics; numbered callouts remain for missing companion views, Explanation settings, and a fully redacted Application locations image. The [screenshot checklist](SCREENSHOTS.md) tracks completed, partial, and pending figures, filenames, and privacy checks.
 
 ## Maintaining this manual
 

@@ -2,9 +2,9 @@
 
 [Manual contents](README.md)
 
-The first batch illustrates **13 of 28 topics: 9 complete, 4 partial, and 15 awaiting their first image**. Partial topics have a published overview plus a numbered placeholder for a lower-page companion image. No nonexistent image is embedded.
+The first two batches illustrate **26 of 28 topics: 18 complete, 8 partial, and 2 awaiting a publishable image**. Partial topics have a published image plus a numbered placeholder for the missing companion view. S18 is held for complete path redaction; S10 has not yet been supplied. No nonexistent image is embedded.
 
-S05 is an annotated overview based on the supplied S07 screenshot; the unannotated original is retained. All other images in this batch are the supplied screenshots, unmodified. Click an image filename below to inspect the full-resolution asset.
+S05 is an annotated overview based on the supplied S07 screenshot; the unannotated original is retained. All other published images are the supplied screenshots, unmodified. Click an image filename below to inspect the full-resolution asset. Screenshot coverage last updated: 20 September 2026.
 
 ## Capture guidelines
 
@@ -36,20 +36,20 @@ S05 is an annotated overview based on the supplied S07 screenshot; the unannotat
 | S12 | Complete | [Overlay appearance and typography](07-overlay-windows.md) | [overlay-appearance-and-typography.png](images/overlay-appearance-and-typography.png) | Added: Translator appearance, speaker color, font, size, and bold. |
 | S13 | Complete | [Overlay positioning](07-overlay-windows.md) | [overlay-positioning.png](images/overlay-positioning.png) | Added: real positioning mode with move, resize, save, and cancel instructions. |
 | S14 | Partial | [Terminology overview](08-terminology-overrides.md) | [terminology-overview.png](images/terminology-overview.png) | S14a added: enable switch and local-correction introduction. **Still needed S14b:** both glossary selectors and management controls. |
-| S15 | Pending | [Glossary entry editor](08-terminology-overrides.md) | `glossary-entry-editor.png` | Show two or three fictional names and the source/replacement columns. |
-| S16 | Pending | [Profile management](09-profiles.md) | `profile-management.png` | Show selection, Apply profile, Save current, New profile, and startup overlays. |
-| S17 | Pending | [Per-game plugin setup](10-launchbox-and-big-box.md) | `per-game-plugin-setup.png` | Show both app icons, enable controls, Profile selections, readiness, and Save/Cancel. |
-| S18 | Pending | [Expanded application locations](10-launchbox-and-big-box.md) | `expanded-application-locations.png` | Show browse controls and a useful ready/not-ready state; redact personal paths. |
-| S19 | Pending | [Full-screen dashboard](10-launchbox-and-big-box.md) | `full-screen-dashboard.png` | Show Home, the help area, a focused tile, and navigation hints at 1280×720. |
-| S20 | Pending | [Study Library overview](11-study-library.md) | `study-library-overview.png` | Show Library selection, search, table, selected source, version controls, and screenshot preview. |
-| S21 | Pending | [Library dropdown and management](11-study-library.md) | `library-dropdown-and-management.png` | Show the separated Manage Study Libraries entry and the management options. |
-| S22 | Pending | [Table filters and columns](11-study-library.md) | `table-filters-and-columns.png` | Show an example filtered result with Profile, Chapter, Japanese, Key grammar, and Versions. |
-| S23 | Pending | [Metadata and current chapter](11-study-library.md) | `metadata-and-current-chapter.png` | Show future-entry chapter selection and a separate existing-entry details example. |
-| S24 | Pending | [Study Reader](11-study-library.md) | `study-reader.png` | Show Japanese source, a learning section, version navigation, and screenshot context. |
-| S25 | Pending | [Candidate review](11a-study-recommendations.md) | `candidate-review.png` | Show the Sentences/Vocabulary selectors, review scope, ratings/reasons, and explicit generation/add actions. |
-| S26 | Pending | [Recommendation preferences](11a-study-recommendations.md) | `recommendation-preferences.png` | Show level/style, focus areas, and optional custom instructions. |
-| S27 | Pending | [Anki connection and mapping](11b-anki.md) | `anki-connection-and-mapping.png` | Show a successful test, sample deck/note type, and the Japanese/Explanation field mapping. |
-| S28 | Pending | [Card preview and explicit add](11b-anki.md) | `card-preview-and-explicit-add.png` | Show editable front/back, destination deck, optional screenshot, and Add to Anki. Use a small fictional study example. |
+| S15 | Complete | [Glossary entries](08-terminology-overrides.md) | [glossary-entry-editor.png](images/glossary-entry-editor.png) | Added: local-corrections manager with translation-output/replacement columns and Add/Edit entry controls. |
+| S16 | Complete | [Profile management](09-profiles.md) | [profile-management.png](images/profile-management.png) | Added: selection, Apply profile, Save current, New/Delete profile, and Startup overlays choice. |
+| S17 | Complete | [Per-game plugin setup](10-launchbox-and-big-box.md) | [per-game-plugin-setup.png](images/per-game-plugin-setup.png) | Added: both app icons, enable controls, separate Profile selections, readiness, and Save/Cancel. |
+| S18 | Pending | [Expanded application locations](10-launchbox-and-big-box.md) | `expanded-application-locations.png` | Supplied but **not published**: the JoyToKey profiles path still exposes a personal account name. Supply a fully redacted replacement. |
+| S19 | Complete | [Full-screen dashboard](10-launchbox-and-big-box.md) | [full-screen-dashboard.png](images/full-screen-dashboard.png) | Added: running game, Home, contextual help, focused tile, and navigation hints. Original is 3840×2160; a separate 1280×720 capture remains useful for small-screen documentation. |
+| S20 | Complete | [Study Library overview](11-study-library.md) | [study-library-overview.png](images/study-library-overview.png) | Added: Library selection, search, table, selected source, version controls, and screenshot preview. |
+| S21 | Partial | [Library dropdown and management](11-study-library.md) | [library-dropdown-and-management.png](images/library-dropdown-and-management.png) | S21a added: separated Manage Study Libraries command. **Still needed S21b:** Library manager with create, rename, archive, and restore options. |
+| S22 | Partial | [Table filters and columns](11-study-library.md) | [table-filters-and-columns.png](images/table-filters-and-columns.png) | S22a added: filtered result and a cropped Filters dialog. **Still needed S22b:** complete dialog/action buttons and Columns settings or a table including Chapter, Key grammar, and Versions. |
+| S23 | Partial | [Metadata and current chapter](11-study-library.md) | [metadata-and-current-chapter.png](images/metadata-and-current-chapter.png) | S23a added: future-entry Current chapter dialog. **Still needed S23b:** Edit details for an existing saved entry. |
+| S24 | Complete | [Study Reader](11-study-library.md) | [study-reader.png](images/study-reader.png) | Added: Japanese source, translation/analysis, version and section navigation, and screenshot context. |
+| S25 | Complete | [Candidate review](11a-study-recommendations.md) | [candidate-review.png](images/candidate-review.png) | Added: Sentences/Vocabulary selectors, review scope, ratings/reason, and explicit regeneration/add/review actions. |
+| S26 | Partial | [Recommendation preferences](11a-study-recommendations.md) | [recommendation-preferences.png](images/recommendation-preferences.png) | S26a added: generation confirmation with candidate counts, level/style, and Customize. **Still needed S26b:** customization focus areas and optional instructions. |
+| S27 | Complete | [Anki connection and mapping](11b-anki.md) | [anki-connection-and-mapping.png](images/anki-connection-and-mapping.png) | Added: successful connection, deck/note type, and Japanese/Explanation field mapping. |
+| S28 | Complete | [Card preview and explicit add](11b-anki.md) | [card-preview-and-explicit-add.png](images/card-preview-and-explicit-add.png) | Added: front/back review, destination deck, optional screenshot, and explicit Add to Anki. |
 
 ## Replace a placeholder
 

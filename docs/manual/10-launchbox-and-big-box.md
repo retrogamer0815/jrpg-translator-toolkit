@@ -32,7 +32,9 @@ The setup window has separate JRPG Translator and JoyToKey sections.
 4. Check the readiness indicators.
 5. Choose **Save**.
 
-> **Screenshot S17 — Per-game plugin setup (to be added).** Show both app icons, enable controls, Profile selections, readiness, and Save/Cancel.
+![Per-game LaunchBox setup with JRPG Translator and JoyToKey enabled, separate Profile selectors, green Ready indicators, and Save and Cancel](images/per-game-plugin-setup.png)
+
+*Figure S17. Enable each tool independently, choose its Profile, check readiness, and save the game's setup. Matching Profile names are convenient but refer to separate configurations.*
 
 ### None — use current settings
 
@@ -56,7 +58,7 @@ If automatic detection cannot find something, expand **Application locations** a
 
 Refresh profile lists after creating or moving profiles if they are not yet visible.
 
-> **Screenshot S18 — Expanded application locations (to be added).** Show browse controls and a useful ready/not-ready state; redact personal paths.
+> **Screenshot S18 — Expanded application locations (redacted replacement pending).** Show the three file/folder locations, Browse controls, and readiness status. Remove personal account names from every displayed path before publication.
 
 The readiness indicators help identify missing executables or configuration resources. **Ready is not an API-key or network test.** Use the main application to configure keys and make a test translation.
 
@@ -84,7 +86,9 @@ For a Big Box session prepared by the plugin, the control-panel action opens the
 
 The dashboard header shows game/session information, active Profile, and the three current AI configurations. A neutral placeholder is used when game artwork is unavailable.
 
-> **Screenshot S19 — Full-screen dashboard (to be added).** Show Home, the help area, a focused tile, and navigation hints at 1280×720.
+![Big Box dashboard Home page showing the running game, active Profile, focused Translation AI tile, contextual help, and controller navigation hints](images/full-screen-dashboard.png)
+
+*Figure S19. Home shows the current game and AI configuration in the header. The help area explains what the focused tile does; the bottom hints show how to move, select, go back, and change pages.*
 
 ### Pages
 
