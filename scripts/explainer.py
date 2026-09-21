@@ -478,10 +478,6 @@ def archive_study_library_entry(
                 )
 
         connection.commit()
-        profile_label = game_profile or "Unsorted"
-        print(
-            f"(Study Library) entry {explanation_id}, {profile_label}, version {version}"
-        )
     except Exception:
         connection.rollback()
         for copied_path in copied_media:
@@ -492,6 +488,14 @@ def archive_study_library_entry(
         raise
     finally:
         connection.close()
+
+    # Logging is outside the transaction/media rollback scope. A closed stdout
+    # pipe cannot undo a committed archive or delete its referenced screenshots.
+    try:
+        profile_label = game_profile or "Unsorted"
+        print(f"(Study Library) entry {explanation_id}, {profile_label}, version {version}")
+    except Exception:
+        pass
 
 
 def file_to_data_url(path: str) -> str:

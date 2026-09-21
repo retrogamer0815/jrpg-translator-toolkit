@@ -496,6 +496,8 @@ global CPStudyThemedListHwnds := Map()
 global CPStudyComboSubclassCallback := 0
 global CPStudyHeaderSubclassCallback := 0
 global CPStudyListSubclassCallback := 0
+global CPDesktopNativePaintHwnds := Map()
+global CPDesktopNativePaintCallback := 0
 global CPStudyVisualOverlays := Map()
 global CPStudyTransparentHwnds := Map()
 global CPStudyTransparentCallback := 0
@@ -542,6 +544,7 @@ global CPWindowHeightSnapActive := false
 global CPWindowSnapRange := 14
 global CPWindowSnapReleaseRange := 24
 global CPPanelInteractiveResize := false
+global CPPanelLiveResizeTick := 0
 global CPPanelResizeOpacitySuspended := false
 global CPPanelLastLayoutW := 0
 global CPPanelLastLayoutH := 0
@@ -556,6 +559,7 @@ CPRegisterCanvasMessages() {
     OnMessage(0x0115, CPOnCanvasScroll) ; WM_VSCROLL
     CPRegisterCanvasWheelWindows()
     OnMessage(0x0231, CPOnWindowEnterSizeMove) ; WM_ENTERSIZEMOVE
+    OnMessage(0x0005, CPOnWindowSize) ; WM_SIZE, including the native sizing loop
     OnMessage(0x0214, CPOnWindowSizing) ; WM_SIZING
     OnMessage(0x0232, CPOnWindowExitSizeMove) ; WM_EXITSIZEMOVE
     ; Start with the non-client scrollbars hidden. SetScrollInfo will reveal
@@ -1016,12 +1020,15 @@ CPShutdownCanvasMessages(*) {
     global CPCanvasPendingScrollValid, CPCanvasScrollFlushScheduled
     CPCanvasShuttingDown := true
     SetTimer(CPCanvasFlushQueuedScroll, 0)
+    SetTimer(CPFinalizeInteractiveResize, 0)
+    SetTimer(CPRestoreOpacityAfterResize, 0)
     CPCanvasPendingScrollValid := false
     CPCanvasScrollFlushScheduled := false
     if IsSet(CPCanvasMessagesRegistered) && CPCanvasMessagesRegistered {
         OnMessage(0x0114, CPOnCanvasScroll, 0)
         OnMessage(0x0115, CPOnCanvasScroll, 0)
         OnMessage(0x0231, CPOnWindowEnterSizeMove, 0)
+        OnMessage(0x0005, CPOnWindowSize, 0)
         OnMessage(0x0214, CPOnWindowSizing, 0)
         OnMessage(0x0232, CPOnWindowExitSizeMove, 0)
         CPCanvasMessagesRegistered := false
@@ -1226,11 +1233,15 @@ CPWindowSnapShouldApply(distance, &active) {
 CPOnWindowEnterSizeMove(wParam, lParam, msg, hwnd) {
     global ui, CPWindowWidthSnapActive, CPWindowHeightSnapActive
     global CPPanelInteractiveResize, CPPanelResizeOpacitySuspended
+    global CPPanelLiveResizeTick
     global controlPanelOpacity
     if (IsSet(ui) && ui && hwnd = ui.Hwnd) {
         CPWindowWidthSnapActive := false
         CPWindowHeightSnapActive := false
         CPPanelInteractiveResize := true
+        CPPanelLiveResizeTick := 0
+        SetTimer(CPFinalizeInteractiveResize, 0)
+        SetTimer(CPRestoreOpacityAfterResize, 0)
         CPPanelResizeOpacitySuspended := false
 
         ; A top-level window using alpha transparency is a layered window.
@@ -1247,6 +1258,32 @@ CPOnWindowEnterSizeMove(wParam, lParam, msg, hwnd) {
             }
         }
     }
+}
+
+CPOnWindowSize(wParam, lParam, msg, hwnd) {
+    global ui, CPPanelInteractiveResize
+    ; GUI Size events can be delayed/dropped while a previous layout runs.
+    ; Native WM_SIZE also arrives inside Windows' modal border-drag loop.
+    ; Do not consume it: normal GUI handling must still run (maximize, etc.).
+    if IsSet(ui) && ui && hwnd = ui.Hwnd && wParam != 1
+        && CPPanelInteractiveResize && CPDesktopActive()
+        CPDesktopLiveResize()
+}
+
+CPDesktopLiveResize() {
+    global ui, CPPanelLiveResizeTick, CPPanelLastLayoutW, CPPanelLastLayoutH
+    static busy := false
+    ; Bound the expensive child-control/theme pass to about 30 fps. Always
+    ; perform an exact, unthrottled pass after release, even if this one skips.
+    if busy || (CPPanelLiveResizeTick && A_TickCount - CPPanelLiveResizeTick < 33)
+        return
+    ui.GetClientPos(,, &w, &h)
+    if w <= 0 || h <= 0 || (w = CPPanelLastLayoutW && h = CPPanelLastLayoutH)
+        return
+    busy := true
+    CPPanelLiveResizeTick := A_TickCount
+    try CPDesktopRelayout()
+    finally busy := false
 }
 
 CPOnWindowSizing(wParam, lParam, msg, hwnd) {
@@ -1299,21 +1336,23 @@ CPOnWindowExitSizeMove(wParam, lParam, msg, hwnd) {
         CPWindowWidthSnapActive := false
         CPWindowHeightSnapActive := false
         CPPanelInteractiveResize := false
-        ; Let the non-client resize loop finish before the one full cleanup
-        ; repaint. Live WM_SIZE passes intentionally avoid synchronous erases.
+        ; Finish outside the native sizing loop, using the real final client
+        ; dimensions rather than a possibly stale queued GUI Size event.
         SetTimer(CPFinalizeInteractiveResize, -1)
     }
 }
 
 CPFinalizeInteractiveResize(*) {
-    global ui, CPPanelResizeOpacitySuspended
-    if !(IsSet(ui) && ui)
+    global ui, CPPanelResizeOpacitySuspended, CPPanelInteractiveResize
+    if CPPanelInteractiveResize || !(IsSet(ui) && ui)
         return
     try hwnd := ui.Hwnd
     catch
         return
     if !hwnd
         return
+    if CPDesktopActive() && !DllCall("user32\IsIconic", "ptr", hwnd, "int")
+        CPDesktopRelayout()
     try DllCall("user32\RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0
         , "uint", 0x0001 | 0x0004 | 0x0080 | 0x0100) ; INVALIDATE|ERASE|ALLCHILDREN|UPDATENOW
     if CPPanelResizeOpacitySuspended
@@ -1321,8 +1360,8 @@ CPFinalizeInteractiveResize(*) {
 }
 
 CPRestoreOpacityAfterResize(*) {
-    global ui, CPPanelResizeOpacitySuspended
-    if !CPPanelResizeOpacitySuspended
+    global ui, CPPanelResizeOpacitySuspended, CPPanelInteractiveResize
+    if CPPanelInteractiveResize || !CPPanelResizeOpacitySuspended
         return
     CPPanelResizeOpacitySuspended := false
     if !(IsSet(ui) && ui)
@@ -2831,7 +2870,7 @@ CPUnregisterThemeMessages(*) {
 CPUnsubclassStudyControls() {
     global CPStudyThemedComboHwnds, CPStudyThemedListHwnds
         , CPStudyThemedHeaderHwnds, CPStudyTransparentHwnds
-        , CPStudyVisualOverlays
+        , CPStudyVisualOverlays, CPDesktopNativePaintHwnds
 
     ; Remove our native WNDPROC hooks while the tracking maps and saved original
     ; procedures still exist. Otherwise Windows may deliver a final destruction
@@ -2845,6 +2884,16 @@ CPUnsubclassStudyControls() {
                     "int", -4, "ptr", cpComboOriginalProc, "ptr")
         }
         CPStudyThemedComboHwnds.Clear()
+    }
+    if IsSet(CPDesktopNativePaintHwnds) && IsObject(CPDesktopNativePaintHwnds) {
+        for cpNativeHwnd, cpNativeInfo in CPDesktopNativePaintHwnds {
+            cpNativeOriginalProc := IsObject(cpNativeInfo) ? cpNativeInfo.Get("proc", 0) : 0
+            if cpNativeHwnd && cpNativeOriginalProc
+                && DllCall("user32\IsWindow", "ptr", cpNativeHwnd, "int")
+                try DllCall("user32\SetWindowLongPtr", "ptr", cpNativeHwnd,
+                    "int", -4, "ptr", cpNativeOriginalProc, "ptr")
+        }
+        CPDesktopNativePaintHwnds.Clear()
     }
     if IsSet(CPStudyThemedListHwnds) && IsObject(CPStudyThemedListHwnds) {
         for cpListHwnd, cpListOriginalProc in CPStudyThemedListHwnds {
@@ -4170,7 +4219,7 @@ CPBigBoxControllerOption(option, enabled) {
         throw ValueError("Unknown controller option.")
     }
     enabled := enabled ? 1 : 0
-    persisted := Integer(IniRead(iniPath, "controller_inputs", key, old)) ? 1 : 0
+    persisted := ReadIniInt(iniPath, "controller_inputs", key, old) ? 1 : 0
     if persisted != old || (control.Value ? 1 : 0) != old
         throw ValueError("Controller settings changed elsewhere. Reopen this page and try again.")
     if enabled = old
@@ -5228,7 +5277,7 @@ CPBigBoxToggleTerminology(*) {
     old := useTerminologyOverrides ? 1 : 0
     CPBigBoxAICommitting := true
     try {
-        persisted := Integer(IniRead(iniPath, "cfg", "useTerminologyOverrides", old)) ? 1 : 0
+        persisted := ReadIniInt(iniPath, "cfg", "useTerminologyOverrides", old) ? 1 : 0
         if persisted != old || (chkUseTerminologyOverrides.Value ? 1 : 0) != old
             throw ValueError("Terminology settings changed elsewhere. Reopen this page and try again.")
         IniWrite(!old ? 1 : 0, iniPath, "cfg", "useTerminologyOverrides")
@@ -8821,8 +8870,17 @@ CPBigBoxUpdateHomeHint(key := "") {
     statusKey := key = "audioAI" ? "audio" : key
     rows := CPBigBoxHeaderStatus()
     if rows.Has(statusKey) {
-        row := rows[statusKey]
-        help := row["label"] " model: " row["model"] "`n" row["detail"]
+        switch statusKey {
+            case "translation":
+                help := "Choose the AI provider, model, and prompt for captured game text."
+                    . "`nChanges are saved immediately and apply to the next translation."
+            case "explanation":
+                help := "Choose the AI provider, model, and prompt for study-focused explanations."
+                    . "`nChanges are saved immediately and apply to the next explanation."
+            case "audio":
+                help := "Choose the AI provider, model, and output language for spoken dialogue."
+                    . "`nChanges apply the next time Audio Translation starts."
+        }
     } else {
         switch key {
             case "audioToggle":
@@ -12155,6 +12213,7 @@ audioTargetLangs := [
 
 ; -------- state --------
 global gPidAudio := 0
+global gAudioProcess := 0 ; Owned HANDLE, not a reusable PID, controls lifetime/termination.
 global gJustStoppedUntil := 0
 global gLastAction := ""
 global gAudioSessionFile := A_Temp "\JRPG_Control\audio-session.pid"
@@ -12169,6 +12228,31 @@ global CPFocusVisualNavHwnd := 0
 ; -------- INI helpers --------
 ; Trim everything we read from the INI to avoid invisible whitespace / BOM residue issues.
 Load(k, d, s := "cfg") => Trim(IniRead(iniPath, s, k, d))
+
+LoadInt(k, d, s := "cfg", minValue := "", maxValue := "") =>
+    ReadIniInt(iniPath, s, k, d, minValue, maxValue)
+
+ReadIniInt(path, section, key, fallback, minValue := "", maxValue := "") {
+    ; Missing, blank, unreadable, and malformed settings use the caller's
+    ; default without rewriting the INI. Empty defaults mean "no saved bound".
+    try {
+        raw := Trim(IniRead(path, section, key, fallback))
+        if !IsNumber(raw)
+            return fallback
+        magnitude := Float(raw)
+        ; Reject overflow before converting to AutoHotkey's signed integer.
+        if (magnitude >= 9.223372036854776e18 || magnitude < -9.223372036854776e18)
+            return fallback
+        value := Integer(raw)
+        if (minValue != "")
+            value := Max(value, minValue)
+        if (maxValue != "")
+            value := Min(value, maxValue)
+        return Integer(value)
+    } catch {
+        return fallback
+    }
+}
 
 SyncUnifiedWindowAppearance() {
     global boxBgHex, bdrOutHex, bdrInHex, bdrOutW, bdrInW
@@ -12207,7 +12291,7 @@ if (A_IsCompiled) {
     }
 }
 imgScript       := Load("imgScript",        defImgPy)
-overlayTrans    := Load("overlayTrans",     defOverlayTrans)
+overlayTrans    := LoadInt("overlayTrans", defOverlayTrans, "cfg", 0, 255)
 explainScript   := Load("explainScript",   defExplainPy)
 captureDir      := IniRead(iniPath, "paths", "captureDir", defCaptureDir)
 
@@ -12217,33 +12301,33 @@ captureDir      := IniRead(iniPath, "paths", "captureDir", defCaptureDir)
 __clearShotsMissing := "__MISSING__"
 __clearShotsRaw := IniRead(iniPath, "paths", "clearScreenshotsOnStartup", __clearShotsMissing)
 if (__clearShotsRaw = __clearShotsMissing) {
-    clearScreenshotsOnStartup := Integer(IniRead(iniPath, "paths", "deleteAfterUse", 0)) ? 1 : 0
+    clearScreenshotsOnStartup := ReadIniInt(iniPath, "paths", "deleteAfterUse", 0) ? 1 : 0
     IniWrite(clearScreenshotsOnStartup, iniPath, "paths", "clearScreenshotsOnStartup")
 } else {
-    clearScreenshotsOnStartup := Integer(__clearShotsRaw) ? 1 : 0
+    clearScreenshotsOnStartup := LoadInt("clearScreenshotsOnStartup", 0, "paths") ? 1 : 0
 }
 ; Older overlays must never resume the former ten-second deletion timer.
 IniWrite(0, iniPath, "paths", "deleteAfterUse")
 CleanupScreenshotsFromPriorSession(clearScreenshotsOnStartup)
 
 ; --- NEW: Native capture settings (safe defaults) ---
-capMaxKB   := Integer(IniRead(iniPath, "capture", "maxKB", 1400))     ; cap file size in KB
+capMaxKB   := ReadIniInt(iniPath, "capture", "maxKB", 1400, 100, 10000)
 capMode    := IniRead(iniPath, "capture", "mode", "region")           ; "region" or "window"
 capWinInfo := IniRead(iniPath, "capture", "winTitle", "")             ; window title (fallback)
 capRect    := IniRead(iniPath, "capture", "rect", "")                 ; "x,y,w,h" once selected
 
-debugMode := Integer(Load("debugMode", defDebugMode, "cfg"))
-directModelOutput := Integer(Load("directModelOutput", defDirectModelOutput, "cfg")) ? 1 : 0
+debugMode := LoadInt("debugMode", defDebugMode, "cfg")
+directModelOutput := LoadInt("directModelOutput", defDirectModelOutput, "cfg") ? 1 : 0
 ; The former Paths page visibility switch is retired. Remove it once so old
 ; installations do not keep advertising a setting that no longer has a UI.
 try IniDelete(iniPath, "cfg", "showPathsTab")
 SetDebugMode(debugMode)
-controlDarkMode := Integer(Load("darkMode", 1, "cfg_control")) ? 1 : 0
+controlDarkMode := LoadInt("darkMode", 1, "cfg_control") ? 1 : 0
 controlPanelOpacity := 100
-try controlPanelOpacity := Integer(Load("opacity", 100, "cfg_control"))
+try controlPanelOpacity := LoadInt("opacity", 100, "cfg_control")
 controlPanelOpacity := CPClampControlPanelOpacity(controlPanelOpacity)
-try CPBigBoxBackgroundOpacity := CPBigBoxClampBackgroundOpacity(Integer(Load("bigBoxBackgroundOpacity", 100, "cfg_control")))
-try CPBigBoxAlwaysOnTop := Integer(Load("bigBoxAlwaysOnTop", 1, "cfg_control")) ? 1 : 0
+try CPBigBoxBackgroundOpacity := CPBigBoxClampBackgroundOpacity(LoadInt("bigBoxBackgroundOpacity", 100, "cfg_control"))
+try CPBigBoxAlwaysOnTop := LoadInt("bigBoxAlwaysOnTop", 1, "cfg_control") ? 1 : 0
 CPSetPreferredAppDarkMode(controlDarkMode)
 
 ; overlay colors
@@ -12259,11 +12343,11 @@ bdrInW  := 0
 
 ; overlay font
 fontName := Load("fontName", defFontName)
-fontSize := Integer(Load("fontSize", defFontSize))
-fontBold := Integer(Load("fontBold", 0)) ? 1 : 0
+fontSize := LoadInt("fontSize", defFontSize, "cfg", 6, 128)
+fontBold := LoadInt("fontBold", 0) ? 1 : 0
 
 ; === EXPLAINER overlay (separate state, section: cfg_explainer) ===
-overlayTrans_EW := Load("overlayTrans",     defOverlayTrans, "cfg_explainer")
+overlayTrans_EW := LoadInt("overlayTrans", defOverlayTrans, "cfg_explainer", 0, 255)
 
 boxBgHex_EW  := StrUpper(Load("boxBg",      defBoxBg,       "cfg_explainer"))
 bdrOutHex_EW := boxBgHex_EW
@@ -12274,8 +12358,8 @@ bdrOutW_EW := 0
 bdrInW_EW  := 0
 
 fontName_EW := Load("fontName",             defFontName,    "cfg_explainer")
-fontSize_EW := Integer(Load("fontSize",     defFontSize,    "cfg_explainer"))
-fontBold_EW := Integer(Load("fontBold",     0,              "cfg_explainer")) ? 1 : 0
+fontSize_EW := LoadInt("fontSize", defFontSize, "cfg_explainer", 6, 200)
+fontBold_EW := LoadInt("fontBold",     0,              "cfg_explainer") ? 1 : 0
 SyncUnifiedWindowAppearance()
 
 ; --- EXPLAINER provider + model selections (own section)
@@ -12284,15 +12368,19 @@ explainOpenAIModel := Load("explainOpenAIModel", defExplainOpenAIModel, "cfg_exp
 explainGeminiModel := Load("explainGeminiModel", defExplainGeminiModel, "cfg_explainer")
 
 ; safety: if INI was empty on first run
-if (!explainProvider)    explainProvider    := defExplainProvider
-if (!explainOpenAIModel) explainOpenAIModel := defExplainOpenAIModel
-if (!explainGeminiModel) explainGeminiModel := defExplainGeminiModel
+; Keep assignments outside the condition so valid saved selections survive.
+if (!explainProvider)
+    explainProvider := defExplainProvider
+if (!explainOpenAIModel)
+    explainOpenAIModel := defExplainOpenAIModel
+if (!explainGeminiModel)
+    explainGeminiModel := defExplainGeminiModel
 
 ; --- Explainer bounds (persisted separately) ---
-ewTmp := Load("x", "", "explainer_bounds"), ewX := (ewTmp = "" ? "" : Integer(ewTmp))
-ewTmp := Load("y", "", "explainer_bounds"), ewY := (ewTmp = "" ? "" : Integer(ewTmp))
-ewTmp := Load("w", "", "explainer_bounds"), ewW := (ewTmp = "" ? "" : Integer(ewTmp))
-ewTmp := Load("h", "", "explainer_bounds"), ewH := (ewTmp = "" ? "" : Integer(ewTmp))
+ewX := LoadInt("x", "", "explainer_bounds", -2147483648, 2147483647)
+ewY := LoadInt("y", "", "explainer_bounds", -2147483648, 2147483647)
+ewW := LoadInt("w", "", "explainer_bounds", 1, 32767)
+ewH := LoadInt("h", "", "explainer_bounds", 1, 32767)
 
 ; track last-saved to avoid spam writes
 ew_lastX := ewX, ew_lastY := ewY, ew_lastW := ewW, ew_lastH := ewH
@@ -12337,7 +12425,7 @@ guiY_saved := (tmpY != "" && IsNumber(tmpY)) ? Integer(tmpY) : ""
 ; Glossary profile selections
 jp2enGlossaryProfile := Load("jp2enGlossaryProfile", defJP2ENGlossaryProfile)
 en2enGlossaryProfile := Load("en2enGlossaryProfile", defEN2ENGlossaryProfile)
-useTerminologyOverrides := Integer(Load("useTerminologyOverrides", defUseTerminologyOverrides)) ? 1 : 0
+useTerminologyOverrides := LoadInt("useTerminologyOverrides", defUseTerminologyOverrides) ? 1 : 0
 EnvSet("USE_TERMINOLOGY_OVERRIDES", useTerminologyOverrides ? "1" : "0")
 
 ; ---------- Model list persistence (new) ----------
@@ -12826,67 +12914,181 @@ CleanupScreenshotsFromPriorSession(shouldDelete) {
 ; =========================
 ; Audio state helper
 ; =========================
-AudioSessionPid() {
+AudioProcessAlive(process) {
+    return IsObject(process) && process.Get("handle", 0)
+        && DllCall("kernel32\WaitForSingleObject", "ptr", process["handle"], "uint", 0, "uint") = 0x102
+}
+
+AudioProcessRelease(process) {
+    if IsObject(process) && process.Get("handle", 0) {
+        DllCall("kernel32\CloseHandle", "ptr", process["handle"])
+        process["handle"] := 0
+    }
+}
+
+AudioProcessRecord(handle, pid) {
+    times := Buffer(32, 0)
+    if !DllCall("kernel32\GetProcessTimes", "ptr", handle, "ptr", times,
+        "ptr", times.Ptr + 8, "ptr", times.Ptr + 16, "ptr", times.Ptr + 24)
+        throw OSError()
+    created := Format("{:08X}{:08X}", NumGet(times, 4, "uint"), NumGet(times, 0, "uint"))
+    return Map("handle", handle, "pid", pid, "marker", "JRPG_AUDIO_V2`t" pid "`t" created)
+}
+
+AudioSetProcess(process := 0) {
+    global gAudioProcess, gPidAudio
+    previousCritical := A_IsCritical
+    Critical(50)
+    try {
+        if process != gAudioProcess
+            AudioProcessRelease(gAudioProcess)
+        gAudioProcess := process
+        gPidAudio := IsObject(process) ? process["pid"] : 0
+    } finally Critical(previousCritical)
+}
+
+AudioStartOwnedProcess(executable, script) {
+    ; A close/stop callback cannot run between creating and tracking the child.
+    previousCritical := A_IsCritical
+    Critical(50)
+    try AudioSetProcess(AudioLaunchProcess(executable, script))
+    finally Critical(previousCritical)
+}
+
+AudioLaunchProcess(executable, script) {
+    ; CreateProcess returns the HANDLE atomically with creation. Opening a PID
+    ; after Run would leave a race if the child exits and its PID is reused.
+    startup := Buffer(A_PtrSize = 8 ? 104 : 68, 0)
+    info := Buffer(A_PtrSize = 8 ? 24 : 16, 0)
+    NumPut("uint", startup.Size, startup)
+    command := '"' executable '" "' script '"'
+    commandBuffer := Buffer(StrPut(command, "UTF-16") * 2, 0)
+    StrPut(command, commandBuffer, "UTF-16")
+    if !DllCall("kernel32\CreateProcessW", "str", executable, "ptr", commandBuffer,
+        "ptr", 0, "ptr", 0, "int", false, "uint", 0x08000000, "ptr", 0,
+        "ptr", 0, "ptr", startup, "ptr", info)
+        throw OSError()
+    handle := NumGet(info, 0, "ptr")
+    DllCall("kernel32\CloseHandle", "ptr", NumGet(info, A_PtrSize, "ptr"))
+    try return AudioProcessRecord(handle, NumGet(info, 2 * A_PtrSize, "uint"))
+    catch as ex {
+        DllCall("kernel32\TerminateProcess", "ptr", handle, "uint", 1)
+        DllCall("kernel32\CloseHandle", "ptr", handle)
+        throw ex
+    }
+}
+
+AudioCommandMatches(command, executable, script) {
+    count := 0
+    argv := DllCall("shell32\CommandLineToArgvW", "str", command, "int*", &count, "ptr")
+    if !argv
+        return false
+    try {
+        ; A live worker has precisely these two arguments. Diagnostics and a
+        ; script path merely occurring inside another argument are not workers.
+        return count = 2
+            && StrLower(StrReplace(StrGet(NumGet(argv, 0, "ptr")), "/", "\")) = StrLower(executable)
+            && StrLower(StrReplace(StrGet(NumGet(argv, A_PtrSize, "ptr")), "/", "\")) = StrLower(script)
+    } finally DllCall("kernel32\LocalFree", "ptr", argv)
+}
+
+AudioProcessCommandLine(pid) {
+    wm := ComObjGet("winmgmts:")
+    for process in wm.ExecQuery("Select CommandLine from Win32_Process Where ProcessId=" pid)
+        return process.CommandLine ? process.CommandLine : ""
+    return ""
+}
+
+AudioOpenVerifiedProcess(pid, expectedMarker := "") {
+    global pythonExe, audioScript
+    if !IsInteger(pid) || pid <= 0 || pid > 0xFFFFFFFF
+        return 0
+    handle := DllCall("kernel32\OpenProcess", "uint", 0x101001, "int", false, "uint", pid, "ptr")
+    if !handle
+        return 0
+    try {
+        process := AudioProcessRecord(handle, pid)
+        if expectedMarker != "" && process["marker"] != expectedMarker
+            return 0
+        executable := StrReplace(ResolvePath(pythonExe), "/", "\")
+        script := StrReplace(ResolvePath(audioScript), "/", "\")
+        imagePath := Buffer(65536, 0), length := 32768
+        if !DllCall("kernel32\QueryFullProcessImageNameW", "ptr", handle, "uint", 0,
+            "ptr", imagePath, "uint*", &length)
+            return 0
+        if StrLower(StrGet(imagePath, length)) != StrLower(executable)
+            return 0
+        ; Keep the HANDLE open throughout verification and subsequent use.
+        ; If inspection fails, fail closed rather than trusting marker/PID alone.
+        if !AudioCommandMatches(AudioProcessCommandLine(pid), executable, script) || !AudioProcessAlive(process)
+            return 0
+        handle := 0 ; Ownership transfers to the returned record.
+        return process
+    } catch {
+        return 0
+    } finally {
+        if handle
+            DllCall("kernel32\CloseHandle", "ptr", handle)
+    }
+}
+
+AudioSessionProcess() {
     global gAudioSessionFile
+    static failedMarker := "", retryAfter := 0
     if !FileExist(gAudioSessionFile)
         return 0
     value := ""
     try value := Trim(FileRead(gAudioSessionFile, "UTF-8"))
     catch
         return 0
-    if !RegExMatch(value, "^\d+$") {
-        try FileDelete(gAudioSessionFile)
+    if !RegExMatch(value, "^JRPG_AUDIO_V2\t([1-9][0-9]{0,9})\t[0-9A-F]{16}$", &match) {
+        AudioSessionClear(value)
         return 0
     }
-    pid := Integer(value)
-    if pid && ProcessExist(pid)
-        return pid
-    try FileDelete(gAudioSessionFile)
+    if value = failedMarker && A_TickCount < retryAfter
+        return 0
+    process := AudioOpenVerifiedProcess(Integer(match[1]), value)
+    if IsObject(process)
+        return process
+    failedMarker := value, retryAfter := A_TickCount + 2000
     return 0
 }
 
-AudioSessionClear(expectedPid := 0) {
+AudioSessionClear(expectedMarker) {
     global gAudioSessionFile
     if !FileExist(gAudioSessionFile)
         return
-    if expectedPid {
-        value := ""
-        try value := Trim(FileRead(gAudioSessionFile, "UTF-8"))
-        if value != String(expectedPid)
-            return
-    }
+    value := ""
+    try value := Trim(FileRead(gAudioSessionFile, "UTF-8"))
+    if value != expectedMarker
+        return
     try FileDelete(gAudioSessionFile)
 }
 
 AudioIsRunning(allowRecoveryScan := false) {
-    global gPidAudio
-    if (gPidAudio && ProcessExist(gPidAudio))
-        return true
-
-    ; The Python worker owns this marker for its complete lifetime. It keeps the
-    ; UI synchronized even if a launcher hands execution to another process or
-    ; the control panel is restarted while audio translation remains active.
-    sessionPid := AudioSessionPid()
-    if sessionPid {
-        gPidAudio := sessionPid
-        return true
-    }
-
-    if gPidAudio
-        gPidAudio := 0
-
-    ; WMI is only needed to adopt a process which this instance did not launch,
-    ; such as one left behind by an earlier crash. Normal status polling relies
-    ; exclusively on the PID returned by Run().
-    if allowRecoveryScan {
-        pids := AudioPidsByScript()
-        if (pids.Length) {
-            gPidAudio := pids[1]
+    global gAudioProcess
+    previousCritical := A_IsCritical
+    Critical(50)
+    try {
+        if AudioProcessAlive(gAudioProcess)
+            return true
+        AudioSetProcess()
+        process := AudioSessionProcess()
+        if IsObject(process) {
+            AudioSetProcess(process)
             return true
         }
-    }
-
-    return false
+        if allowRecoveryScan {
+            processes := AudioProcessesByScript()
+            if processes.Length {
+                AudioSetProcess(processes.RemoveAt(1))
+                for other in processes
+                    AudioProcessRelease(other)
+                return true
+            }
+        }
+        return false
+    } finally Critical(previousCritical)
 }
 
 UpdateStatus(allowRecoveryScan := false){
@@ -13476,15 +13678,31 @@ CPSyncExplanationSelectionFromControls() {
 
 ExplainNow(*) {
     static explainRunning := false
+    if explainRunning {
+        Toast("An explanation is already being generated")
+        return
+    }
+    explainRunning := true
+    previousErrorFile := EnvGet("EXPLAIN_ERROR_FILE")
+    try ExplainNowCore()
+    catch as ex {
+        Toast("Explanation failed")
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(),
+            "Explanation could not finish. You can try again.`n`n" ex.Message,
+            "Explain failed", "ok", "error", 720)
+    } finally {
+        ; Even a locked result file or a closed dialog must release the guard.
+        explainRunning := false
+        EnvSet("EXPLAIN_ERROR_FILE", previousErrorFile)
+    }
+}
+
+ExplainNowCore() {
     global pythonExe, explainScript
     global explainProvider, explainOpenAIModel, explainGeminiModel
     global debugMode, explainsDir, studyLibraryDir, overlayDir
     px := ResolvePath(pythonExe)
     ex := ResolvePath(explainScript)
-    if explainRunning {
-        Toast("An explanation is already being generated")
-        return
-    }
     if !(FileExist(px) && FileExist(ex)) {
         CPAdaptiveOwnedMessage(CPDialogDefaultOwner(),
             "Set valid paths for python.exe and explainer script first.`n`npythonExe:`n" px "`n`nexplainer:`n" ex,
@@ -13527,9 +13745,9 @@ ExplainNow(*) {
     EnvSet("PYTHONIOENCODING","utf-8")
 	
 	; --- Explanation archive wiring for explainer.py ---
-    saveExpl := Integer(IniRead(iniPath, "cfg", "saveExplains", 0))
-    saveStudyLibrary := Integer(IniRead(iniPath, "cfg", "saveStudyLibrary", 0))
-    saveStudyScreenshots := Integer(IniRead(iniPath, "cfg", "studyLibraryScreenshots", 1))
+    saveExpl := ReadIniInt(iniPath, "cfg", "saveExplains", 0)
+    saveStudyLibrary := ReadIniInt(iniPath, "cfg", "saveStudyLibrary", 0)
+    saveStudyScreenshots := ReadIniInt(iniPath, "cfg", "studyLibraryScreenshots", 1)
 
     ; Pass environment variables to explainer.py
     ; SAVE_EXPLAINS: "1" to archive each explanation; "0" to skip (default)
@@ -13567,12 +13785,9 @@ ExplainNow(*) {
     DbgCP("ExplainNow -> " cmd)
     Toast("Generating explanation…")
     SignalExplainerBusy()
-    explainRunning := true
     pid := 0
     try Run(cmd, A_ScriptDir, "Hide", &pid)
     catch as launchError {
-        explainRunning := false
-        EnvSet("EXPLAIN_ERROR_FILE", "")
         msg := "Explanation could not start.`n`nThe bundled Python process could not be launched.`n`nDetails: " launchError.Message
         CPWriteExplainerTerminalResult(msg, requestId)
         Toast("Explanation failed")
@@ -13593,14 +13808,16 @@ ExplainNow(*) {
         Sleep(50)
     }
 
-    err := (FileExist(errFile) ? Trim(FileRead(errFile, "UTF-8")) : "")
+    try err := (FileExist(errFile) ? Trim(FileRead(errFile, "UTF-8")) : "")
+    catch {
+        err := "The explanation process finished, but its status file could not be read. Check the Explainer overlay before retrying."
+        CPWriteExplainerTerminalResult(err, requestId)
+    }
     try FileDelete(errFile)
     donePath := overlayDir "\explainer.done"
     doneToken := ""
     try if FileExist(donePath)
         doneToken := Trim(FileRead(donePath, "UTF-8"))
-    explainRunning := false
-    EnvSet("EXPLAIN_ERROR_FILE", "")
 
     if timedOut {
         msg := "Explanation timed out.`n`nThe selected model did not finish within two minutes. Please try again, check the internet connection, or select another model."
@@ -16077,8 +16294,8 @@ StudyAnkiReadAddResult(saState) {
     saRows := StudyLibraryReadRows(saState["outputDir"] "\anki_add.tsv")
     if !saRows.Length
         return Map(
-            "code", "error", "noteId", "",
-            "message", "Anki did not return a result for this entry."
+            "code", "uncertain", "noteId", "",
+            "message", "Anki did not return a result for this entry. It may already have been added. Check Anki and refresh Anki status before opening a new card review."
         )
     saRow := saRows[1]
     return Map(
@@ -16236,7 +16453,7 @@ StudyReaderHasGeneratedExample(saBack) {
 
 StudyReaderGenerateVocabularyExample(saAddState, *) {
     global pythonExe, explainProvider, explainOpenAIModel, explainGeminiModel
-    if saAddState["closed"] || saAddState["cardKind"] != "vocabulary"
+    if saAddState["closed"] || saAddState.Get("uncertain", false) || saAddState["cardKind"] != "vocabulary"
         return
 
     saProvider := CPSyncExplanationSelectionFromControls()
@@ -16385,7 +16602,7 @@ StudyReaderGenerateVocabularyExample(saAddState, *) {
 }
 
 StudyReaderAddReviewedAnkiNote(saAddState, *) {
-    if saAddState["closed"]
+    if saAddState["closed"] || saAddState.Get("uncertain", false)
         return
     saDeckIndex := saAddState["deckDdl"].Value
     if (saDeckIndex < 1 || saDeckIndex > saAddState["decks"].Length) {
@@ -16463,8 +16680,10 @@ StudyReaderAddReviewedAnkiNote(saAddState, *) {
     if !StudyLibraryStateAlive(saAddState)
         return
     if !saRan {
-        saAddState["status"].Value := "The Anki bridge could not be started. Nothing was added to Anki."
-        saAddState["addButton"].Enabled := true
+        ; RunBridge also returns false if a started bridge exits unsuccessfully:
+        ; that exit code cannot establish whether Anki committed the request.
+        StudyAnkiShowUncertainAdd(saAddState, saReaderState,
+            "The Anki bridge did not complete successfully. The entry may already have been added. Check Anki and refresh Anki status before opening a new card review.")
         return
     }
     saResult := StudyAnkiReadAddResult(saReaderState)
@@ -16505,7 +16724,22 @@ StudyReaderAddReviewedAnkiNote(saAddState, *) {
     }
     saAddState["status"].Value := saResult["message"] != ""
         ? saResult["message"] : "Anki rejected the entry. Nothing was added to Anki."
-    saAddState["addButton"].Enabled := true
+    ; A lost reply may conceal a successful add. Require checking Anki before
+    ; opening a fresh review; never offer an immediate blind retry here.
+    if saCode = "uncertain"
+        StudyAnkiShowUncertainAdd(saAddState, saReaderState, saResult["message"])
+    else
+        saAddState["addButton"].Enabled := true
+}
+
+StudyAnkiShowUncertainAdd(saAddState, saReaderState, saMessage) {
+    saAddState["uncertain"] := true
+    saAddState["status"].Value := saMessage
+    saAddState["addButton"].Enabled := false
+    if saAddState.Has("exampleButton")
+        saAddState["exampleButton"].Enabled := false
+    StudyReaderAnkiMessage(saReaderState, saMessage,
+        "Anki result not confirmed", "ok", "warning")
 }
 
 StudyReaderOpenAnkiAddDialog(srState, *) {
@@ -18648,8 +18882,7 @@ StudyCandidatesRecommendationShowPrompt(scAdvanced, *) {
             ; only after the owned window becomes visible.
             StudyCandidatesApplyRecommendationDialogTheme(scDialog)
         }
-        scEditor.Focus()
-        SendMessage(0x00B1, 0, 0, scEditor.Hwnd)
+        StudyDialogFocusIfAlive(scPreview, scEditor, true)
         while !scPreview["closed"]
             Sleep(25)
     } finally {
@@ -18864,7 +19097,7 @@ StudyCandidatesRecommendationCustomize(scDialogState, *) {
                 scDialog, scRecommendationChecks
             )
         }
-        scVocabulary.Focus()
+        StudyDialogFocusIfAlive(scAdvanced, scVocabulary)
         while !scAdvanced["closed"]
             Sleep(25)
     } finally {
@@ -19042,7 +19275,7 @@ StudyCandidatesRecommendationConfirm(
             ; faces, owner-drawn combo arrows and drop-down list scrollbars.
             StudyCandidatesApplyRecommendationDialogTheme(scDialog)
         }
-        scGenerate.Focus()
+        StudyDialogFocusIfAlive(scDialogState, scGenerate)
         while !scDialogState["closed"]
             Sleep(25)
     } finally {
@@ -19052,6 +19285,21 @@ StudyCandidatesRecommendationConfirm(
         try WinActivate("ahk_id " scOwner)
     }
     return scDialogState["result"] ? scSettings : 0
+}
+
+StudyDialogFocusIfAlive(state, control, resetSelection := false) {
+    ; Showing a dialog can dispatch a queued Cancel/Close before returning.
+    ; Late focus is optional and must not touch an already destroyed control.
+    if state.Get("closed", false) || !StudyCandidatesGuiAlive(state)
+        return false
+    try {
+        control.Focus()
+        if resetSelection
+            SendMessage(0x00B1, 0, 0, control.Hwnd)
+        return true
+    } catch {
+        return false
+    }
 }
 
 StudyCandidatesBridgeCommand(scState, scAction, scFront := "") {
@@ -25571,6 +25819,30 @@ StudyReaderClampPosition(srGui, &srX, &srY) {
 }
 
 StudyWindowRevealFinished(studyGui, positionOptions := "") {
+    previousCritical := A_IsCritical
+    Critical("On")
+    try {
+        if !StudyWindowHasHandle(studyGui)
+            return false
+        StudyWindowRevealCore(studyGui, positionOptions)
+        return true
+    } catch as ex {
+        ; A native close can still invalidate a handle during Show/theming.
+        ; Never try to reveal a destroyed GUI again.
+        if !StudyWindowHasHandle(studyGui)
+            return false
+        throw ex
+    } finally Critical(previousCritical)
+}
+
+StudyWindowHasHandle(studyGui) {
+    ; Gui.Hwnd itself throws after Destroy; even an existence check needs guarding.
+    try return IsObject(studyGui) && studyGui.Hwnd
+    catch
+        return false
+}
+
+StudyWindowRevealCore(studyGui, positionOptions := "") {
     if !(IsObject(studyGui) && studyGui.Hwnd)
         return
     ; Native ListView/combo/button surfaces are not fully composed while their
@@ -25826,9 +26098,9 @@ OpenStandaloneStudyReader(*) {
         return
     }
     srLastGroupId := 0
-    try srLastGroupId := Integer(IniRead(
+    try srLastGroupId := ReadIniInt(
         iniPath, "study_reader_view", "lastGroupId", 0
-    ))
+    )
     srTargetId := 0
     if (srLastGroupId > 0) {
         for srGroup in srGroups {
@@ -26261,7 +26533,9 @@ OpenStudyReader(srGroupId, srVersion := 0, srGroups := 0) {
         } else
             StudyWindowRevealFinished(srGui, "Center")
     }
-    WinActivate("ahk_id " srGui.Hwnd)
+    if !StudyWindowHasHandle(srGui)
+        return
+    try WinActivate("ahk_id " srGui.Hwnd)
     ; The explanation owns initial focus so a controller can scroll it at once.
     ; D-pad Left/Right can then move to neighboring controls spatially.
     try {
@@ -27626,9 +27900,9 @@ StudyLibraryCreateColumns() {
     ))
     ; Introduce the new overview column once on upgrades, while preserving any
     ; later choice to hide it through Columns...
-    if !Integer(IniRead(
+    if !ReadIniInt(
         iniPath, "study_library_view", "keyGrammarColumnIntroduced", 0
-    )) {
+    ) {
         if !InStr("," slVisibleValue ",", ",grammar,")
             slVisibleValue .= (slVisibleValue = "" ? "" : ",") "grammar"
         IniWrite(1, iniPath, "study_library_view", "keyGrammarColumnIntroduced")
@@ -27654,9 +27928,9 @@ StudyLibraryCreateColumns() {
         slKey := slDefinition[1]
         slDefaultWidth := slDefinition[3]
         slWidth := slUseSavedWidths
-            ? Integer(IniRead(
+            ? ReadIniInt(
                 iniPath, "study_library_view", "columnWidth_" slKey, slDefaultWidth
-            ))
+            )
             : slDefaultWidth
         slRequired := slDefinition[4]
         slColumns.Push(Map(
@@ -29506,9 +29780,9 @@ ShowStudyLibraryWelcome(slState, *) {
     } catch {
         return
     }
-    if Integer(IniRead(
+    if ReadIniInt(
         iniPath, "study_library", "welcomeDismissed", 0
-    ))
+    )
         return
 
     if (IsObject(CPStudyLibraryWelcomeDialog)
@@ -30074,7 +30348,9 @@ OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
         } else
             StudyWindowRevealFinished(slGui, "Center")
     }
-    WinActivate("ahk_id " slGui.Hwnd)
+    if !StudyWindowHasHandle(slGui)
+        return
+    try WinActivate("ahk_id " slGui.Hwnd)
     StudyLibraryFocusOnOpen(slState)
     ; The Study Library has its own concise first-run introduction. Keeping its
     ; preference separate from the main setup guide also covers users who open
@@ -34073,7 +34349,7 @@ StartAudioCore(bigBox := false) {
 
     DbgCP("StartAudio live provider=" audioProvider " openaiModel=" trModel " geminiModel=" geminiAudioModel " target=" AudioTargetCode(audioTargetLang) " speaker=" spick)
         try {
-        Run('"' px '" "' ap '"', , "Hide", &gPidAudio)
+        AudioStartOwnedProcess(px, ap)
     } Catch as exrr {
         if bigBox
             CPBigBoxSetActionNotice("Could not start the audio helper. Check pythonExe in Settings\control.ini and try again.")
@@ -34093,23 +34369,25 @@ StartAudioCore(bigBox := false) {
     started := false
     Loop 20 {                         ; 20Ã—100ms = ~2 seconds
         Sleep(100)
-        if (gPidAudio && ProcessExist(gPidAudio)) {
+        if AudioIsRunning() {
             started := true
             break
         }
     }
 
     ; Prefer the worker-owned marker if a launcher handed execution to a child.
-    sessionPid := AudioSessionPid()
-    if sessionPid {
-        gPidAudio := sessionPid
+    sessionProcess := AudioSessionProcess()
+    if IsObject(sessionProcess) {
+        AudioSetProcess(sessionProcess)
         started := true
     } else if !started && !bigBox {
         ; One bounded recovery scan also adopts a worker left by an older build,
         ; before the session marker protocol existed.
-        pids := AudioPidsByScript()
-        if pids.Length {
-            gPidAudio := pids[1]
+        processes := AudioProcessesByScript()
+        if processes.Length {
+            AudioSetProcess(processes.RemoveAt(1))
+            for other in processes
+                AudioProcessRelease(other)
             started := true
         }
     }
@@ -34117,7 +34395,7 @@ StartAudioCore(bigBox := false) {
         ; Extra guard: if it died immediately after spawn, treat as failure
     if (started) {
         Sleep(200)
-        if !(gPidAudio && ProcessExist(gPidAudio)) {
+        if !AudioIsRunning() {
             started := false
         }
     }
@@ -34129,7 +34407,7 @@ StartAudioCore(bigBox := false) {
         return true
     }
 
-    gPidAudio := 0
+    AudioSetProcess()
     if bigBox {
         UpdateStatus()
         CPBigBoxSetActionNotice("The audio helper exited during startup. Check the Translator for an error and verify the audio settings.")
@@ -34146,11 +34424,10 @@ StartAudioCore(bigBox := false) {
     return false
 }
 
-AudioPidsByScript() {
-    global audioScript
+AudioProcessesByScript() {
+    global audioScript, pythonExe
     static queryInProgress := false
     ap := ResolvePath(audioScript)
-    apL := StrLower(StrReplace(ap, "/", "\"))   ; normalize & lower
     out := []
     if queryInProgress
         return out
@@ -34163,12 +34440,14 @@ AudioPidsByScript() {
         processes := wm.ExecQuery("Select ProcessId,CommandLine from Win32_Process Where Name='python.exe' OR Name='pythonw.exe'")
         for p in processes {
             cmd := p.CommandLine ? p.CommandLine : ""
-            cmdL := StrLower(StrReplace(cmd, "/", "\"))  ; normalize & lower
-            if (InStr(cmdL, apL) && !InStr(cmdL, "--list-speakers") && !InStr(cmdL, "--test-audio"))
-                out.Push(p.ProcessId)
+            if AudioCommandMatches(cmd, ResolvePath(pythonExe), ap) {
+                process := AudioOpenVerifiedProcess(p.ProcessId)
+                if IsObject(process)
+                    out.Push(process)
+            }
         }
     } catch as ex {
-        DbgCP("AudioPidsByScript WMI query failed: " ex.Message)
+        DbgCP("AudioProcessesByScript WMI query failed: " ex.Message)
     } finally {
         queryInProgress := false
         Critical(previousCritical)
@@ -34227,43 +34506,53 @@ StopAudio(*) {
 }
 
 StopAudioCore(announce := true, recoveryScan := true) {
-    global gPidAudio, gJustStoppedUntil, gLastAction
+    global gAudioProcess, gJustStoppedUntil, gLastAction
     gLastAction := "stop"
     gJustStoppedUntil := A_TickCount + 5000
 
-    ; Capture the known PID and perform at most one recovery scan. The wait loop
-    ; below checks these PIDs directly instead of repeatedly querying WMI.
-    knownPids := Map()
-    if (gPidAudio && ProcessExist(gPidAudio))
-        knownPids[gPidAudio] := true
-    sessionPid := AudioSessionPid()
-    if sessionPid
-        knownPids[sessionPid] := true
-    if recoveryScan
-        for pid in AudioPidsByScript()
-            knownPids[pid] := true
-    for pid, _ in knownPids
-        try ProcessClose(pid)
-
-    stopped := false
-    Loop 20 {
-        remainingAlive := false
-        for pid, _ in knownPids {
-            if ProcessExist(pid) {
-                remainingAlive := true
-                try ProcessClose(pid)
+    previousCritical := A_IsCritical
+    Critical(50)
+    processes := []
+    try {
+        session := AudioSessionProcess()
+        if IsObject(session)
+            processes.Push(session)
+        if recoveryScan {
+            for process in AudioProcessesByScript()
+                processes.Push(process)
+        }
+        ; The main owned record is shared; do not release it until stopped.
+        if IsObject(gAudioProcess)
+            processes.Push(gAudioProcess)
+        for process in processes {
+            if AudioProcessAlive(process)
+                DllCall("kernel32\TerminateProcess", "ptr", process["handle"], "uint", 1)
+        }
+        stopped := false
+        Loop 20 {
+            remainingAlive := false
+            for process in processes {
+                if AudioProcessAlive(process)
+                    remainingAlive := true
             }
+            if !remainingAlive {
+                stopped := true
+                break
+            }
+            Sleep(50)
         }
-        if !remainingAlive {
-            stopped := true
-            break
+        for process in processes {
+            if !AudioProcessAlive(process)
+                AudioSessionClear(process["marker"])
         }
-        Sleep(50)
-    }
-
-    if stopped {
-        gPidAudio := 0
-        AudioSessionClear()
+        if stopped
+            AudioSetProcess()
+    } finally {
+        for process in processes {
+            if process != gAudioProcess
+                AudioProcessRelease(process)
+        }
+        Critical(previousCritical)
     }
     DbgCP("StopAudio() requested; confirmed=" stopped)
     if announce
@@ -34275,6 +34564,7 @@ AudioShutdown(*) {
     ; ExitApp must never leave a tracked worker behind. Avoid WMI during teardown:
     ; startup/user actions have already adopted older unmarked workers.
     try StopAudioCore(false, false)
+    AudioSetProcess()
 }
 
 ; NEW: unified toggle used by the single button
@@ -34286,9 +34576,30 @@ ToggleAudioFromButton(*) {
     }
 }
 
-; Toggle audio translation from the configured hotkey.
+; Keyboard/JoyToKey and direct-controller shortcuts need feedback even when
+; the settings UI is hidden. Keep button/dashboard feedback unchanged.
 StartStopAudio(*) {
-    ToggleAudioFromButton()
+    static switching := false
+    if switching
+        return false
+    switching := true
+    try {
+        stopping := AudioIsRunning(true)
+        succeeded := stopping ? StopAudio() : StartAudio()
+        ; StartAudio confirms the helper process, not the remote AI connection.
+        ; Connection/retry/error details continue to appear in the Translator.
+        if succeeded
+            Toast(stopping ? "Audio Translation Off" : "Audio Translation On")
+        else
+            Toast(stopping ? "Could not stop audio translation" : "Could not start audio translation")
+        return succeeded
+    } catch as ex {
+        DbgCP("Audio shortcut failed: " ex.Message)
+        Toast("Could not change audio translation")
+        return false
+    } finally {
+        switching := false
+    }
 }
 
 ; Run a command hidden and capture its stdout via a temp file (works with python.exe)
@@ -35069,13 +35380,20 @@ Toast(msg){
         message := "JRPG Translator"
     background := controlDarkMode ? "101825" : "FFFFFF"
     foreground := controlDarkMode ? "FFFFFF" : "111827"
-    CPToastGui := Gui("+ToolWindow -Caption +AlwaysOnTop +E0x20")
+    CPToastGui := Gui("+ToolWindow -Caption +AlwaysOnTop +E0x08000000")
     CPToastGui.BackColor := background
     CPToastGui.MarginX := 12, CPToastGui.MarginY := 8
     CPToastGui.SetFont("s11", "Segoe UI")
     CPToastText := CPToastGui.Add("Text", "c" foreground " Background" background " +0x200", message)
+    ; WS_EX_TRANSPARENT alone defers painting to other windows on this thread.
+    ; With the composited desktop still invalid, Show/Redraw can get stuck in
+    ; that paint ordering (blank toast, stale footer, no dismissal timer).
+    ; Paint the first frame without that flag, then enable click-through on a
+    ; fully opaque layered window (also works over another process's game).
+    WinSetTransparent(255, CPToastGui.Hwnd)
     CPToastGui.Show("AutoSize NoActivate x20 y20")
     CPToastText.Redraw()
+    CPToastGui.Opt("+E0x20")
     CPToastTimer := ToastDestroy.Bind(CPToastGui)
     SetTimer(CPToastTimer, -1600)
 }
@@ -35852,19 +36170,19 @@ CPStartupOverlayOptions() {
 CPStartupOverlayPlan(studyMode := "", forceTranslator := false) {
     global iniPath
     return Map("translator", studyMode = "" && (forceTranslator
-            || Integer(IniRead(iniPath, "cfg", "openTranslatorOnLaunch", 0))),
+            || ReadIniInt(iniPath, "cfg", "openTranslatorOnLaunch", 0)),
         "explainer", studyMode = ""
-            && Integer(IniRead(iniPath, "cfg", "openExplainerOnLaunch", 0)))
+            && ReadIniInt(iniPath, "cfg", "openExplainerOnLaunch", 0))
 }
 
 CPStartupOverlayIndex() {
     global iniPath, chkOpenTW, chkOpenEW
     translator := IsSet(chkOpenTW)
         ? (chkOpenTW.Value ? 1 : 0)
-        : (Integer(IniRead(iniPath, "cfg", "openTranslatorOnLaunch", 0)) ? 1 : 0)
+        : (ReadIniInt(iniPath, "cfg", "openTranslatorOnLaunch", 0) ? 1 : 0)
     explainer := IsSet(chkOpenEW)
         ? (chkOpenEW.Value ? 1 : 0)
-        : (Integer(IniRead(iniPath, "cfg", "openExplainerOnLaunch", 0)) ? 1 : 0)
+        : (ReadIniInt(iniPath, "cfg", "openExplainerOnLaunch", 0) ? 1 : 0)
     return 1 + translator + 2 * explainer
 }
 
@@ -36032,15 +36350,7 @@ GameProfileWriteBounds(profilePath, section, bounds) {
 }
 
 GameProfileReadInt(path, section, key, fallback, minValue := "", maxValue := "") {
-    value := IniRead(path, section, key, fallback)
-    if !IsNumber(value)
-        value := fallback
-    value := Integer(value)
-    if (minValue != "")
-        value := Max(value, minValue)
-    if (maxValue != "")
-        value := Min(value, maxValue)
-    return value
+    return ReadIniInt(path, section, key, fallback, minValue, maxValue)
 }
 
 GameProfileReadColor(path, section, key, fallback) {
@@ -36935,7 +37245,7 @@ ClosePanel(*) {
 }
 
 ; Load persisted Control Panel topmost state from INI and apply it
-chkTop.Value := Integer(IniRead(iniPath, "cfg_control", "winTop", 0)) ? 1 : 0
+chkTop.Value := ReadIniInt(iniPath, "cfg_control", "winTop", 0) ? 1 : 0
 ui.Opt(chkTop.Value ? "+AlwaysOnTop" : "-AlwaysOnTop")
 chkTop.OnEvent("Click", (*) => (
     ui.Opt(chkTop.Value ? "+AlwaysOnTop" : "-AlwaysOnTop"),
@@ -37015,7 +37325,7 @@ CPDesktopWelcomeDialogCreate(ownerHwnd, manual := false) {
     global iniPath, BEGINNER_VIDEO_URL, WRITTEN_GUIDE_URL
     if CPDialogPresentation(ownerHwnd) != "desktop"
         return 0
-    dismissed := Integer(IniRead(iniPath, "cfg_control", "welcomeGuideDismissed", 0)) != 0
+    dismissed := ReadIniInt(iniPath, "cfg_control", "welcomeGuideDismissed", 0) != 0
     g := Gui("+Owner" ownerHwnd " +AlwaysOnTop +OwnDialogs", "Welcome to JRPG Translator")
     g.MarginX := 0, g.MarginY := 0
     g.SetFont("s11", "Segoe UI")
@@ -37098,7 +37408,7 @@ ShowWelcomeDialog(manual := false, *) {
         return state
     }
 
-    dismissed := Integer(IniRead(iniPath, "cfg_control", "welcomeGuideDismissed", 0)) != 0
+    dismissed := ReadIniInt(iniPath, "cfg_control", "welcomeGuideDismissed", 0) != 0
     dlg := Gui("+Owner" ui.Hwnd " +AlwaysOnTop +OwnDialogs", "Welcome to JRPG Translator")
     CPWelcomeDialog := dlg
     dlg.MarginX := 20
@@ -37307,30 +37617,30 @@ CPApiInAppChanged(*) {
 
 ; Save .env atomically (writes OPENAI_API_KEY, GOOGLE_API_KEY and GEMINI_API_KEY)
 SaveApiEnv(*) {
+    static saving := false, saveSerial := 0
     global eOpenAI, eGemini, envPath, cbApiInApp
     global envSavedOpenAI, envSavedGemini
-    openai := Trim(eOpenAI.Value)
-    gemini := Trim(eGemini.Value)
-
-    body := "OPENAI_API_KEY=" openai "`r`n"
-          . "GOOGLE_API_KEY=" gemini "`r`n"
-          . "GEMINI_API_KEY=" gemini "`r`n"
-
-    ; Ensure the folder for envPath exists
-    SplitPath envPath, , &envDir
-    if !DirExist(envDir)
-        DirCreate(envDir)
-
-    tmp := envPath ".tmp"
+    if saving
+        return
+    saving := true
+    tmp := ""
     try {
-        if FileExist(tmp)
-            FileDelete(tmp)
+        openai := Trim(eOpenAI.Value)
+        gemini := Trim(eGemini.Value)
+
+        body := "OPENAI_API_KEY=" openai "`r`n"
+              . "GOOGLE_API_KEY=" gemini "`r`n"
+              . "GEMINI_API_KEY=" gemini "`r`n"
+
+        ; Ensure the folder for envPath exists.
+        SplitPath envPath, , &envDir
+        if !DirExist(envDir)
+            DirCreate(envDir)
+
+        saveSerial += 1
+        tmp := envPath "." DllCall("GetCurrentProcessId", "uint") "." A_TickCount "." saveSerial ".tmp"
         FileAppend(body, tmp, "UTF-8")
-
-        if FileExist(envPath)
-            FileDelete(envPath)
-
-        FileMove(tmp, envPath, true)
+        CPReplaceApiEnvFile(tmp, envPath)
 
         cbApiInApp.Value := 1
         envSavedOpenAI := openai
@@ -37339,11 +37649,20 @@ SaveApiEnv(*) {
         UpdateEnvDirty()
         CPApiKeysSetNotice("In-app API keys saved.")
     } catch as ex {
-        try if FileExist(tmp) FileDelete(tmp)
+        try if (tmp != "" && FileExist(tmp))
+            FileDelete(tmp)
         CPAdaptiveOwnedMessage(CPDialogDefaultOwner(),
             "Saving .env failed:`n" ex.Message,
             "API Keys", "ok", "error", 680)
-    }
+    } finally saving := false
+}
+
+CPReplaceApiEnvFile(temporaryPath, destinationPath) {
+    ; Same-directory rename: preserve the old file on failure, never pre-delete.
+    ; REPLACE_EXISTING | WRITE_THROUGH; no cross-volume copy fallback.
+    if !DllCall("kernel32\MoveFileExW", "str", temporaryPath,
+        "str", destinationPath, "uint", 0x1 | 0x8, "int")
+        throw OSError(A_LastError, "MoveFileExW")
 }
 
 ; Delete .env (and keep toggle OFF)
@@ -37551,7 +37870,7 @@ if !CP_BACKGROUND_START {
 ; A normal first launch presents the compact setup guide. Background launches
 ; from LaunchBox/Big Box remain completely silent and hidden.
 if (!CP_BACKGROUND_START && !CPBigBoxPresentationRequested()
- && !Integer(IniRead(iniPath, "cfg_control", "welcomeGuideDismissed", 0)))
+ && !ReadIniInt(iniPath, "cfg_control", "welcomeGuideDismissed", 0))
     SetTimer(ShowWelcomeDialog.Bind(false), -350)
 
 ; =========================
@@ -38102,7 +38421,14 @@ CPMeasureWrappedTextHeight(ctrl, width) {
 }
 
 ResizeUI(gui, minMax, w, h){
-    return CPDesktopLayout(gui, minMax, w, h)
+    global CPPanelInteractiveResize
+    if minMax = -1 || !CPDesktopActive()
+        return
+    if CPPanelInteractiveResize
+        return CPDesktopLiveResize()
+    ; Read current dimensions: delayed Size events must never put the footer
+    ; back at an old height. Relayout also settles native scrollbar changes.
+    return CPDesktopRelayout()
 }
 
 ; Every desktop page creates and owns its controls through its descriptor map.
@@ -38198,6 +38524,81 @@ CPDesktopRegisterInputField(page, key, ctrl, viewName := "") {
     return ctrl
 }
 
+; Keep the native checkbox and UpDown input semantics, but replace the two
+; remaining bright Windows frames with the same restrained desktop palette as
+; the app's rounded fields and buttons.
+CPDesktopPrepareNativePaint(ctrl, kind) {
+    global CPDesktopNativePaintHwnds, CPDesktopNativePaintCallback
+    if !IsObject(ctrl) || !ctrl.Hwnd || CPDesktopNativePaintHwnds.Has(ctrl.Hwnd)
+        return false
+    if !CPDesktopNativePaintCallback
+        CPDesktopNativePaintCallback := CallbackCreate(CPDesktopNativePaintWindowProc, "", 4)
+    originalProc := DllCall("user32\SetWindowLongPtr", "ptr", ctrl.Hwnd,
+        "int", -4, "ptr", CPDesktopNativePaintCallback, "ptr")
+    if !originalProc
+        return false
+    CPDesktopNativePaintHwnds[ctrl.Hwnd] := Map("proc", originalProc, "kind", kind)
+    DllCall("user32\InvalidateRect", "ptr", ctrl.Hwnd, "ptr", 0, "int", 1)
+    return true
+}
+
+CPDesktopPrepareNativeControls() {
+    global ui, CPDesktop, udFSize, udFSize_EW
+    for ctrl in ui {
+        if ctrl.Type = "CheckBox" && CPDesktop["surfaces"].Has(ctrl.Hwnd)
+            CPDesktopPrepareNativePaint(ctrl, "checkbox")
+    }
+    for spinner in [udFSize, udFSize_EW]
+        CPDesktopPrepareNativePaint(spinner, "spinner")
+}
+
+CPDesktopNativePaintWindowProc(hwnd, msg, wParam, lParam) {
+    global CPDesktopNativePaintHwnds
+    mapReady := IsSet(CPDesktopNativePaintHwnds) && IsObject(CPDesktopNativePaintHwnds)
+    info := mapReady && CPDesktopNativePaintHwnds.Has(hwnd)
+        ? CPDesktopNativePaintHwnds[hwnd] : 0
+    originalProc := IsObject(info) ? info.Get("proc", 0) : 0
+
+    if IsObject(info) && msg = 0x000F { ; WM_PAINT
+        paint := Buffer(A_PtrSize = 8 ? 72 : 64, 0)
+        dc := DllCall("user32\BeginPaint", "ptr", hwnd, "ptr", paint, "ptr")
+        try {
+            if info["kind"] = "checkbox"
+                CPDesktopPaintCheckBox(hwnd, dc)
+            else
+                CPDesktopPaintSpinner(hwnd, dc)
+        } finally {
+            DllCall("user32\EndPaint", "ptr", hwnd, "ptr", paint)
+        }
+        return 0
+    }
+    if IsObject(info) && (msg = 0x0317 || msg = 0x0318) { ; WM_PRINT / WM_PRINTCLIENT
+        if wParam {
+            if info["kind"] = "checkbox"
+                CPDesktopPaintCheckBox(hwnd, wParam)
+            else
+                CPDesktopPaintSpinner(hwnd, wParam)
+        }
+        return 0
+    }
+    if IsObject(info) && msg = 0x0014 ; WM_ERASEBKGND
+        return 1
+
+    result := originalProc
+        ? DllCall("user32\CallWindowProcW", "ptr", originalProc,
+            "ptr", hwnd, "uint", msg, "uptr", wParam, "ptr", lParam, "ptr")
+        : DllCall("user32\DefWindowProcW", "ptr", hwnd,
+            "uint", msg, "uptr", wParam, "ptr", lParam, "ptr")
+    ; Native checkbox state/focus and UpDown presses change after their original
+    ; procedure runs. Repaint the custom face with that resulting state.
+    if IsObject(info) && (msg = 0x0007 || msg = 0x0008 || msg = 0x000A
+        || msg = 0x00F1 || msg = 0x0101 || msg = 0x0202)
+        DllCall("user32\InvalidateRect", "ptr", hwnd, "ptr", 0, "int", 0)
+    if msg = 0x0082 && mapReady && CPDesktopNativePaintHwnds.Has(hwnd)
+        CPDesktopNativePaintHwnds.Delete(hwnd)
+    return result
+}
+
 CPDesktopInputFieldFocus(ctrl, focused, *) {
     global CPDesktop, ui
     if !(IsSet(CPDesktop) && CPDesktop.Has("inputFrames")
@@ -38216,6 +38617,22 @@ CPDesktopInputFieldFocus(ctrl, focused, *) {
         DllCall("user32\RedrawWindow", "ptr", ui.Hwnd, "ptr", rect.Ptr, "ptr", 0,
             "uint", 0x0001 | 0x0004 | 0x0080 | 0x0100) ; invalidate/erase/all children/update
     }
+}
+
+CPDesktopPlaceNumberField(ctrl, spinner, x, y, w, h, shown := true) {
+    global CPDesktop
+    if !(CPDesktop.Has("inputFrames") && CPDesktop["inputFrames"].Has(ctrl.Hwnd)) {
+        CPDesktopPlace(ctrl, x, y, w, h, shown)
+        CPDesktopPlace(spinner, x + w - 18, y, 18, h, shown)
+        return
+    }
+    frame := CPDesktop["inputFrames"][ctrl.Hwnd]
+    CPDesktopPlace(frame, x, y, w, h, shown)
+    ; Leave the app-painted outer border visible and reserve a small gap before
+    ; the integrated stepper. The native Edit still owns text selection/input.
+    spinnerW := 19
+    CPDesktopPlace(ctrl, x + 8, y + 3, Max(1, w - spinnerW - 14), Max(1, h - 6), shown)
+    CPDesktopPlace(spinner, x + w - spinnerW - 2, y + 2, spinnerW, Max(1, h - 4), shown)
 }
 
 CPDesktopSetControlGroupVisible(controls, visible) {
@@ -38306,11 +38723,11 @@ CPDesktopCreateScreenshotPage() {
 
     chkGuess := CPDesktopPageRegisterControl(1, "highlightGuessed",
         ui.AddCheckbox("x0 y0 w300 h26 Hidden", "Highlight guessed subjects"), "panel")
-    chkGuess.Value := Integer(IniRead(iniPath, "cfg", "highlightGuessed", 1)) ? 1 : 0
+    chkGuess.Value := ReadIniInt(iniPath, "cfg", "highlightGuessed", 1) ? 1 : 0
     chkGuess.OnEvent("Click", CPScreenshotPreferenceChanged.Bind("highlight"))
     chkName := CPDesktopPageRegisterControl(1, "speakerColor",
         ui.AddCheckbox("x0 y0 w300 h26 Hidden", "Use speaker name color"), "panel")
-    chkName.Value := Integer(IniRead(iniPath, "cfg", "colorSpeaker", 1)) ? 1 : 0
+    chkName.Value := ReadIniInt(iniPath, "cfg", "colorSpeaker", 1) ? 1 : 0
     chkName.OnEvent("Click", CPScreenshotPreferenceChanged.Bind("speakerColor"))
 
     shot["advanced"] := CPDesktopPageRegisterControl(1, "advanced",
@@ -38318,11 +38735,11 @@ CPDesktopCreateScreenshotPage() {
     shot["advanced"].OnEvent("Click", CPDesktopToggleAdvanced)
     chkOpenTW := CPDesktopPageRegisterControl(1, "openTranslatorStartup",
         ui.AddCheckbox("x0 y0 w300 h26 Hidden", "Open Translator on startup"), "panel")
-    chkOpenTW.Value := Integer(IniRead(iniPath, "cfg", "openTranslatorOnLaunch", 0)) ? 1 : 0
+    chkOpenTW.Value := ReadIniInt(iniPath, "cfg", "openTranslatorOnLaunch", 0) ? 1 : 0
     chkOpenTW.OnEvent("Click", CPScreenshotPreferenceChanged.Bind("openOnStartup"))
     chkTop_TW := CPDesktopPageRegisterControl(1, "translatorAlwaysTop",
         ui.AddCheckbox("x0 y0 w300 h26 Hidden", "Translator always on top"), "panel")
-    chkTop_TW.Value := Integer(IniRead(iniPath, "cfg", "winTop", 1)) ? 1 : 0
+    chkTop_TW.Value := ReadIniInt(iniPath, "cfg", "winTop", 1) ? 1 : 0
     chkTop_TW.OnEvent("Click", CPScreenshotPreferenceChanged.Bind("alwaysOnTop"))
     chkDel := CPDesktopPageRegisterControl(1, "clearStartup",
         ui.AddCheckbox("x0 y0 w300 h26 Hidden", "Clear captures on startup"), "panel")
@@ -38461,6 +38878,7 @@ CPDesktopCreate() {
     OnMessage(0x2A3, CPDesktopCaptionLeave)
     CPDesktopLoadLogo()
     CPDesktop["ready"] := true
+    CPDesktopPrepareNativeControls()
     CPDesktopRefreshProfileSelector(true)
     CPDesktopSyncBindingConflicts(Hotkeys_FindConflicts())
     CPDesktopApplyFrame()
@@ -38475,15 +38893,16 @@ CPDesktopRelayout(*) {
     if !CPDesktopActive()
         return
     ui.GetClientPos(,, &w, &h)
-    if w > 0 && h > 0 {
+    ; One native scrollbar can require the other one too. Allow both to settle
+    ; before anchoring the footer, including when shrinking at high DPI.
+    Loop 3 {
+        if w <= 0 || h <= 0
+            break
         CPDesktopLayout(ui, 0, w, h)
-        ; A page transition can add or remove native scrollbars, changing the
-        ; usable client size after the first measurement. Settle once at the
-        ; size Windows actually exposes so high-DPI layouts do not retain a
-        ; narrow strip of stale pre-scrollbar geometry.
         ui.GetClientPos(,, &settledW, &settledH)
-        if settledW > 0 && settledH > 0 && (settledW != w || settledH != h)
-            CPDesktopLayout(ui, 0, settledW, settledH)
+        if settledW = w && settledH = h
+            break
+        w := settledW, h := settledH
     }
 }
 
@@ -38954,9 +39373,9 @@ CPDesktopCreateControlsPage() {
     Hotkeys_ShowConflicts()
     CPControllerLoadBindings()
     CPSetControlsView(IniRead(iniPath, "controller_inputs", "view", "keyboard"), false)
-    CPControllerSetEnabled(Integer(IniRead(iniPath, "controller_inputs", "enabled", 0)) != 0, false)
+    CPControllerSetEnabled(ReadIniInt(iniPath, "controller_inputs", "enabled", 0) != 0, false)
     CPControllerSetDpadNavigationEnabled(
-        Integer(IniRead(iniPath, "controller_inputs", "dpad_navigation", 1)) != 0, false)
+        ReadIniInt(iniPath, "controller_inputs", "dpad_navigation", 1) != 0, false)
 }
 
 CPDesktopCreateApiKeysPage() {
@@ -39494,15 +39913,15 @@ CPDesktopCreateExplanationPage() {
     ; Preserve the existing archive migration while making the modern page the
     ; sole owner of the controls which display and persist these preferences.
     saveExplRaw := IniRead(iniPath, "cfg", "saveExplains", "__missing__")
-    saveExplVal := (saveExplRaw = "__missing__") ? 0 : Integer(saveExplRaw)
+    saveExplVal := ReadIniInt(iniPath, "cfg", "saveExplains", 0)
     saveLibraryRaw := IniRead(iniPath, "cfg", "saveStudyLibrary", "__missing__")
     if (saveLibraryRaw = "__missing__") {
         saveLibraryVal := (saveExplRaw = "__missing__") ? 1 : saveExplVal
         IniWrite(saveLibraryVal, iniPath, "cfg", "saveStudyLibrary")
     } else {
-        saveLibraryVal := Integer(saveLibraryRaw)
+        saveLibraryVal := ReadIniInt(iniPath, "cfg", "saveStudyLibrary", 1)
     }
-    saveLibraryScreenshotsVal := Integer(IniRead(iniPath, "cfg", "studyLibraryScreenshots", 1))
+    saveLibraryScreenshotsVal := ReadIniInt(iniPath, "cfg", "studyLibraryScreenshots", 1)
     saveLibraryChk := CPDesktopPageRegisterControl(4, "saveLibrary",
         ui.AddCheckbox("x0 y0 w360 h26 Hidden", "Save to Study Library"), "panel")
     saveLibraryChk.Value := saveLibraryVal ? 1 : 0
@@ -39515,10 +39934,10 @@ CPDesktopCreateExplanationPage() {
     saveExplChk.Value := saveExplVal ? 1 : 0
     chkOpenEW := CPDesktopPageRegisterControl(4, "openExplainerStartup",
         ui.AddCheckbox("x0 y0 w320 h26 Hidden", "Open Explainer on startup"), "panel")
-    chkOpenEW.Value := Integer(IniRead(iniPath, "cfg", "openExplainerOnLaunch", 0)) ? 1 : 0
+    chkOpenEW.Value := ReadIniInt(iniPath, "cfg", "openExplainerOnLaunch", 0) ? 1 : 0
     chkTop_EW := CPDesktopPageRegisterControl(4, "explainerAlwaysTop",
         ui.AddCheckbox("x0 y0 w320 h26 Hidden", "Explainer always on top"), "panel")
-    chkTop_EW.Value := Integer(IniRead(iniPath, "cfg_explainer", "winTop", 0)) ? 1 : 0
+    chkTop_EW.Value := ReadIniInt(iniPath, "cfg_explainer", "winTop", 0) ? 1 : 0
 
     for key in ["aiPanel", "actionPanel", "savingPanel"] {
         expPage[key] := CPDesktopPageRegisterControl(4, key,
@@ -39700,6 +40119,7 @@ CPDesktopCreateOverlayPages() {
                 ui.AddEdit("x0 y0 w78 h30 Hidden Number", fontSize), "field")
             udFSize := CPDesktopPageRegisterControl(page, "fontSizeSpinner",
                 ui.AddUpDown("Range6-128", fontSize))
+            CPDesktopRegisterInputField(page, "fontSize", edFSize)
             txtFontSizeHint := CPDesktopPageRegisterControl(page, "fontSizeHint",
                 ui.AddText("x0 y0 w36 h30 Hidden Center Border +0x200", "A"), "panel")
             chkFontBold := CPDesktopPageRegisterControl(page, "bold",
@@ -39721,6 +40141,7 @@ CPDesktopCreateOverlayPages() {
                 ui.AddEdit("x0 y0 w78 h30 Hidden Number", fontSize_EW), "field")
             udFSize_EW := CPDesktopPageRegisterControl(page, "fontSizeSpinner",
                 ui.AddUpDown("Range6-200", fontSize_EW))
+            CPDesktopRegisterInputField(page, "fontSize", edFSize_EW)
             txtFontSizeHint_EW := CPDesktopPageRegisterControl(page, "fontSizeHint",
                 ui.AddText("x0 y0 w36 h30 Hidden Center Border +0x200", "A"), "panel")
             chkFontBold_EW := CPDesktopPageRegisterControl(page, "bold",
@@ -39836,8 +40257,8 @@ CPDesktopLayoutOverlay(page, w) {
     CPDesktopPlace(overlayPage["font"], x, typeY + 54, fontW, 22)
     CPDesktopPlace(bindings["font"], x, typeY + 78, fontW, 30)
     CPDesktopPlace(overlayPage["size"], sizeX, typeY + 54, 120, 22)
-    CPDesktopPlace(bindings["size"], sizeX, typeY + 78, 78, 30)
-    CPDesktopPlace(bindings["spinner"], sizeX + 60, typeY + 78, 18, 30)
+    CPDesktopPlaceNumberField(bindings["size"], bindings["spinner"],
+        sizeX, typeY + 78, 78, 30)
     CPDesktopPlace(bindings["sizeHint"], sizeX + 84, typeY + 78, 36, 30, false)
     CPDesktopPlace(bindings["bold"], sizeX + 132, typeY + 80, 128, 26)
     CPDesktopPlace(overlayPage["typeHelp"], x, typeY + 122, contentW, 22)
@@ -40024,6 +40445,116 @@ CPDesktopLayoutComboEdit(hwnd) {
     DllCall("user32\SetWindowPos", "ptr", editHwnd, "ptr", 0, "int", Round(11 * scale),
         "int", Max(1, Floor((h - editH) / 2)), "int", Max(1, w - Round(43 * scale)),
         "int", Max(1, editH), "uint", 0x14)
+}
+
+CPDesktopPaintCheckBox(hwnd, dc) {
+    global CPDesktop
+    if !dc
+        return false
+    colors := CPDesktopPalette(), scale := GetWindowDPI(hwnd) / 96
+    rect := Buffer(16, 0)
+    DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", rect)
+    w := NumGet(rect, 8, "int"), h := NumGet(rect, 12, "int")
+    surfaceKey := CPDesktop["surfaces"].Get(hwnd, "panel")
+    surface := colors.Get(surfaceKey, colors["panel"])
+    DllCall("user32\FillRect", "ptr", dc, "ptr", rect, "ptr", CPDesktopBrush(surface))
+
+    enabled := DllCall("user32\IsWindowEnabled", "ptr", hwnd, "int")
+    focused := DllCall("user32\GetFocus", "ptr") = hwnd
+    checkState := SendMessage(0x00F0, 0, 0, hwnd) ; BM_GETCHECK
+    boxSize := Max(13, Round(15 * scale))
+    boxLeft := Max(1, Round(scale)), boxTop := Floor((h - boxSize) / 2)
+    boxRight := boxLeft + boxSize, boxBottom := boxTop + boxSize
+    border := colors[focused ? "link" : "border"]
+    fill := checkState ? colors["accent"] : colors["field"]
+    if !enabled
+        fill := colors["field"]
+    penWidth := focused ? Max(1, Round(2 * scale)) : Max(1, Round(scale))
+    pen := DllCall("gdi32\CreatePen", "int", 0, "int", penWidth,
+        "uint", CPColorRef(border), "ptr")
+    oldPen := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", pen, "ptr")
+    oldBrush := DllCall("gdi32\SelectObject", "ptr", dc,
+        "ptr", CPDesktopBrush(fill), "ptr")
+    DllCall("gdi32\RoundRect", "ptr", dc, "int", boxLeft, "int", boxTop,
+        "int", boxRight + 1, "int", boxBottom + 1,
+        "int", Round(4 * scale), "int", Round(4 * scale))
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldPen)
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldBrush)
+    DllCall("gdi32\DeleteObject", "ptr", pen)
+
+    if checkState && enabled {
+        markPen := DllCall("gdi32\CreatePen", "int", 0, "int", Max(2, Round(2 * scale)),
+            "uint", CPColorRef("FFFFFF"), "ptr")
+        oldPen := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", markPen, "ptr")
+        if checkState = 2 { ; BST_INDETERMINATE
+            markY := Round((boxTop + boxBottom) / 2)
+            DllCall("gdi32\MoveToEx", "ptr", dc, "int", boxLeft + Round(4 * scale),
+                "int", markY, "ptr", 0)
+            DllCall("gdi32\LineTo", "ptr", dc, "int", boxRight - Round(3 * scale), "int", markY)
+        } else {
+            DllCall("gdi32\MoveToEx", "ptr", dc, "int", boxLeft + Round(3 * scale),
+                "int", boxTop + Round(8 * scale), "ptr", 0)
+            DllCall("gdi32\LineTo", "ptr", dc, "int", boxLeft + Round(6 * scale),
+                "int", boxTop + Round(11 * scale))
+            DllCall("gdi32\LineTo", "ptr", dc, "int", boxLeft + Round(12 * scale),
+                "int", boxTop + Round(4 * scale))
+        }
+        DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldPen)
+        DllCall("gdi32\DeleteObject", "ptr", markPen)
+    }
+
+    textRect := Buffer(16, 0)
+    NumPut("int", boxRight + Round(8 * scale), "int", 0, "int", w, "int", h, textRect)
+    font := SendMessage(0x0031, 0, 0, hwnd)
+    oldFont := font ? DllCall("gdi32\SelectObject", "ptr", dc, "ptr", font, "ptr") : 0
+    DllCall("gdi32\SetBkMode", "ptr", dc, "int", 1)
+    DllCall("gdi32\SetTextColor", "ptr", dc,
+        "uint", CPColorRef(colors[enabled ? "text" : "muted"]))
+    text := ""
+    try text := StrReplace(GuiCtrlFromHwnd(hwnd).Text, "&&", "&")
+    DllCall("user32\DrawTextW", "ptr", dc, "wstr", text, "int", -1,
+        "ptr", textRect, "uint", 0x20 | 0x4 | 0x800 | 0x8000)
+    if oldFont
+        DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldFont)
+    return true
+}
+
+CPDesktopPaintSpinner(hwnd, dc) {
+    if !dc
+        return false
+    colors := CPDesktopPalette(), scale := GetWindowDPI(hwnd) / 96
+    rect := Buffer(16, 0)
+    DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", rect)
+    w := NumGet(rect, 8, "int"), h := NumGet(rect, 12, "int")
+    DllCall("user32\FillRect", "ptr", dc, "ptr", rect,
+        "ptr", CPDesktopBrush(colors["field"]))
+    enabled := DllCall("user32\IsWindowEnabled", "ptr", hwnd, "int")
+    lineColor := colors[enabled ? "border" : "muted"]
+    pen := DllCall("gdi32\CreatePen", "int", 0, "int", Max(1, Round(scale)),
+        "uint", CPColorRef(lineColor), "ptr")
+    oldPen := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", pen, "ptr")
+    middle := Floor(h / 2)
+    DllCall("gdi32\MoveToEx", "ptr", dc, "int", 0, "int", 0, "ptr", 0)
+    DllCall("gdi32\LineTo", "ptr", dc, "int", 0, "int", h)
+    DllCall("gdi32\MoveToEx", "ptr", dc, "int", 0, "int", middle, "ptr", 0)
+    DllCall("gdi32\LineTo", "ptr", dc, "int", w, "int", middle)
+    arrowPen := DllCall("gdi32\CreatePen", "int", 0, "int", Max(1, Round(scale)),
+        "uint", CPColorRef(colors[enabled ? "muted" : "border"]), "ptr")
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", arrowPen)
+    centerX := Floor(w / 2), delta := Max(2, Round(3 * scale))
+    upperY := Floor(middle / 2), lowerY := middle + Floor((h - middle) / 2)
+    DllCall("gdi32\MoveToEx", "ptr", dc, "int", centerX - delta,
+        "int", upperY + Round(2 * scale), "ptr", 0)
+    DllCall("gdi32\LineTo", "ptr", dc, "int", centerX, "int", upperY - Round(scale))
+    DllCall("gdi32\LineTo", "ptr", dc, "int", centerX + delta, "int", upperY + Round(2 * scale))
+    DllCall("gdi32\MoveToEx", "ptr", dc, "int", centerX - delta,
+        "int", lowerY - Round(2 * scale), "ptr", 0)
+    DllCall("gdi32\LineTo", "ptr", dc, "int", centerX, "int", lowerY + Round(scale))
+    DllCall("gdi32\LineTo", "ptr", dc, "int", centerX + delta, "int", lowerY - Round(2 * scale))
+    DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldPen)
+    DllCall("gdi32\DeleteObject", "ptr", pen)
+    DllCall("gdi32\DeleteObject", "ptr", arrowPen)
+    return true
 }
 
 CPDesktopPaintCombo(hwnd, dc) {
@@ -41683,21 +42214,30 @@ SaveExplainerBoundsIfChanged() {
     }
 
     x := 0, y := 0, w := 0, h := 0
-    try WinGetPos &x, &y, &w, &h, "ahk_id " hwnd
-    if (x = "" || y = "" || w = "" || h = "")
+    try {
+        WinGetPos &x, &y, &w, &h, "ahk_id " hwnd
+    } catch {
+        ; The overlay can close between the timer's lookup and geometry read.
+        return
+    }
+    if (x = "" || y = "" || w = "" || h = "" || w <= 0 || h <= 0)
         return
 
-    ; first time? seed the public vars so UI shows correct data if needed
-    if (ewX = "") ewX := x
-    if (ewY = "") ewY := y
-    if (ewW = "") ewW := w
-    if (ewH = "") ewH := h
+    ; Keep assignments on their own lines: AHK v2 otherwise parses them as
+    ; part of the condition and can skip the following `changed` assignment.
+    if (ewX = "")
+        ewX := x
+    if (ewY = "")
+        ewY := y
+    if (ewW = "")
+        ewW := w
+    if (ewH = "")
+        ewH := h
 
     changed := (x != ew_lastX) || (y != ew_lastY) || (w != ew_lastW) || (h != ew_lastH)
     if !changed
         return
 
-    ew_lastX := x, ew_lastY := y, ew_lastW := w, ew_lastH := h
     ewX := x, ewY := y, ewW := w, ewH := h
 
     try {
@@ -41705,6 +42245,9 @@ SaveExplainerBoundsIfChanged() {
         IniWrite(y, iniPath, "explainer_bounds", "y")
         IniWrite(w, iniPath, "explainer_bounds", "w")
         IniWrite(h, iniPath, "explainer_bounds", "h")
+        ; Only mark a snapshot saved after all four writes succeed, so a
+        ; transient/partial write failure is retried by the next timer tick.
+        ew_lastX := x, ew_lastY := y, ew_lastW := w, ew_lastH := h
     }
 }
 

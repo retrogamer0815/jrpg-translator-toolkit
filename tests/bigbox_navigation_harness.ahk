@@ -86,6 +86,7 @@ global TestAudioApiConfigured := true, TestAudioRecoveryScans := 0
 global TestAudioBusyProbe := Map("active", false, "samples", [])
 global TestToasts := []
 global gPidAudio := 0, gJustStoppedUntil := 0, gLastAction := ""
+global gAudioProcess := 0
 global gAudioSessionFile := A_ScriptDir "\audio-session.pid"
 global speakerName := "[Windows Default]", gAudioInputJob := Map("active", false), gAudioInputStatus := "Not tested."
 global TestLiveAudioRunning := false
@@ -1774,7 +1775,8 @@ TestBigBoxAudioStartup() {
         DllCall("kernel32\TerminateProcess", "ptr", childHandle, "uint", 0)
         DllCall("kernel32\WaitForSingleObject", "ptr", childHandle, "uint", 1000)
         DllCall("kernel32\CloseHandle", "ptr", childHandle)
-        childHandle := 0, gPidAudio := 0
+        childHandle := 0
+        AudioSetProcess()
         EnvSet("JRPG_TEST_AUDIO_RUNTIME_MODE", "exit")
         earlyStartResult := StartAudioCore(true)
         TestAssert(!earlyStartResult && InStr(CPBigBoxActionNotice, "exited during startup"),
@@ -1791,7 +1793,8 @@ TestBigBoxAudioStartup() {
             DllCall("kernel32\TerminateProcess", "ptr", childHandle, "uint", 0)
             DllCall("kernel32\CloseHandle", "ptr", childHandle)
         }
-        gPidAudio := 0, pythonExe := savedPython, audioScript := savedScript, TestAudioApiConfigured := true
+        AudioSetProcess()
+        pythonExe := savedPython, audioScript := savedScript, TestAudioApiConfigured := true
         for key, value in savedEnvironment
             EnvSet(key, value)
     }
@@ -3318,11 +3321,12 @@ TestHomeHeaderContent() {
     TestAssert(CPBigBoxControls["modeBody"].Text = CPBigBoxActionNotice,
         "Contextual Home hints retain audio action feedback on its tile")
     CPBigBoxUpdateHomeHint("translation")
-    TestAssert(InStr(CPBigBoxControls["modeBody"].Text, "Prompt: default"),
-        "Moving to an AI tile reveals its details even after audio feedback")
+    TestAssert(InStr(CPBigBoxControls["modeBody"].Text, "captured game text")
+        && InStr(CPBigBoxControls["modeBody"].Text, "next translation"),
+        "Moving to an AI tile reveals its purpose even after audio feedback")
     CPBigBoxActionNotice := ""
-    for key, expected in Map("translation", "Prompt: default", "explanation", "OpenAI · gpt-test",
-        "audioAI", "Language: English", "audioToggle", "off. Select to start.",
+    for key, expected in Map("translation", "captured game text", "explanation", "study-focused explanations",
+        "audioAI", "spoken dialogue", "audioToggle", "off. Select to start.",
         "study", "Active library:", "controls", "keyboard shortcuts") {
         CPBigBoxUpdateHomeHint(key)
         TestAssert(InStr(CPBigBoxControls["modeBody"].Text, expected), "Home contextual help: " key)
@@ -3354,9 +3358,10 @@ TestHomeHeaderLongNames(width, height) {
             && CPBigBoxControls["status_audio_model"].Text = "OpenAI · audio-test"
             && CPBigBoxControls["status_audio_detail"].Text = "Language: German",
             "Header refresh follows all three providers, explanation prompt and audio language")
-        TestAssert(InStr(CPBigBoxControls["modeBody"].Text, imgModel)
-            && InStr(CPBigBoxControls["modeBody"].Text, promptProfile),
-            "Focused Home action exposes full long model and prompt names")
+        TestAssert(InStr(CPBigBoxControls["modeBody"].Text, "captured game text")
+            && !InStr(CPBigBoxControls["modeBody"].Text, imgModel)
+            && !InStr(CPBigBoxControls["modeBody"].Text, promptProfile),
+            "Focused Home action explains its purpose while the header carries AI details")
         TestLayout(width, height)
         TestCapture("home-long-names-" width ".png", width, height)
     } finally {
@@ -3675,8 +3680,8 @@ CPModelCatalogJobCancel(*) {
     TestCatalogCallback := 0
 }
 AudioIsRunning(*) {
-    global TestLiveAudioRunning, gPidAudio
-    if gPidAudio && ProcessExist(gPidAudio)
+    global TestLiveAudioRunning, gAudioProcess
+    if AudioProcessAlive(gAudioProcess)
         return true
     return TestLiveAudioRunning
 }
@@ -3703,7 +3708,7 @@ Toast(message) {
     TestToasts.Push(message)
 }
 FilterPythonStderr(text) => text
-AudioPidsByScript() {
+AudioProcessesByScript() {
     global TestAudioRecoveryScans
     TestAudioRecoveryScans += 1
     return []

@@ -127,7 +127,7 @@ def write_rows(path: Path, rows: Iterable[Iterable[object]]) -> None:
 
 def connect_read_only(database: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(
-        f"file:{database.resolve().as_posix()}?mode=ro", uri=True, timeout=10
+        f"{database.resolve().as_uri()}?mode=ro", uri=True, timeout=10
     )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only = ON")
@@ -922,6 +922,7 @@ def generate_recommendations(
 ) -> int:
     status_path = output_dir / "candidate_recommendation_status.tsv"
     error_path = output_dir / "candidate_recommendation_error.txt"
+    results: dict[str, tuple[bool, int, str]] = {}
     for path in (status_path, error_path):
         try:
             path.unlink()
@@ -1013,6 +1014,19 @@ def generate_recommendations(
             unique_pending.setdefault(item["id"], item)
         pending = list(unique_pending.values())
 
+        ensure_triage_schema(preferences_database)
+        if not force:
+            # A retry can reuse an older UI snapshot. Trust the durable cache,
+            # not just that snapshot's unassessed flags.
+            connection = connect_write(preferences_database)
+            try:
+                cached_ids = {row[0] for row in connection.execute(
+                    f"SELECT candidate_hash FROM {RECOMMENDATION_TABLE}"
+                )}
+            finally:
+                connection.close()
+            pending = [item for item in pending if item["id"] not in cached_ids]
+
         if not pending:
             write_rows(
                 status_path,
@@ -1021,12 +1035,11 @@ def generate_recommendations(
             )
             return 0
 
-        ensure_triage_schema(preferences_database)
-        valid_ids = {item["id"] for item in pending}
-        results: dict[str, tuple[bool, int, str]] = {}
         batch_size = 36
         for start in range(0, len(pending), batch_size):
             batch = pending[start : start + batch_size]
+            valid_ids = {item["id"] for item in batch}
+            batch_results: dict[str, tuple[bool, int, str]] = {}
             raw = call_model(
                 provider,
                 model,
@@ -1054,35 +1067,35 @@ def generate_recommendations(
                 except (TypeError, ValueError):
                     score = 1
                 reason = " ".join(str(item.get("reason", "")).split())[:260]
-                results[item_id] = (
+                batch_results[item_id] = (
                     _recommendation_bool(item.get("recommended")), score, reason
                 )
-
-        now = datetime.now().astimezone().isoformat(timespec="microseconds")
-        connection = connect_write(preferences_database)
-        try:
-            for item in pending:
-                item_id = item["id"]
-                if item_id not in results:
-                    continue
-                recommended, score, reason = results[item_id]
-                connection.execute(
-                    f"INSERT INTO {RECOMMENDATION_TABLE} "
-                    "(candidate_hash, candidate_kind, recommended, score, reason, "
-                    "provider, model, generated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(candidate_hash) DO UPDATE SET "
-                    "candidate_kind = excluded.candidate_kind, "
-                    "recommended = excluded.recommended, score = excluded.score, "
-                    "reason = excluded.reason, provider = excluded.provider, "
-                    "model = excluded.model, generated_at = excluded.generated_at",
-                    (
-                        item_id, item["kind"], int(recommended), score, reason,
-                        provider, model, now,
-                    ),
-                )
-            connection.commit()
-        finally:
-            connection.close()
+            # Commit each paid batch before starting another request. Cancellation
+            # or a later request failure must not discard completed assessments.
+            now = datetime.now().astimezone().isoformat(timespec="microseconds")
+            connection = connect_write(preferences_database)
+            try:
+                for item in batch:
+                    item_id = item["id"]
+                    if item_id not in batch_results:
+                        continue
+                    recommended, score, reason = batch_results[item_id]
+                    connection.execute(
+                        f"INSERT INTO {RECOMMENDATION_TABLE} "
+                        "(candidate_hash, candidate_kind, recommended, score, reason, "
+                        "provider, model, generated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT(candidate_hash) DO UPDATE SET "
+                        "candidate_kind = excluded.candidate_kind, "
+                        "recommended = excluded.recommended, score = excluded.score, "
+                        "reason = excluded.reason, provider = excluded.provider, "
+                        "model = excluded.model, generated_at = excluded.generated_at",
+                        (item_id, item["kind"], int(recommended), score, reason,
+                         provider, model, now),
+                    )
+                connection.commit()
+            finally:
+                connection.close()
+            results.update(batch_results)
 
         assessed = len(results)
         recommended_count = sum(1 for value in results.values() if value[0])
@@ -1102,7 +1115,12 @@ def generate_recommendations(
         )
         return 0
     except Exception as exc:
-        write_text(error_path, str(exc))
+        progress = (
+            f"{len(results)} completed assessments were saved. "
+            "Retry without forcing reassessment to resume the remaining candidates. "
+            if results else ""
+        )
+        write_text(error_path, progress + str(exc))
         return 2
 
 

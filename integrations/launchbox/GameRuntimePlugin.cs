@@ -143,7 +143,6 @@ namespace JrpgTranslator.LaunchBox
 
         public static void StopActiveSession()
         {
-            RuntimeSession? session;
             lock (Sync)
             {
                 if (_activeSession == null)
@@ -151,14 +150,12 @@ namespace JrpgTranslator.LaunchBox
                     return;
                 }
 
-                session = _activeSession;
+                RuntimeSession session = _activeSession;
                 _activeSession = null;
+                // Serialize cleanup with a new launch; an old profile restore
+                // must not overwrite the next game's setup.
+                StopSession(session);
             }
-
-            // Do potentially slow process cleanup after releasing the coordinator
-            // lock. A repeated exit/shutdown callback will now see no active session
-            // and cannot clean up the same processes twice.
-            StopSession(session);
         }
 
         private static void StartTranslator(
@@ -175,9 +172,8 @@ namespace JrpgTranslator.LaunchBox
             }
 
             session.TranslatorExecutable = executable;
-            session.TranslatorBaseline = RuntimeProcessUtilities.GetProcessIds("JRPG Translator");
-            session.OverlayBaseline = RuntimeProcessUtilities.GetProcessIds("overlay");
-            bool translatorWasRunning = session.TranslatorBaseline.Count > 0;
+            session.ExistingTranslator = RuntimeProcessUtilities.FindRunningExecutable(executable);
+            bool translatorWasRunning = session.ExistingTranslator != null;
 
             ProcessStartInfo startInfo = new ProcessStartInfo
             {
@@ -195,22 +191,16 @@ namespace JrpgTranslator.LaunchBox
                 startInfo.ArgumentList.Add(argument);
             }
 
-            using Process? process = Process.Start(startInfo);
+            session.Translator = OwnedProcess.Start(startInfo);
             if (translatorWasRunning)
             {
-                RuntimeLog.Write(process == null
-                    ? "The running JRPG Translator could not receive the launch settings."
-                    : "The launch settings and "
+                RuntimeLog.Write("The launch settings and "
                         + (useBigBoxUi ? "Big Box" : "LaunchBox")
                         + " presentation mode were sent to the running JRPG Translator; it will be left open after the game.");
                 return;
             }
 
-            session.TranslatorStartedByPlugin = process != null;
-            session.TranslatorProcessId = process?.Id;
-            RuntimeLog.Write(process == null
-                ? "JRPG Translator could not be started."
-                : "JRPG Translator started for " + session.GameTitle
+            RuntimeLog.Write("JRPG Translator started for " + session.GameTitle
                     + (string.IsNullOrWhiteSpace(game.TranslatorProfile)
                         ? "."
                         : " with Profile '" + game.TranslatorProfile + "'.")
@@ -237,15 +227,14 @@ namespace JrpgTranslator.LaunchBox
 
             session.JoyToKeyExecutable = executable;
             session.JoyToKeyProfilesDirectory = configuration.JoyToKeyProfilesDirectory;
-            session.JoyToKeyBaseline = RuntimeProcessUtilities.GetProcessIds("JoyToKey");
-            session.JoyToKeyWasRunning = session.JoyToKeyBaseline.Count > 0;
+            session.ExistingJoyToKey = RuntimeProcessUtilities.FindRunningExecutable(executable);
+            session.JoyToKeyWasRunning = session.ExistingJoyToKey != null;
             session.PreviousJoyToKeyProfile = RuntimeProcessUtilities.ReadJoyToKeyActiveProfile(
                 configuration.JoyToKeyProfilesDirectory);
 
-            using Process? process = RuntimeProcessUtilities.StartWithSingleArgument(
+            session.JoyToKey = RuntimeProcessUtilities.StartOwnedWithSingleArgument(
                 executable,
                 game.JoyToKeyProfile);
-            session.JoyToKeyStartProcessId = process?.Id;
 
             RuntimeLog.Write("JoyToKey profile selected for " + session.GameTitle + ": "
                 + game.JoyToKeyProfile + ".");
@@ -270,6 +259,13 @@ namespace JrpgTranslator.LaunchBox
             {
                 RuntimeLog.Write("JRPG Translator cleanup failed: " + exception.Message);
             }
+            finally
+            {
+                session.Translator?.Dispose();
+                session.JoyToKey?.Dispose();
+                session.ExistingTranslator?.Dispose();
+                session.ExistingJoyToKey?.Dispose();
+            }
         }
 
         private static void StopJoyToKey(RuntimeSession session)
@@ -281,7 +277,8 @@ namespace JrpgTranslator.LaunchBox
 
             if (session.JoyToKeyWasRunning)
             {
-                if (!string.IsNullOrWhiteSpace(session.PreviousJoyToKeyProfile))
+                if (RuntimeProcessUtilities.IsAlive(session.ExistingJoyToKey)
+                    && !string.IsNullOrWhiteSpace(session.PreviousJoyToKeyProfile))
                 {
                     RuntimeProcessUtilities.SwitchJoyToKeyProfile(
                         session.JoyToKeyExecutable,
@@ -292,19 +289,14 @@ namespace JrpgTranslator.LaunchBox
                 return;
             }
 
-            HashSet<int> current = RuntimeProcessUtilities.GetProcessIds("JoyToKey");
-            current.ExceptWith(session.JoyToKeyBaseline);
-
-            if (current.Count > 0 && !string.IsNullOrWhiteSpace(session.PreviousJoyToKeyProfile))
+            if (session.JoyToKey != null && !session.JoyToKey.WaitForExit(0)
+                && !string.IsNullOrWhiteSpace(session.PreviousJoyToKeyProfile))
             {
                 RuntimeProcessUtilities.SwitchJoyToKeyProfile(
                     session.JoyToKeyExecutable,
                     session.PreviousJoyToKeyProfile);
-                current = RuntimeProcessUtilities.GetProcessIds("JoyToKey");
-                current.ExceptWith(session.JoyToKeyBaseline);
             }
-
-            RuntimeProcessUtilities.StopProcesses(current, "JoyToKey");
+            session.JoyToKey?.Stop();
 
             if (!string.IsNullOrWhiteSpace(session.PreviousJoyToKeyProfile))
             {
@@ -319,26 +311,13 @@ namespace JrpgTranslator.LaunchBox
 
         private static void StopTranslator(RuntimeSession session)
         {
-            if (!session.TranslatorStartedByPlugin)
+            if (RuntimeProcessUtilities.IsAlive(session.ExistingTranslator))
             {
                 RuntimeProcessUtilities.SendTranslatorGameContextClear(
-                    session.TranslatorExecutable);
-                return;
+                    session.ExistingTranslator!);
             }
-
-            HashSet<int> translatorProcesses = RuntimeProcessUtilities.GetProcessIds("JRPG Translator");
-            translatorProcesses.ExceptWith(session.TranslatorBaseline);
-            if (session.TranslatorProcessId.HasValue)
-            {
-                translatorProcesses.Add(session.TranslatorProcessId.Value);
-            }
-
-            RuntimeProcessUtilities.StopProcesses(translatorProcesses, "JRPG Translator");
-
-            HashSet<int> overlayProcesses = RuntimeProcessUtilities.GetProcessIds("overlay");
-            overlayProcesses.ExceptWith(session.OverlayBaseline);
-            RuntimeProcessUtilities.StopProcesses(overlayProcesses, "overlay");
-            RuntimeLog.Write("JRPG Translator was closed after " + session.GameTitle + ".");
+            session.Translator?.Stop();
+            RuntimeLog.Write("Plugin-owned JRPG Translator processes were closed after " + session.GameTitle + ".");
         }
     }
 
@@ -357,17 +336,15 @@ namespace JrpgTranslator.LaunchBox
         public string GameId { get; }
         public string GameTitle { get; }
         public TranslatorGameContext GameContext { get; }
-        public bool TranslatorStartedByPlugin { get; set; }
-        public int? TranslatorProcessId { get; set; }
+        public OwnedProcess? Translator { get; set; }
+        public Process? ExistingTranslator { get; set; }
         public string TranslatorExecutable { get; set; } = string.Empty;
-        public HashSet<int> TranslatorBaseline { get; set; } = new HashSet<int>();
-        public HashSet<int> OverlayBaseline { get; set; } = new HashSet<int>();
         public string JoyToKeyExecutable { get; set; } = string.Empty;
         public string JoyToKeyProfilesDirectory { get; set; } = string.Empty;
         public bool JoyToKeyWasRunning { get; set; }
-        public int? JoyToKeyStartProcessId { get; set; }
+        public OwnedProcess? JoyToKey { get; set; }
+        public Process? ExistingJoyToKey { get; set; }
         public string PreviousJoyToKeyProfile { get; set; } = string.Empty;
-        public HashSet<int> JoyToKeyBaseline { get; set; } = new HashSet<int>();
     }
 
     public sealed class TranslatorGameContext
@@ -463,33 +440,45 @@ namespace JrpgTranslator.LaunchBox
             return context;
         }
 
-        public static void SendTranslatorGameContextClear(string executable)
+        public static void SendTranslatorGameContextClear(Process existing)
         {
-            if (string.IsNullOrWhiteSpace(executable) || !File.Exists(executable))
-            {
-                return;
-            }
-
             try
             {
-                ProcessStartInfo startInfo = new ProcessStartInfo
+                if (!IsAlive(existing)) return;
+                int expectedId = existing.Id;
+                // Address only this retained process. Never launch a new app just
+                // to clear context when the original instance has already exited.
+                EnumWindows((window, _) =>
                 {
-                    FileName = executable,
-                    WorkingDirectory = Path.GetDirectoryName(executable) ?? string.Empty,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-                foreach (string argument in BuildTranslatorGameContextClearArguments())
-                {
-                    startInfo.ArgumentList.Add(argument);
-                }
-                using Process? process = Process.Start(startInfo);
+                    GetWindowThreadProcessId(window, out uint owner);
+                    if (owner != expectedId) return true;
+                    System.Text.StringBuilder title = new System.Text.StringBuilder(256);
+                    GetWindowText(window, title, title.Capacity);
+                    if (title.ToString() != "JRPG Translator") return true;
+                    string message = "game_context_clear";
+                    IntPtr data = Marshal.StringToHGlobalUni(message);
+                    try
+                    {
+                        CopyData packet = new CopyData { Size = (message.Length + 1) * 2, Data = data };
+                        SendMessageTimeout(window, 0x4A, IntPtr.Zero, ref packet, 0x2, 1000, out _);
+                    }
+                    finally { Marshal.FreeHGlobal(data); }
+                    return false;
+                }, IntPtr.Zero);
             }
             catch (Exception exception)
             {
                 RuntimeLog.Write("Running-game context could not be cleared: " + exception.Message);
             }
         }
+
+        [StructLayout(LayoutKind.Sequential)] private struct CopyData
+        { public IntPtr Kind; public int Size; public IntPtr Data; }
+        private delegate bool EnumWindowCallback(IntPtr window, IntPtr parameter);
+        [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr parameter);
+        [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, System.Text.StringBuilder title, int size);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr wparam, ref CopyData packet, uint flags, uint timeout, out IntPtr result);
 
         private static void AddArgumentPair(
             ICollection<string> arguments,
@@ -508,25 +497,31 @@ namespace JrpgTranslator.LaunchBox
                 : string.Empty;
         }
 
-        public static HashSet<int> GetProcessIds(string processName)
+        public static Process? FindRunningExecutable(string executable)
         {
-            HashSet<int> result = new HashSet<int>();
-            try
+            string expected = Path.GetFullPath(executable);
+            foreach (Process process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(expected)))
             {
-                foreach (Process process in Process.GetProcessesByName(processName))
+                try
                 {
-                    using (process)
+                    // Open/retain the actual handle before querying identity.
+                    _ = process.SafeHandle;
+                    if (!process.HasExited && string.Equals(process.MainModule?.FileName,
+                        expected, StringComparison.OrdinalIgnoreCase))
                     {
-                        result.Add(process.Id);
+                        return process;
                     }
                 }
+                catch { /* Inaccessible/exited processes are not adopted. */ }
+                process.Dispose();
             }
-            catch
-            {
-                // Process enumeration can race with process exit; a partial set is safe.
-            }
+            return null;
+        }
 
-            return result;
+        public static bool IsAlive(Process? process)
+        {
+            try { return process != null && !process.HasExited; }
+            catch { return false; }
         }
 
         public static string ReadJoyToKeyActiveProfile(string profilesDirectory)
@@ -596,23 +591,27 @@ namespace JrpgTranslator.LaunchBox
 
         public static void SwitchJoyToKeyProfile(string executable, string profile)
         {
-            using Process? process = StartWithSingleArgument(executable, profile);
-            if (process == null)
-            {
-                return;
-            }
-
-            try
-            {
-                process.WaitForExit(2000);
-            }
-            catch (InvalidOperationException)
-            {
-            }
+            // If the existing instance exits just before this command, any new
+            // instance is bounded to this short-lived job, not left running.
+            using OwnedProcess process = StartOwnedWithSingleArgument(executable, profile);
+            process.WaitForExit(2000);
 
             // Give the running instance a brief moment to process the switch
             // message before an owned instance is stopped.
             Thread.Sleep(250);
+        }
+
+        internal static OwnedProcess StartOwnedWithSingleArgument(string executable, string argument)
+        {
+            ProcessStartInfo info = new ProcessStartInfo
+            {
+                FileName = executable,
+                WorkingDirectory = Path.GetDirectoryName(executable) ?? string.Empty,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            info.ArgumentList.Add(argument);
+            return OwnedProcess.Start(info);
         }
 
         public static bool WriteJoyToKeyActiveProfile(string profilesDirectory, string profile)
@@ -632,53 +631,6 @@ namespace JrpgTranslator.LaunchBox
             return WritePrivateProfileString("LastStatus", "FileName", profile, iniFile);
         }
 
-        public static void StopProcesses(IEnumerable<int> processIds, params string[] expectedProcessNames)
-        {
-            foreach (int processId in processIds.Distinct())
-            {
-                try
-                {
-                    using (Process process = Process.GetProcessById(processId))
-                    {
-                        if (!MatchesExpectedProcessName(process, expectedProcessNames))
-                        {
-                            // PIDs can be reused after a plugin-started process exits.
-                            // Never terminate a different process that inherited the ID.
-                            RuntimeLog.Write("Skipped cleanup for reused process ID " + processId + ".");
-                            continue;
-                        }
-
-                        process.Kill(true);
-                        process.WaitForExit(1500);
-                    }
-                }
-                catch (ArgumentException)
-                {
-                    // The process already exited.
-                }
-                catch (InvalidOperationException)
-                {
-                    // The process already exited.
-                }
-                catch (System.ComponentModel.Win32Exception)
-                {
-                    // A process we do not own could not be opened; leave it alone.
-                }
-            }
-        }
-
-        private static bool MatchesExpectedProcessName(Process process, IReadOnlyCollection<string> expectedNames)
-        {
-            if (expectedNames.Count == 0)
-            {
-                return false;
-            }
-
-            string processName = process.ProcessName;
-            return expectedNames.Any(expected =>
-                !string.IsNullOrWhiteSpace(expected)
-                && string.Equals(processName, expected, StringComparison.OrdinalIgnoreCase));
-        }
     }
 
     internal static class RuntimeLog

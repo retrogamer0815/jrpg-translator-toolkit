@@ -70,7 +70,9 @@ namespace JrpgTranslator.LaunchBox
             {
                 PluginConfiguration configuration = ConfigurationStore.Load();
                 GameConfiguration game = configuration.GetGame(selectedGame.Id, selectedGame.Title).Clone();
-                GameSetupWindow dialog = new GameSetupWindow(configuration, game);
+                // Use the selected game's front cover, just like the full-screen
+                // dashboard; setup does not depend on a currently running game.
+                GameSetupWindow dialog = new GameSetupWindow(configuration, game, GetCoverArtPath(selectedGame));
 
                 if (Application.Current?.MainWindow != null
                     && Application.Current.MainWindow != dialog
@@ -93,6 +95,12 @@ namespace JrpgTranslator.LaunchBox
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
             }
+        }
+
+        private static string? GetCoverArtPath(IGame selectedGame)
+        {
+            try { return selectedGame.FrontImagePath; }
+            catch { return null; } // Artwork lookup must not block game setup.
         }
 
         public void OnSelected(IGame[] selectedGames)

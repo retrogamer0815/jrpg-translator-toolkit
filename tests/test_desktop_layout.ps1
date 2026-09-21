@@ -2,12 +2,14 @@ param(
     [switch]$StudyOnly,
     [switch]$DialogsOnly,
     [switch]$ShutdownOnly,
+    [switch]$ResizeOnly,
+    [switch]$AudioFeedbackOnly,
     [string]$AutoHotkey = 'C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe',
     [string]$OutputDirectory = (Join-Path ([IO.Path]::GetTempPath()) ('jrpg-desktop-tests-' + [Guid]::NewGuid().ToString('N')))
 )
 $ErrorActionPreference = 'Stop'
-if (@($StudyOnly, $DialogsOnly, $ShutdownOnly).Where({ [bool]$_ }).Count -gt 1) {
-    throw 'Choose only one of StudyOnly, DialogsOnly or ShutdownOnly.'
+if (@($StudyOnly, $DialogsOnly, $ShutdownOnly, $ResizeOnly, $AudioFeedbackOnly).Where({ [bool]$_ }).Count -gt 1) {
+    throw 'Choose only one focused test mode.'
 }
 $repo = Split-Path -Parent $PSScriptRoot
 $source = [IO.File]::ReadAllText((Join-Path $repo 'JRPG Translator.ahk'))
@@ -58,7 +60,8 @@ foreach ($requirement in $promptMenuRequirements.GetEnumerator()) {
 $modernOnlyDesktopRequirements = [ordered]@{
     'legacy preference migration' = 'IniWrite(1, iniPath, "cfg_control", "modernLayout")'
     'modern-only active state' = 'return IsSet(CPDesktop) && CPDesktop.Get("ready", false)'
-    'direct modern resize route' = 'return CPDesktopLayout(gui, minMax, w, h)'
+    'live modern resize route' = 'return CPDesktopLiveResize()'
+    'settled modern resize route' = 'return CPDesktopRelayout()'
     'fullscreen return requests normal desktop bounds' = 'CPShowControlPanelReady(true, true)'
     'fullscreen return uses preferred desktop viewport' = 'targetW := Max(clientW, CPPreferredViewportW)'
     'fullscreen return relayouts before reveal' = 'ResizeUI(ui, 0, restoredClientW, restoredClientH)'
@@ -329,8 +332,8 @@ $advancedIniRequirements = [ordered]@{
     'Python executable load' = 'pythonExe       := Load("pythonExe",        defPython)'
     'direct-output default off' = 'defDirectModelOutput := 0'
     'debug default off' = 'defDebugMode := 0'
-    'direct-output INI load' = 'directModelOutput := Integer(Load("directModelOutput", defDirectModelOutput, "cfg")) ? 1 : 0'
-    'debug INI load' = 'debugMode := Integer(Load("debugMode", defDebugMode, "cfg"))'
+    'direct-output INI load' = 'directModelOutput := LoadInt("directModelOutput", defDirectModelOutput, "cfg") ? 1 : 0'
+    'debug INI load' = 'debugMode := LoadInt("debugMode", defDebugMode, "cfg")'
     'Python executable persistence' = 'IniWrite(pythonExe,       iniPath, "cfg", "pythonExe")'
     'direct-output persistence' = 'IniWrite(directModelOutput, iniPath, "cfg", "directModelOutput")'
     'debug persistence' = 'IniWrite(debugMode, iniPath, "cfg", "debugMode")'
@@ -482,6 +485,9 @@ foreach ($requirement in $hotkeyRequirements.GetEnumerator()) {
 $desktopInputFieldRequirements = [ordered]@{
     'shared dark input frame' = 'CPDesktopRegisterPaint(frame, "fieldFrame", "panel")'
     'legacy input edge removal' = 'ctrl.Opt("-Border -E0x200 -VScroll")'
+    'overlay font-size field frame' = 'CPDesktopRegisterInputField(page, "fontSize", edFSize)'
+    'desktop checkbox painter' = 'CPDesktopPrepareNativePaint(ctrl, "checkbox")'
+    'desktop numeric-stepper painter' = 'CPDesktopPrepareNativePaint(spinner, "spinner")'
     'keyboard binding field frame' = '8, "keyboardBinding_" action, hkEdits[action], "keyboard"'
     'controller binding field frame' = 'CPControllerBindingEdits[action], "controller"'
     'Gemini key field frame' = 'CPDesktopRegisterInputField(9, "geminiKey", eGemini)'
@@ -576,12 +582,20 @@ if ($ShutdownOnly) {
 if ($DialogsOnly) {
     $generated = $generated.Replace('; @STUDY_ONLY@', 'TestDesktopStudyDialogs()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " desktop dialog assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
 }
+if ($ResizeOnly) {
+    $generated = $generated.Replace('; @STUDY_ONLY@', 'TestDesktopResizing()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " desktop resize assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
+}
+if ($AudioFeedbackOnly) {
+    $generated = $generated.Replace('; @STUDY_ONLY@', 'if TestAudioFeedbackBegin()' + "`r`n" + '        return')
+    $generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'audio_feedback_ui_harness.ahk'))
+}
 $script = Join-Path $output.FullName 'desktop-generated.ahk'
 [IO.File]::WriteAllText($script, $generated, [Text.UTF8Encoding]::new($true))
 $stdout = Join-Path $output.FullName 'desktop.stdout.txt'
 $stderr = Join-Path $output.FullName 'desktop.stderr.txt'
 $process = Start-Process -FilePath $AutoHotkey -ArgumentList @('/ErrorStdOut', ('"' + $script + '"')) -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-if (!$process.WaitForExit(300000)) {
+$testTimeout = if ($AudioFeedbackOnly) { 45000 } else { 300000 }
+if (!$process.WaitForExit($testTimeout)) {
     $process.Kill()
     throw "Desktop test timed out. Logs: $output"
 }
@@ -616,7 +630,7 @@ if (Test-Path -LiteralPath $namingBounds) {
     }
     Write-Output "PASS: $namingChecks naming-control visibility checks."
 }
-if ($StudyOnly -or $ShutdownOnly -or $DialogsOnly) {
+if ($StudyOnly -or $ShutdownOnly -or $DialogsOnly -or $ResizeOnly -or $AudioFeedbackOnly) {
     Write-Output $result.Trim()
     Write-Output "Test artifacts: $output"
     return

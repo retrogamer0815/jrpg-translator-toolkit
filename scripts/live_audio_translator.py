@@ -351,8 +351,14 @@ def _exception_chain(error):
         current = current.__cause__ or current.__context__
 
 
+class AudioCaptureError(RuntimeError):
+    """Local device failure, not a retryable provider connection failure."""
+
+
 def _is_retryable_connection_error(error):
     """Return True only for failures that may recover without user changes."""
+    if isinstance(error, AudioCaptureError):
+        return False
     for current in _exception_chain(error):
         if isinstance(current, (socket.gaierror, TimeoutError, ConnectionError, OSError)):
             return True
@@ -536,13 +542,28 @@ def run_speaker_list():
     return exit_code
 
 
+def audio_session_identity():
+    """Windows PID plus creation FILETIME; a recycled PID cannot own this marker."""
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_times = kernel32.GetProcessTimes
+    get_times.argtypes = [ctypes.c_void_p] * 5
+    get_times.restype = ctypes.c_int
+    times = (ctypes.c_uint32 * 8)()
+    if not get_times(ctypes.c_void_p(-1), ctypes.byref(times, 0),
+                     ctypes.byref(times, 8), ctypes.byref(times, 16), ctypes.byref(times, 24)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return f"JRPG_AUDIO_V2\t{os.getpid()}\t{times[1]:08X}{times[0]:08X}"
+
+
 def claim_audio_session():
-    """Publish the PID of the process that owns the live audio session."""
+    """Publish this worker's identity for verified control-panel recovery."""
     if not AUDIO_SESSION_FILE:
         return
     try:
         Path(AUDIO_SESSION_FILE).parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(AUDIO_SESSION_FILE, str(os.getpid()))
+        atomic_write_text(AUDIO_SESSION_FILE, audio_session_identity())
     except Exception:
         # Session tracking improves control-panel recovery but must never keep
         # audio translation from starting when the temp folder is unavailable.
@@ -555,7 +576,7 @@ def release_audio_session():
         return
     try:
         marker = Path(AUDIO_SESSION_FILE)
-        if marker.read_text(encoding="utf-8-sig").strip() == str(os.getpid()):
+        if marker.read_text(encoding="utf-8-sig").strip() == audio_session_identity():
             marker.unlink(missing_ok=True)
     except Exception:
         pass
@@ -599,9 +620,27 @@ class TranscriptBuffer:
 
 async def audio_sender(ws, speaker, make_event):
     blocks = capture_blocks(speaker)
-    while True:
-        chunk = await asyncio.to_thread(next, blocks)
-        await ws.send(json.dumps(make_event(chunk)))
+    try:
+        while True:
+            try:
+                # Never let StopIteration cross an asyncio Future boundary.
+                chunk = await asyncio.to_thread(next, blocks, None)
+                if chunk is None:
+                    raise RuntimeError("The audio device stopped producing samples.")
+            except Exception as exc:
+                raise AudioCaptureError(
+                    "Audio capture failed. Check the selected Windows output device "
+                    "and restart Audio Translation. " + str(exc)
+                ) from exc
+            # Sending errors retain their network type for the reconnect policy.
+            await ws.send(json.dumps(make_event(chunk)))
+    finally:
+        try:
+            blocks.close()
+        except (AttributeError, ValueError):
+            # Cancellation can arrive while the recording thread finishes its
+            # current block. Its remaining reference owns generator cleanup.
+            pass
 
 
 def _extract_text_parts(value):
@@ -622,6 +661,27 @@ def _decode_ws_text(raw):
     if isinstance(raw, bytes):
         return raw.decode("utf-8", errors="replace")
     return raw
+
+
+async def supervise_audio_session(sender_coro, receiver_coro):
+    """A dead capture task must not leave an apparently live receive session."""
+    sender = asyncio.create_task(sender_coro)
+    receiver = asyncio.create_task(receiver_coro)
+    tasks = (sender, receiver)
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        # Propagate failures before interpreting normal socket closure.
+        for task in tasks:
+            if task in done and (task.cancelled() or task.exception() is not None):
+                await task
+        if sender in done:
+            raise RuntimeError("Audio capture stopped. Check the selected audio device and restart Audio Translation.")
+        await receiver
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def run_openai(speaker):
@@ -655,8 +715,7 @@ async def run_openai(speaker):
             }
 
         buf = TranscriptBuffer()
-        sender = asyncio.create_task(audio_sender(ws, speaker, make_event))
-        try:
+        async def receive():
             async for raw in ws:
                 msg = json.loads(_decode_ws_text(raw))
                 event_type = str(msg.get("type", ""))
@@ -684,8 +743,7 @@ async def run_openai(speaker):
                 for key in ("output_transcript", "translation", "response"):
                     for text in _extract_text_parts(msg.get(key)):
                         buf.append(text)
-        finally:
-            sender.cancel()
+        await supervise_audio_session(audio_sender(ws, speaker, make_event), receive())
 
 
 async def run_gemini(speaker):
@@ -733,8 +791,7 @@ async def run_gemini(speaker):
             }
 
         buf = TranscriptBuffer()
-        sender = asyncio.create_task(audio_sender(ws, speaker, make_event))
-        try:
+        async def receive():
             async for raw in ws:
                 msg = json.loads(_decode_ws_text(raw))
                 server = msg.get("serverContent") or msg.get("server_content") or {}
@@ -747,8 +804,7 @@ async def run_gemini(speaker):
                 for part in turn.get("parts", []) or []:
                     for text in _extract_text_parts(part):
                         buf.append(text)
-        finally:
-            sender.cancel()
+        await supervise_audio_session(audio_sender(ws, speaker, make_event), receive())
 
 
 async def run_audio_with_reconnect(speaker):

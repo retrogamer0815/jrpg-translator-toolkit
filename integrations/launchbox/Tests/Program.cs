@@ -88,19 +88,22 @@ internal static class Program
             "The setup window does not provide an automatic vertical scrolling region.");
         Require(!setupScroller!.CanContentScroll,
             "The setup window must use pixel-based scrolling so large sections remain reachable.");
-        Require(Grid.GetRow(setupScroller!) == 2,
+        Require(Grid.GetRow(setupScroller!) == 1,
             "The setup window scrolling region is not in the expected flexible row.");
 
         StackPanel? setupFooter = setupRoot.Children
             .OfType<StackPanel>()
             .FirstOrDefault(panel =>
-                Grid.GetRow(panel) == 3
+                Grid.GetRow(panel) == 2
                 && panel.Children.OfType<Button>().Any(button =>
                     string.Equals(button.Content as string, "Save", StringComparison.Ordinal))
                 && panel.Children.OfType<Button>().Any(button =>
                     string.Equals(button.Content as string, "Cancel", StringComparison.Ordinal)));
         Require(setupFooter != null,
             "The setup window Save/Cancel footer is not pinned outside the scrolling region.");
+
+        CoverArtworkTests.Run(restored, game, profileDirectory,
+            args.Length == 2 && args[0] == "--render-dir" ? args[1] : null);
 
         TestControllerDisclosureActivation(setupWindow);
 

@@ -91,7 +91,7 @@ def ensure_database(database: Path, output_dir: Path) -> int:
 
 def connect_read_only(database: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(
-        f"file:{database.resolve().as_posix()}?mode=ro", uri=True, timeout=10
+        f"{database.resolve().as_uri()}?mode=ro", uri=True, timeout=10
     )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only = ON")
@@ -1049,6 +1049,19 @@ def remove_version(
             "SELECT 1 FROM explanation_group_tags gt WHERE gt.tag_id = study_tags.id)"
         )
         connection.commit()
+    except Exception:
+        connection.rollback()
+        for source, destination in reversed(moved_media):
+            try:
+                source.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(destination), str(source))
+            except OSError:
+                pass
+        raise
+    finally:
+        connection.close()
+    # Response delivery is outside the rollback scope: the deletion is committed.
+    try:
         write_rows(
             output_dir / "mutation.tsv",
             (
@@ -1061,17 +1074,11 @@ def remove_version(
             ),
         )
         return 0
-    except Exception:
-        connection.rollback()
-        for source, destination in reversed(moved_media):
-            try:
-                source.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(destination), str(source))
-            except OSError:
-                pass
-        raise
-    finally:
-        connection.close()
+    except Exception as exc:
+        raise RuntimeError(
+            "The deletion was committed, but its confirmation could not be delivered. "
+            f"Refresh the Library before retrying. Recovery backup: {backup_path}"
+        ) from exc
 
 
 def parse_args() -> argparse.Namespace:

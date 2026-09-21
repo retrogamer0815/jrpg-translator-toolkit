@@ -269,7 +269,14 @@ def _read_cache(path: Path) -> dict[str, Any] | None:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
-    if data.get("schema_version") != SCHEMA_VERSION or not isinstance(data.get("models"), list):
+    if not isinstance(data, dict) or data.get("schema_version") != SCHEMA_VERSION or not isinstance(data.get("models"), list):
+        return None
+    if not isinstance(data.get("fetched_at"), str) or any(
+        not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip()
+        or not isinstance(item.get("supported_actions", []), list)
+        or any(not isinstance(action, str) for action in item.get("supported_actions", []))
+        for item in data["models"]
+    ):
         return None
     return data
 

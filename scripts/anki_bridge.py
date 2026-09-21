@@ -20,6 +20,7 @@ import unicodedata
 import urllib.error
 import urllib.request
 from datetime import datetime
+from contextlib import closing
 from pathlib import Path
 from typing import Iterable
 
@@ -712,7 +713,7 @@ def add_note(database: Path, output_dir: Path) -> int:
 
     group_id = int(group_id_raw)
     screenshot_source: Path | None = None
-    with sqlite3.connect(database, timeout=10) as verification_connection:
+    with closing(sqlite3.connect(database, timeout=10)) as verification_connection:
         exists = verification_connection.execute(
             "SELECT 1 FROM explanation_groups WHERE id = ? AND game_profile = ?",
             (group_id, profile_name),
@@ -811,12 +812,8 @@ def add_note(database: Path, output_dir: Path) -> int:
         write_add_result(output_dir, "blocked", "", reason)
         return 0
 
-    media_was_present = False
     stored_media_filename = screenshot_filename
     if screenshot_filename:
-        media_was_present = bool(
-            invoke("retrieveMediaFile", {"filename": screenshot_filename})
-        )
         stored_filename = invoke(
             "storeMediaFile",
             {"filename": screenshot_filename, "data": screenshot_data},
@@ -834,30 +831,45 @@ def add_note(database: Path, output_dir: Path) -> int:
                 else anki_explanation_html(back, stored_media_filename)
             )
 
+    # Once addNote has been sent, a timeout/invalid reply is NOT a rejection.
+    # The note may already reference the uploaded media. Never roll media back:
+    # content-addressed images can also have acquired another user meanwhile.
+    add_error = None
     try:
         note_id = invoke("addNote", {"note": note})
-    except Exception:
-        if screenshot_filename and not media_was_present:
-            try:
-                invoke("deleteMediaFile", {"filename": stored_media_filename})
-            except Exception:
-                pass
-        raise
-    if not note_id:
-        if screenshot_filename and not media_was_present:
-            try:
-                invoke("deleteMediaFile", {"filename": stored_media_filename})
-            except Exception:
-                pass
-        write_add_result(output_dir, "error", "", "Anki did not confirm the new entry.")
-        return 0
+    except Exception as exc:
+        note_id = None
+        add_error = exc
+    recovered = False
+    if type(note_id) is not int or note_id <= 0:
+        note_id = reconcile_added_note(note)
+        recovered = note_id is not None
+        if not recovered:
+            rejected = isinstance(add_error, AnkiUnavailable) and add_error.code == "anki_error"
+            message = (
+                f"Anki rejected the entry: {add_error}. "
+                if rejected else
+                "Anki did not confirm the request. The entry may already have been added. "
+            )
+            if screenshot_filename:
+                message += "The uploaded screenshot has been retained for safety. "
+            message += "Check Anki and refresh Anki status before opening a new card review. No automatic retry was made."
+            write_add_result(output_dir, "blocked" if rejected else "uncertain", "", message)
+            return 0
+
+    confirmed_message = (
+        "The add response was lost or invalid, but the exact reviewed entry was verified in Anki. "
+        "No second entry was sent."
+        if recovered else
+        f"Added the {'explanation' if link_explanation else 'vocabulary entry'} to {deck_name}."
+    )
 
     if not link_explanation:
         write_add_result(
             output_dir,
             "added",
             int(note_id),
-            f"Added the vocabulary entry to {deck_name}.",
+            confirmed_message,
         )
         return 0
 
@@ -888,9 +900,32 @@ def add_note(database: Path, output_dir: Path) -> int:
         output_dir,
         "added",
         int(note_id),
-        f"Added the explanation to {deck_name}.",
+        confirmed_message,
     )
     return 0
+
+
+def reconcile_added_note(note: dict) -> int | None:
+    """Read-only reconciliation; never repeat an uncertain mutation.
+
+    Require the complete submitted fields (including the image reference), not
+    merely a normalized Japanese match, before reporting a confirmed outcome.
+    Multiple matches or a failed read remain uncertain.
+    """
+    try:
+        matches = [
+            existing.get("noteId")
+            for existing in notes_for_scope(note["deckName"], note["modelName"])
+            if all(
+                (existing.get("fields") or {}).get(name, {}).get("value") == value
+                for name, value in note["fields"].items()
+            )
+        ]
+        if len(matches) == 1 and type(matches[0]) is int and matches[0] > 0:
+            return matches[0]
+    except Exception:
+        pass
+    return None
 
 
 def parse_args() -> argparse.Namespace:

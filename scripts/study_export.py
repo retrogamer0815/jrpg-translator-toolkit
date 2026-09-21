@@ -55,7 +55,7 @@ DATETIME_HEADERS = {
 
 def connect_read_only(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(
-        f"file:{path.resolve().as_posix()}?mode=ro", uri=True, timeout=10
+        f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=10
     )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only = ON")
@@ -492,6 +492,11 @@ def add_sheet(
         if recommended_column is not None and values[recommended_column - 1] == "Recommended":
             fill = RECOMMENDED_FILL
         for column_index, cell in enumerate(sheet[row_index]):
+            # Profile names and source/model text are data, never Excel code.
+            # Preserve the value exactly (including leading '='); do not prefix
+            # apostrophes or coerce genuine numeric/datetime columns to strings.
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
             cell.alignment = Alignment(vertical="top", wrap_text=True)
             if (
                 headers[column_index] in DATETIME_HEADERS

@@ -751,48 +751,54 @@ enPath := ResolvePath(".\Settings\glossaries\" enProf "\en2en.txt")
         EnvSet(k, v)
 }
 
+ClearOverlayOutputFile(path) {
+    ; Never reuse the worker's .tmp file: it may contain an interrupted result
+    ; or belong to a translation currently being written. Retry only here, not
+    ; on a later timer which might erase a newer result.
+    static clearSerial := 0
+    operationSerial := ++clearSerial
+    tmpPath := path ".clear-" DllCall("GetCurrentProcessId", "uint") "-" operationSerial ".tmp"
+    stream := 0
+    try {
+        stream := FileOpen(tmpPath, "w", "UTF-8")
+        if !IsObject(stream)
+            return false
+        stream.Close()
+        Loop 3 {
+            try {
+                FileMove(tmpPath, path, 1)
+                return true
+            } catch {
+                if (A_Index < 3)
+                    Sleep(10)
+            }
+        }
+        return false
+    } catch {
+        return false
+    } finally {
+        if IsObject(stream)
+            try stream.Close()
+        ; Only remove this operation's private scratch file.
+        try FileDelete(tmpPath)
+    }
+}
+
 ClearAudioFile() {
     global AudioTxt
-    try {
-        tmpPath := AudioTxt ".tmp"
-        FileAppend("", tmpPath, "UTF-8")
-        FileMove(tmpPath, AudioTxt, 1)
-    } catch {
-        try f := FileOpen(AudioTxt, "w")
-        if IsObject(f)
-            f.Close()
-    }
+    return ClearOverlayOutputFile(AudioTxt)
 }
 
 ClearOcrFile() {
     global OcrTxt
-    try {
-        tmpPath := OcrTxt ".tmp"
-        FileAppend("", tmpPath, "UTF-8")
-        FileMove(tmpPath, OcrTxt, 1)
-    } catch {
-        try f := FileOpen(OcrTxt, "w")
-        if IsObject(f)
-            f.Close()
-    }
+    return ClearOverlayOutputFile(OcrTxt)
 }
 
 ClearExplainerFile() {
     global ExplainerTxt, ExplainerDoneTxt
-    try {
-        tmpPath := ExplainerTxt ".tmp"
-        FileAppend("", tmpPath, "UTF-8")
-        FileMove(tmpPath, ExplainerTxt, 1)
-    } catch {
-        try f := FileOpen(ExplainerTxt, "w")
-        if IsObject(f)
-            f.Close()
-    }
-    try {
-        doneTmp := ExplainerDoneTxt ".tmp"
-        FileAppend("", doneTmp, "UTF-8")
-        FileMove(doneTmp, ExplainerDoneTxt, 1)
-    }
+    if !ClearOverlayOutputFile(ExplainerTxt)
+        return false
+    return ClearOverlayOutputFile(ExplainerDoneTxt)
 }
 
 HandleGuiClose(pidToClose, guiObj) {
@@ -845,21 +851,46 @@ global ControlIni := portableRoot "\control.ini"
 global BoundsIni  := portableRoot . (__EXPLAIN_MODE ? "\overlay_explainer.ini" : "\overlay_translator.ini")
 LoadCfg(k, d) => IniRead(ControlIni, (__EXPLAIN_MODE ? "cfg_explainer" : "cfg"), k, d)
 
+LoadCfgInt(k, d, minValue := "", maxValue := "") =>
+    ReadIniInt(ControlIni, (__EXPLAIN_MODE ? "cfg_explainer" : "cfg"), k, d, minValue, maxValue)
+
+ReadIniInt(path, section, key, fallback, minValue := "", maxValue := "") {
+    ; Missing, blank, unreadable, and malformed settings use the caller's
+    ; default without rewriting the INI. Empty defaults mean "no saved bound".
+    try {
+        raw := Trim(IniRead(path, section, key, fallback))
+        if !IsNumber(raw)
+            return fallback
+        magnitude := Float(raw)
+        ; Reject overflow before converting to AutoHotkey's signed integer.
+        if (magnitude >= 9.223372036854776e18 || magnitude < -9.223372036854776e18)
+            return fallback
+        value := Integer(raw)
+        if (minValue != "")
+            value := Max(value, minValue)
+        if (maxValue != "")
+            value := Min(value, maxValue)
+        return Integer(value)
+    } catch {
+        return fallback
+    }
+}
+
 ; NOTE: read the same keys Control Panel writes
 global BOX_BG    := LoadCfg("boxBg",    "102040")
 global BDR_OUT   := LoadCfg("bdrOut",   "F8F8F8")
 global BDR_IN    := LoadCfg("bdrIn",    "84A9FF")
 global TXT_COLOR := LoadCfg("txtColor", "FFFFFF")
 global BOX_PAD   := 16
-global OUTER_W   := Integer(LoadCfg("bdrOutW", 3))
-global INNER_W   := Integer(LoadCfg("bdrInW",  1))
+global OUTER_W   := LoadCfgInt("bdrOutW", 3)
+global INNER_W   := LoadCfgInt("bdrInW",  1)
 ; Ignore legacy border settings: Win11 uses 0/0; Win10 keeps an invisible 0/1.
 NormalizeUnifiedWindowStyle()
 ; Load private fonts so non-installed faces from .\fonts are usable
 LoadPrivateFonts()
 global FONT_NAME := LoadCfg("fontName", "Segoe UI")
-global FONT_SIZE := Integer(LoadCfg("fontSize", 22))
-global FONT_BOLD := Integer(LoadCfg("fontBold", 0)) ? 1 : 0
+global FONT_SIZE := LoadCfgInt("fontSize", 22, 6, __EXPLAIN_MODE ? 200 : 128)
+global FONT_BOLD := LoadCfgInt("fontBold", 0) ? 1 : 0
 
 ; --- export glossary envs on startup (screenshot + audio) ---
 ExportGlossaryEnv()
@@ -885,7 +916,7 @@ captureDir := cap
 global Cap_Mode    := IniRead(ControlIni, "capture", "mode",  "region")         ; "region" | "window"
 global Cap_RectStr := IniRead(ControlIni, "capture", "rect",  "")               ; "x,y,w,h"
 global Cap_WinTit  := IniRead(ControlIni, "capture", "winTitle", "")            ; optional convenience
-global Cap_MaxKB   := Integer(IniRead(ControlIni, "capture", "maxKB", 1400))    ; default 1400 KB
+global Cap_MaxKB   := ReadIniInt(ControlIni, "capture", "maxKB", 1400, 100, 10000)
 
 ; Parsed rect cache
 global Cap_Rect := Map("x", 0, "y", 0, "w", 0, "h", 0)
@@ -2264,7 +2295,7 @@ CaptureOnceToFile(&outPath, &failureReason) {
         }
 
         ; max PNG size
-        Cap_MaxKB := Integer(IniRead(ControlIni, "capture", "maxKB", Cap_MaxKB))
+        Cap_MaxKB := ReadIniInt(ControlIni, "capture", "maxKB", Cap_MaxKB, 100, 10000)
     } catch as __e {
         ; If INI is missing/broken, just keep the in-memory values.
     }
@@ -2376,7 +2407,7 @@ sharexRegionHotkey := "^!F1"
 sharexDefineHotkey := "^!F2"
 
 ShotBuf := []
-global IsTop := Integer(LoadCfg("winTop", !__EXPLAIN_MODE ? 1 : 0))
+global IsTop := LoadCfgInt("winTop", !__EXPLAIN_MODE ? 1 : 0)
 global hBrushEdit := 0
 
 global OverlayDir := A_Temp "\JRPG_Overlay"
@@ -2418,11 +2449,11 @@ EnsureBoundsIni(){
 
 LoadOverlayBounds(){
     global BoundsIni, MinW, MinH, Overlay
-    x := IniRead(BoundsIni, "win", "x", 120)
-    y := IniRead(BoundsIni, "win", "y", 120)
-    w := IniRead(BoundsIni, "win", "w", 900)
-    h := IniRead(BoundsIni, "win", "h", 500)
-    savedDPI := IniRead(BoundsIni, "win", "dpi", 96)
+    x := ReadIniInt(BoundsIni, "win", "x", 120, -2147483648, 2147483647)
+    y := ReadIniInt(BoundsIni, "win", "y", 120, -2147483648, 2147483647)
+    w := ReadIniInt(BoundsIni, "win", "w", 900, MinW, 32767)
+    h := ReadIniInt(BoundsIni, "win", "h", 500, MinH, 32767)
+    savedDPI := ReadIniInt(BoundsIni, "win", "dpi", 96, 48, 960)
 
     Dbg("LoadBounds ini: x=" x " y=" y " w=" w " h=" h " savedDPI=" savedDPI " (no DPI scaling; using DIP units)")
     ; Values in overlay.ini are stored in DIP (device-independent pixels); no scaling needed.
@@ -2773,36 +2804,38 @@ RefreshAllBg() {
     global BOX_BG, BDR_IN, BDR_OUT
     global hBrushOuter, hBrushInner, hBrushPanel, hBrushEdit
 
-; ensure brush globals exist
-if !IsSet(hBrushOuter) hBrushOuter := 0
-if !IsSet(hBrushInner) hBrushInner := 0
-if !IsSet(hBrushPanel) hBrushPanel := 0
-if !IsSet(hBrushEdit)  hBrushEdit  := 0
+    ; Initialize only unset globals; never lose a live handle before deleting it.
+    if !IsSet(hBrushOuter)
+        hBrushOuter := 0
+    if !IsSet(hBrushInner)
+        hBrushInner := 0
+    if !IsSet(hBrushPanel)
+        hBrushPanel := 0
+    if !IsSet(hBrushEdit)
+        hBrushEdit := 0
 
-; re-create brushes so they match the newest colors
-if (hBrushOuter) {
-    DllCall("gdi32\DeleteObject", "ptr", hBrushOuter)
-    hBrushOuter := 0
-}
-if (hBrushInner) {
-    DllCall("gdi32\DeleteObject", "ptr", hBrushInner)
-    hBrushInner := 0
-}
-if (hBrushPanel) {
-    DllCall("gdi32\DeleteObject", "ptr", hBrushPanel)
-    hBrushPanel := 0
-}
-if (hBrushEdit) {
-    DllCall("gdi32\DeleteObject", "ptr", hBrushEdit)
-    hBrushEdit := 0
-}
+    ; Re-create brushes so they match the newest colors.
+    if (hBrushOuter) {
+        DllCall("gdi32\DeleteObject", "ptr", hBrushOuter)
+        hBrushOuter := 0
+    }
+    if (hBrushInner) {
+        DllCall("gdi32\DeleteObject", "ptr", hBrushInner)
+        hBrushInner := 0
+    }
+    if (hBrushPanel) {
+        DllCall("gdi32\DeleteObject", "ptr", hBrushPanel)
+        hBrushPanel := 0
+    }
+    if (hBrushEdit) {
+        DllCall("gdi32\DeleteObject", "ptr", hBrushEdit)
+        hBrushEdit := 0
+    }
 
-
-hBrushOuter := MakeBrush(ToHex6(BDR_OUT))
-hBrushInner := MakeBrush(ToHex6(BDR_IN))
-hBrushPanel := MakeBrush(ToHex6(BOX_BG))
-hBrushEdit  := MakeBrush(ToHex6(BOX_BG))
-
+    hBrushOuter := MakeBrush(ToHex6(BDR_OUT))
+    hBrushInner := MakeBrush(ToHex6(BDR_IN))
+    hBrushPanel := MakeBrush(ToHex6(BOX_BG))
+    hBrushEdit  := MakeBrush(ToHex6(BOX_BG))
 
     ; set GUI control backgrounds (keeps your existing logic consistent)
     RectOuter.Opt("Background" . BDR_OUT)
@@ -2958,21 +2991,25 @@ EraseAnyBg(wParam, lParam, msg, hwnd) {
         && hwnd != RectOuter.Hwnd && hwnd != OutputCtl.Hwnd)
         return
 
-    ; choose brush by window
+    ; Choose a cached brush by window; allocate only when it is missing.
     brush := 0
-if (hwnd = RectPanel.Hwnd) {
-    if (!IsSet(hBrushPanel) || !hBrushPanel) hBrushPanel := MakeBrush(ToHex6(BOX_BG))
-    brush := hBrushPanel
-} else if (hwnd = RectInner.Hwnd) {
-    if (!IsSet(hBrushInner) || !hBrushInner) hBrushInner := MakeBrush(ToHex6(BDR_IN))
-    brush := hBrushInner
-} else if (hwnd = RectOuter.Hwnd) {
-    if (!IsSet(hBrushOuter) || !hBrushOuter) hBrushOuter := MakeBrush(ToHex6(BDR_OUT))
-    brush := hBrushOuter
-} else if (hwnd = OutputCtl.Hwnd) {
-    if (!IsSet(hBrushEdit)  || !hBrushEdit)  hBrushEdit  := MakeBrush(ToHex6(BOX_BG))
-    brush := hBrushEdit
-}
+    if (hwnd = RectPanel.Hwnd) {
+        if (!IsSet(hBrushPanel) || !hBrushPanel)
+            hBrushPanel := MakeBrush(ToHex6(BOX_BG))
+        brush := hBrushPanel
+    } else if (hwnd = RectInner.Hwnd) {
+        if (!IsSet(hBrushInner) || !hBrushInner)
+            hBrushInner := MakeBrush(ToHex6(BDR_IN))
+        brush := hBrushInner
+    } else if (hwnd = RectOuter.Hwnd) {
+        if (!IsSet(hBrushOuter) || !hBrushOuter)
+            hBrushOuter := MakeBrush(ToHex6(BDR_OUT))
+        brush := hBrushOuter
+    } else if (hwnd = OutputCtl.Hwnd) {
+        if (!IsSet(hBrushEdit) || !hBrushEdit)
+            hBrushEdit := MakeBrush(ToHex6(BOX_BG))
+        brush := hBrushEdit
+    }
     if (!brush)
         return
 
@@ -3854,6 +3891,15 @@ redefineRegion(*) {
 }
 
 flushTranslate(files := unset) {
+    static launching := false
+    if launching
+        return false
+    launching := true
+    try return FlushTranslateCore(files?)
+    finally launching := false
+}
+
+FlushTranslateCore(files := unset) {
     global ShotBuf, pythonExe, translatorPy, ControlIni
     global __TranslationPid, __TranslationRequestId, __TranslationStartedAt, __TranslationExitedAt
     local fileList, n
@@ -3870,7 +3916,7 @@ flushTranslate(files := unset) {
     if (n = 0) {
         ToolTip("Buffer empty.")
         SetTimer(() => ToolTip(""), -1200)
-        return
+        return false
     }
 
     ; Keep an exact-path ledger for cleanup on the next application start.
@@ -3880,47 +3926,44 @@ flushTranslate(files := unset) {
 
     if !FileExist(tp) {
         showText("(Config error) translatorPy not found:`n" tp)
-        ShotBuf := []
-        return
+        return false
     }
     if !FileExist(px) {
         showText("(Config error) python.exe not found:`n" px)
-        ShotBuf := []
-        return
+        return false
     }
 
     provider := StrLower(Trim(IniRead(ControlIni, "cfg", "imgProvider", "openai")))
     if !OverlayApiKeyConfigured(provider) {
         showText(OverlayMissingApiKeyText(provider))
         Dbg("Translation blocked: " provider " API key is missing")
-        return
+        return false
     }
 
     if (__TranslationPid && ProcessExist(__TranslationPid)) {
         showText("A translation request is already in progress.`n`nPlease wait for it to finish before starting another one.")
-        return
+        return false
     }
 
     ToolTip()
     ShowOverlayStatus()
 	; === Re-read Control Panel settings just-in-time and export to env ===
-; Read the same keys the Control Panel writes into control.ini
-imgModel       := IniRead(ControlIni, "cfg", "imgModel",          "gpt-4o")
-geminiImgModel := IniRead(ControlIni, "cfg", "geminiImgModel",    "gemini-2.5-flash")
-promptProfile  := IniRead(ControlIni, "cfg", "promptProfile",     "default")
-; Back-compat: first try imgPostproc, then legacy 'post'
-imgPostproc    := IniRead(ControlIni, "cfg", "imgPostproc", IniRead(ControlIni, "cfg", "post", "tt"))
+    ; Read the same keys the Control Panel writes into control.ini.
+    imgModel := IniRead(ControlIni, "cfg", "imgModel", "gpt-4o")
+    geminiImgModel := IniRead(ControlIni, "cfg", "geminiImgModel", "gemini-2.5-flash")
+    promptProfile := IniRead(ControlIni, "cfg", "promptProfile", "default")
+    ; Back-compat: first try imgPostproc, then legacy 'post'.
+    imgPostproc := IniRead(ControlIni, "cfg", "imgPostproc", IniRead(ControlIni, "cfg", "post", "tt"))
 
-; Provider + model
-EnvSet("PROVIDER", provider)
-if (provider = "gemini") {
-    m := geminiImgModel
-    if (SubStr(m, 1, 7) != "models/")
-        m := "models/" . m
-    EnvSet("GEMINI_MODEL_NAME", m)
-} else {
-    EnvSet("MODEL_NAME", imgModel)
-}
+    EnvSet("PROVIDER", provider)
+    if (provider = "gemini") {
+        m := geminiImgModel
+        if (SubStr(m, 1, 7) != "models/")
+            m := "models/" . m
+        EnvSet("GEMINI_MODEL_NAME", m)
+    } else {
+        EnvSet("MODEL_NAME", imgModel)
+    }
 
 ; --- Guessed-subject highlighting from Control Panel (instant effect) ---
 hlGuess := IniRead(ControlIni, "cfg", "highlightGuessed", 1)
@@ -3963,9 +4006,23 @@ ExportGlossaryEnv()
             "Translation could not start.`n`nThe bundled Python process could not be launched.`n`nDetails: " ex.Message,
             requestId
         )
+        return false
     }
+    RemoveAcceptedCaptures(fileList)
+    return true
+}
 
-    ShotBuf := []
+RemoveAcceptedCaptures(acceptedFiles) {
+    global ShotBuf
+    ; Remove only submitted occurrences; keep captures appended during launch.
+    for acceptedPath in acceptedFiles {
+        for index, queuedPath in ShotBuf {
+            if (queuedPath = acceptedPath) {
+                ShotBuf.RemoveAt(index)
+                break
+            }
+        }
+    }
 }
 
 oneshotTranslate(*) {
@@ -4005,18 +4062,17 @@ FlushBufferedScreenshots(*) {
         return
     }
 
-    ; Clone then clear the buffer so repeated presses don’t resend old shots.
+    ; Retain the queue until process launch explicitly accepts this snapshot.
     files := ShotBuf.Clone()    ; AHK v2 Array.Clone()
-    ShotBuf := []
 
     try {
         ; Your pipeline already accepts an array (oneshot uses: flushTranslate([f]))
-        flushTranslate(files)
-        ToolTip("Sent " files.Length " screenshot(s).")
+        accepted := flushTranslate(files)
+        ToolTip(accepted ? "Sent " files.Length " screenshot(s)."
+            : "Not sent. Buffered screenshots kept for retry.")
         SetTimer(() => ToolTip(""), -1200)
     } catch as ex {
-        ; Restore on failure so user can retry
-        ShotBuf := files
+        ; The queue is unchanged on failure; don't overwrite newer captures.
         ToolTip("Flush failed: " ex.Message)
         SetTimer(() => ToolTip(""), -1600)
     }
@@ -4315,14 +4371,26 @@ ToggleAudioListening(){
     }
 }
 
+TryReadOverlayFile(path, &text, allowMissing := false) {
+    text := ""
+    try {
+        text := FileRead(path, "UTF-8")
+        return true
+    } catch OSError as err {
+        ; A completion marker may not exist yet. Sharing/access errors are not
+        ; completion, nor are they an intentionally empty translation.
+        return allowMissing && (err.Number = 2 || err.Number = 3)
+    } catch {
+        return false
+    }
+}
+
 PollExplainerFile(){
     global ExplainerTxt, ExplainerDoneTxt, __LastExplainRaw, __LastExplainDoneRaw, __OcrText, __AudioText
-    raw := ""
-    try if FileExist(ExplainerTxt)
-        raw := FileRead(ExplainerTxt, "UTF-8")
-    doneRaw := ""
-    try if FileExist(ExplainerDoneTxt)
-        doneRaw := FileRead(ExplainerDoneTxt, "UTF-8")
+    if !TryReadOverlayFile(ExplainerTxt, &raw)
+        return
+    if !TryReadOverlayFile(ExplainerDoneTxt, &doneRaw, true)
+        return
     contentChanged := (raw != __LastExplainRaw)
     completionChanged := (doneRaw != "" && doneRaw != __LastExplainDoneRaw)
     if (!contentChanged && !completionChanged)
@@ -4356,13 +4424,10 @@ PollExplainerFile(){
 PollOcrFile() {
     global OcrTxt, OcrDoneTxt, __LastOcrRaw, __LastOcrDoneRaw, __OcrText, __AudioText
     global __TranslationRequestId, __TranslationPid, __TranslationStartedAt, __TranslationExitedAt
-    raw := ""
-    try if FileExist(OcrTxt)
-        raw := FileRead(OcrTxt, "UTF-8")
-
-    doneRaw := ""
-    try if FileExist(OcrDoneTxt)
-        doneRaw := FileRead(OcrDoneTxt, "UTF-8")
+    if !TryReadOverlayFile(OcrTxt, &raw)
+        return
+    if !TryReadOverlayFile(OcrDoneTxt, &doneRaw, true)
+        return
 
     if (__TranslationRequestId != "" && Trim(doneRaw) != __TranslationRequestId)
         return
@@ -4404,9 +4469,8 @@ PollOcrFile() {
 ; Poll %TEMP%\JRPG_Overlay\audio.txt (normal translator mode)
 PollAudioSubtitle(){
     global AudioTxt, __LastAudioRaw, __AudioText, __OcrText
-    raw := ""
-    try if FileExist(AudioTxt)
-        raw := FileRead(AudioTxt, "UTF-8")
+    if !TryReadOverlayFile(AudioTxt, &raw)
+        return
     if (raw = __LastAudioRaw)
         return
     __LastAudioRaw := raw

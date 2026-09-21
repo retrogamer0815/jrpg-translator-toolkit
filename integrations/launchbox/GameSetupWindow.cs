@@ -84,6 +84,11 @@ namespace JrpgTranslator.LaunchBox
         public GameConfiguration Result { get; private set; }
 
         public GameSetupWindow(PluginConfiguration configuration, GameConfiguration game)
+            : this(configuration, game, null)
+        {
+        }
+
+        public GameSetupWindow(PluginConfiguration configuration, GameConfiguration game, string? coverArtPath)
         {
             _configuration = configuration;
             Result = game;
@@ -111,31 +116,64 @@ namespace JrpgTranslator.LaunchBox
 
             Grid root = new Grid { Margin = new Thickness(30, 24, 30, 22) };
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             Content = root;
 
+            Grid header = new Grid { Margin = new Thickness(0, 0, 0, 20) };
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            root.Children.Add(header);
+
+            StackPanel headerText = new StackPanel();
+            header.Children.Add(headerText);
             TextBlock heading = new TextBlock
             {
                 Text = game.GameTitle,
+                ToolTip = game.GameTitle,
                 FontSize = 28,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = PrimaryForeground,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 Margin = new Thickness(0, 0, 0, 8)
             };
-            root.Children.Add(heading);
+            headerText.Children.Add(heading);
 
             TextBlock introduction = new TextBlock
             {
                 Text = "Choose what should be prepared automatically whenever this game is launched.",
                 Foreground = MutedForeground,
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 0, 0, 20)
+                TextWrapping = TextWrapping.Wrap
             };
-            Grid.SetRow(introduction, 1);
-            root.Children.Add(introduction);
+            headerText.Children.Add(introduction);
+
+            BitmapSource? coverSource = LoadCoverArt(coverArtPath);
+            if (coverSource != null)
+            {
+                // Fit portrait, square and landscape covers without cropping.
+                // The auto column disappears completely when artwork is absent.
+                double scale = Math.Min(120.0 / coverSource.PixelWidth, 104.0 / coverSource.PixelHeight);
+                Border cover = new Border
+                {
+                    Background = PanelBackground,
+                    CornerRadius = new CornerRadius(4),
+                    Padding = new Thickness(4),
+                    Margin = new Thickness(24, 0, 0, 0),
+                    VerticalAlignment = VerticalAlignment.Top,
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    Focusable = false,
+                    IsHitTestVisible = false,
+                    Child = new Image
+                    {
+                        Source = coverSource,
+                        Width = coverSource.PixelWidth * scale,
+                        Height = coverSource.PixelHeight * scale,
+                        Stretch = Stretch.Uniform
+                    }
+                };
+                Grid.SetColumn(cover, 1);
+                header.Children.Add(cover);
+            }
 
             StackPanel scrollingContent = new StackPanel();
             _contentScroller = new ScrollViewer
@@ -149,7 +187,7 @@ namespace JrpgTranslator.LaunchBox
                 CanContentScroll = false,
                 Focusable = false
             };
-            Grid.SetRow(_contentScroller, 2);
+            Grid.SetRow(_contentScroller, 1);
             root.Children.Add(_contentScroller);
 
             Border translatorCard = MakeCard();
@@ -316,7 +354,7 @@ namespace JrpgTranslator.LaunchBox
                 HorizontalAlignment = HorizontalAlignment.Right,
                 Margin = new Thickness(0, 18, 0, 0)
             };
-            Grid.SetRow(buttons, 3);
+            Grid.SetRow(buttons, 2);
             root.Children.Add(buttons);
 
             _cancel = MakeButton("Cancel", 150);
@@ -1457,6 +1495,37 @@ namespace JrpgTranslator.LaunchBox
             Grid.SetColumn(toggle, 3);
             header.Children.Add(toggle);
             return header;
+        }
+
+        private static BitmapSource? LoadCoverArt(string? path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return null;
+            try
+            {
+                // File streams prohibit implicit URL downloads. Read fully into
+                // a bounded thumbnail and release the file before showing setup.
+                using FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                BitmapDecoder decoder = BitmapDecoder.Create(stream,
+                    BitmapCreateOptions.DelayCreation, BitmapCacheOption.None);
+                BitmapFrame frame = decoder.Frames[0];
+                double scale = Math.Min(1, Math.Min(360.0 / frame.PixelWidth, 312.0 / frame.PixelHeight));
+                int decodeWidth = Math.Max(1, (int)Math.Floor(frame.PixelWidth * scale));
+                stream.Position = 0;
+                BitmapImage image = new BitmapImage();
+                image.BeginInit();
+                image.CacheOption = BitmapCacheOption.OnLoad;
+                image.DecodePixelWidth = decodeWidth;
+                image.StreamSource = stream;
+                image.EndInit();
+                image.Freeze();
+                return image;
+            }
+            catch
+            {
+                // Missing, locked, inaccessible or corrupt covers are optional.
+                return null;
+            }
         }
 
         private static FrameworkElement MakeTranslatorIcon()

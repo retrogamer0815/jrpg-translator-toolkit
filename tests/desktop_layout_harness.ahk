@@ -15,6 +15,7 @@ global APP_VERSION := "0.9.9.0", PROJECT_URL := "https://example.invalid/jrpg-tr
 global BUG_REPORT_URL := PROJECT_URL "/issues/new", WRITTEN_GUIDE_URL := PROJECT_URL "#quick-start"
 global BEGINNER_VIDEO_URL := "https://example.invalid/beginner"
 global gPidAudio := 0, gJustStoppedUntil := 0, gLastAction := ""
+global gAudioProcess := 0
 global gAudioSessionFile := A_ScriptDir "\audio-session.pid"
 global CPToastGui := 0, CPToastText := 0, CPToastTimer := 0
 global gAudioInputJob := Map("active", false), gAudioInputStatus := "Not tested.", speakerName := "[Windows Default]"
@@ -137,11 +138,24 @@ CPCreateComboArrowOverlays()
 OnError(DesktopTestUnhandledError)
 try {
     ; @STUDY_ONLY@
+    TestDesktopResizing()
     DesktopAssert(IniRead(iniPath, "cfg_control", "modernLayout", 0) = 1,
         "Legacy classic-layout preference migrates to modern")
     DesktopAssert(TestColdStartProfilesGuard && ddlStartupOverlays.Value = 1,
         "Cold-start synchronizers tolerate Profiles controls that are not constructed yet")
     DesktopAssert(CPDesktop["pages"].Count = 9, "Desktop registry contains every main page")
+    modernCheckboxCount := 0, allModernCheckboxesPainted := true
+    for desktopControlHwnd, desktopSurface in CPDesktop["surfaces"] {
+        desktopControl := GuiCtrlFromHwnd(desktopControlHwnd)
+        if desktopControl.Type != "CheckBox"
+            continue
+        modernCheckboxCount += 1
+        if !CPDesktopNativePaintHwnds.Has(desktopControlHwnd)
+            || CPDesktopNativePaintHwnds[desktopControlHwnd]["kind"] != "checkbox"
+            allModernCheckboxesPainted := false
+    }
+    DesktopAssert(modernCheckboxCount >= 10 && allModernCheckboxesPainted,
+        "Every modern desktop checkbox uses the shared subdued painter")
     expectedPages := Map(
         1, ["screenshot", "Game Text Translation", "screenshot"],
         2, ["audio", "Audio Translation", "audioPage"],
@@ -384,6 +398,108 @@ try {
 } catch as testError {
     FileAppend("FAIL: " testError.Message "`n" testError.Extra "`n" testError.File ":" testError.Line "`n" testError.Stack "`n", "*")
     ExitApp(1)
+}
+
+TestDesktopResizing() {
+    global ui, tab, CPDesktop, CPPanelInteractiveResize, CPPanelLiveResizeTick
+    global ddlProv, ddlPrompt, chkGuess, chkName, CPCanvasScrollX, CPCanvasScrollY
+    global CPCanvasScrollMaxX, CPCanvasScrollMaxY
+    global controlPanelOpacity, CPPanelResizeOpacitySuspended
+    ; Deliberately omit the GUI Size callback: release must recover even when
+    ; a Size event was dropped while another layout was still running.
+    ui.Show("Restore NA x-9000 y-9000 w900 h640")
+    CPDesktopRelayout()
+    ui.Show("NA x-9000 y-9000 w1120 h900")
+    CPFinalizeInteractiveResize()
+    ui.GetClientPos(,, &w, &h)
+    DesktopAssert(CPDesktop["width"] = w && CPDesktop["height"] = h,
+        "Resize release lays out current dimensions even if the Size event was lost (layout "
+            CPDesktop["width"] "x" CPDesktop["height"] ", client " w "x" h ")")
+    selection := [ddlProv.Text, ddlPrompt.Text, chkGuess.Value, chkName.Value]
+    ; Real native messages against the fixture only, without a GUI Size event
+    ; handler or explicit layout call: check BEFORE release to prove live reflow.
+    for page in [1, 2, 3, 4, 5, 6, 7, 8, 9] {
+        CPDesktopNavigate(page)
+        SendMessage(0x0231, 0, 0, ui.Hwnd)
+        DesktopAssert(CPPanelInteractiveResize, "Native drag starts on page " page)
+        for size in [[900, 640], [900, 900], [1400, 900], [820, 540], [1120, 640]] {
+            Sleep(40)
+            ui.Show("NA x-9000 y-9000 w" size[1] " h" size[2])
+            DesktopAssertResizeBounds("Live page " page " at " size[1] "x" size[2])
+            DesktopAssert(tab.Value = page, "Live resize preserves current page")
+        }
+        ; Force the final change to fall inside the live throttle window.
+        CPPanelLiveResizeTick := A_TickCount + 1000
+        ui.Show("NA x-9000 y-9000 w950 h700")
+        SendMessage(0x0232, 0, 0, ui.Hwnd)
+        Sleep(80)
+        DesktopAssert(!CPPanelInteractiveResize, "Native release ends drag")
+        DesktopAssertResizeBounds("Released page " page)
+        DesktopAssert(CPCanvasScrollX >= 0 && CPCanvasScrollX <= CPCanvasScrollMaxX
+            && CPCanvasScrollY >= 0 && CPCanvasScrollY <= CPCanvasScrollMaxY,
+            "Released resize keeps scroll positions within the current page")
+    }
+    ; Normal programmatic sizes and stale queued GUI events use fresh bounds.
+    ui.OnEvent("Size", ResizeUI)
+    try {
+        for size in [[1400, 900], [900, 540], [1120, 760]] {
+            ui.Show("NA x-9000 y-9000 w" size[1] " h" size[2])
+            Sleep(80)
+            DesktopAssertResizeBounds("GUI Size event")
+            ResizeUI(ui, 0, 820, 380)
+            DesktopAssertResizeBounds("Delayed stale GUI Size event")
+        }
+        CPOnWindowEnterSizeMove(0, 0, 0x0231, ui.Hwnd)
+        CPOnWindowExitSizeMove(0, 0, 0x0232, ui.Hwnd)
+        CPOnWindowEnterSizeMove(0, 0, 0x0231, ui.Hwnd)
+        CPFinalizeInteractiveResize()
+        DesktopAssert(CPPanelInteractiveResize, "Previous finalizer cannot finish a newer drag")
+        CPOnWindowExitSizeMove(0, 0, 0x0232, ui.Hwnd)
+        Sleep(80)
+        DesktopAssertResizeBounds("Rapid consecutive drags")
+    } finally {
+        ui.OnEvent("Size", ResizeUI, 0)
+    }
+    savedOpacity := controlPanelOpacity
+    try {
+        controlPanelOpacity := 85
+        CPApplyControlPanelOpacity(false)
+        SendMessage(0x0231, 0, 0, ui.Hwnd)
+        DesktopAssert(CPPanelResizeOpacitySuspended, "Transparent window suspends alpha during drag")
+        ui.Show("NA x-9000 y-9000 w1120 h760")
+        CPRestoreOpacityAfterResize()
+        DesktopAssert(CPPanelResizeOpacitySuspended, "Opacity timer cannot interrupt an active drag")
+        SendMessage(0x0232, 0, 0, ui.Hwnd)
+        Sleep(120)
+        DesktopAssert(!CPPanelResizeOpacitySuspended
+            && WinGetTransparent("ahk_id " ui.Hwnd) = Round(85 * 255 / 100),
+            "Release restores exactly the configured opacity")
+        DesktopAssertResizeBounds("Transparent window release")
+    } finally {
+        controlPanelOpacity := savedOpacity
+        CPApplyControlPanelOpacity(false)
+    }
+    DesktopAssert(ddlProv.Text = selection[1] && ddlPrompt.Text = selection[2]
+        && chkGuess.Value = selection[3] && chkName.Value = selection[4],
+        "Resizing preserves provider, prompt and checkbox values")
+    CPDesktopNavigate(1)
+    ui.GetClientPos(,, &w, &h)
+    scale := DllCall("user32\GetDpiForWindow", "ptr", ui.Hwnd, "uint") / 96
+    TestCapture("desktop-resize-final.png", Round(w * scale), Round(h * scale))
+}
+
+DesktopAssertResizeBounds(label) {
+    global ui, CPDesktop
+    ui.GetClientPos(,, &w, &h)
+    DesktopAssert(CPDesktop["width"] = w && CPDesktop["height"] = h,
+        label " uses actual client dimensions (layout " CPDesktop["width"] "x" CPDesktop["height"]
+            ", client " w "x" h ")")
+    CPDesktop["chrome"]["footerPanel"].GetPos(&fx, &fy, &fw, &fh)
+    DesktopAssert(fx = 0 && Abs(fy + fh - h) <= 1 && Abs(fw - w) <= 1,
+        label " anchors the footer to the bottom and both sides")
+    CPDesktop["chrome"]["headerPanel"].GetPos(&hx, &hy, &hw)
+    DesktopAssert(hx = 0 && hy = 0 && Abs(hw - w) <= 1,
+        label " fills the header width")
 }
 
 DesktopAssert(condition, message) {
@@ -1053,7 +1169,9 @@ DesktopTestAudioPage() {
     AudioInputJobControls()
     AudioInputApplyTestResult("JRPG_AUDIO_TEST:DETECTED")
     DesktopAssert(ddlSpeaker.Enabled && btnAudioTest.Enabled && a["result"].Text = "Audio detected. This device is ready.", "Finished audio test restores controls and displays its result")
-    gPidAudio := DllCall("kernel32\GetCurrentProcessId") ; Status only: never start or stop an actual session.
+    ; Status-only borrowed handle; release it before any Stop test.
+    AudioSetProcess(AudioProcessRecord(DllCall("kernel32\OpenProcess", "uint", 0x101000,
+        "int", false, "uint", DllCall("kernel32\GetCurrentProcessId"), "ptr"), DllCall("kernel32\GetCurrentProcessId")))
     CPDesktopRefreshAudio()
     DesktopAssert(a["power"].Text = "Stop audio translation" && InStr(a["sessionHelp"].Text, "restart"), "Running session presents Stop and explains pending settings")
     CPDesktop["chrome"]["audio"].Text := "Audio: Off"
@@ -1061,8 +1179,8 @@ DesktopTestAudioPage() {
     DesktopAssert(CPDesktop["chrome"]["audio"].Text = "Audio: On", "Immediate audio status refresh also updates the desktop footer")
     try FileDelete(gAudioSessionFile)
     FileAppend(String(gPidAudio), gAudioSessionFile, "UTF-8")
-    gPidAudio := 0
-    DesktopAssert(AudioIsRunning() && gPidAudio = DllCall("kernel32\GetCurrentProcessId"), "Worker session marker restores a handed-off audio PID without WMI")
+    AudioSetProcess()
+    DesktopAssert(!AudioIsRunning(), "A PID-only marker cannot adopt an unrelated live process")
     try FileDelete(gAudioSessionFile)
     gPidAudio := 0
     FileAppend("2147483647", gAudioSessionFile, "UTF-8")
@@ -1073,12 +1191,11 @@ DesktopTestAudioPage() {
         try FileDelete(audioFixtureLog)
         EnvSet("JRPG_TEST_AUDIO_RUNTIME_LOG", audioFixtureLog)
         EnvSet("JRPG_TEST_AUDIO_RUNTIME_MODE", "wait")
-        Run('"' A_AhkPath '" "' A_ScriptDir '\audio_runtime_fixture.ahk"', A_ScriptDir, "Hide", &audioFixturePid)
+        AudioSetProcess(AudioLaunchProcess(A_AhkPath, A_ScriptDir "\audio_runtime_fixture.ahk"))
+        audioFixturePid := gPidAudio
         Sleep(120)
-        FileAppend(String(audioFixturePid), gAudioSessionFile, "UTF-8")
-        gPidAudio := 0
         DesktopAssert(AudioIsRunning() && StopAudioCore(true, false) && !ProcessExist(audioFixturePid),
-            "Recovered audio session marker lets the desktop stop the exact worker")
+            "Owned process handle lets the desktop stop the exact worker")
     } finally {
         if audioFixturePid && ProcessExist(audioFixturePid)
             try ProcessClose(audioFixturePid)
@@ -1087,7 +1204,7 @@ DesktopTestAudioPage() {
         EnvSet("JRPG_TEST_AUDIO_RUNTIME_LOG", "")
         EnvSet("JRPG_TEST_AUDIO_RUNTIME_MODE", "")
     }
-    gPidAudio := 0
+    AudioSetProcess()
     CPDesktopRefreshAudio()
     DesktopAssert(a["power"].Text = "Start audio translation", "Stopped session presents Start")
     ddlAudioTarget.Choose(2), ddlTR.Choose(2), ddlAProv.Choose(2), ToggleAudioControls()
@@ -1107,7 +1224,7 @@ DesktopTestAudioPage() {
     CPDesktopLayout(ui, 0, 1400, 820)
 }
 DesktopTestOverlayPages() {
-    global ui, tab, CPDesktop
+    global ui, tab, CPDesktop, CPDesktopNativePaintHwnds
     global boxBgHex, boxBgHex_EW, nameHex, ddlFont, ddlFont_EW
     for page in [3, 5] {
         overlayPage := CPDesktop["overlayPages"][page], bindings := CPDesktopOverlayBindings(page)
@@ -1128,6 +1245,18 @@ DesktopTestOverlayPages() {
             DesktopAssert(CPDesktop["chrome"]["title"].Text = "Overlay windows" && InStr(CPDesktop["chrome"]["subtitle"].Text, bindings["title"]), "Shared overlay heading identifies the selected window")
             DesktopAssert(DesktopShown(bindings["opacity"]) && DesktopShown(overlayPage["bg"]), "Modern overlay controls are page-owned and visible")
             DesktopAssert(DesktopShown(bindings["font"]) && !DesktopShown(otherBindings["font"]), "Only the selected overlay's controls are shown")
+            DesktopAssert(CPDesktop["inputFrames"].Has(bindings["size"].Hwnd),
+                bindings["title"] " font size uses the shared app-colored input frame")
+            sizeStyle := DllCall("user32\GetWindowLongPtr", "ptr", bindings["size"].Hwnd, "int", -16, "ptr")
+            sizeExStyle := DllCall("user32\GetWindowLongPtr", "ptr", bindings["size"].Hwnd, "int", -20, "ptr")
+            DesktopAssert(!(sizeStyle & 0x00800000) && !(sizeExStyle & 0x00000200),
+                bindings["title"] " font size removes the bright native edit frame")
+            DesktopAssert(CPDesktopNativePaintHwnds.Has(bindings["spinner"].Hwnd)
+                && CPDesktopNativePaintHwnds[bindings["spinner"].Hwnd]["kind"] = "spinner",
+                bindings["title"] " font-size arrows use the integrated desktop painter")
+            DesktopAssert(CPDesktopNativePaintHwnds.Has(bindings["bold"].Hwnd)
+                && CPDesktopNativePaintHwnds[bindings["bold"].Hwnd]["kind"] = "checkbox",
+                bindings["title"] " Bold option uses the restrained desktop checkbox painter")
             DesktopAssert(CPDesktop["paint"][overlayPage[page = 3 ? "translator" : "explainer"].Hwnd]["selected"], "Overlay selector marks the active window")
             DesktopAssert(CPDesktop["paint"][CPDesktop["chrome"]["overlays"].Hwnd]["selected"], "Overlay sidebar remains selected for both windows")
             DesktopAssert(page = 3 ? overlayPage.Has("name") : !overlayPage.Has("name"), "Speaker-name color belongs only to the Translator")
