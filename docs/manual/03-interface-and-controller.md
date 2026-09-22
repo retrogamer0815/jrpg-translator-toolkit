@@ -63,7 +63,9 @@ To assign a direct action, open the controller binding list, select the action, 
 
 *Figure S06a. Direct controller-action assignments. The bindings shown are an example; use Assign or Disable to customize your setup.*
 
-> **Screenshot S06b — Controller options and detection (to be added).** Show the lower-page direct-action and D-pad navigation switches, plus controller detection status.
+![Lower Controls page showing a detected XInput controller and separate switches for direct controller actions and D-pad navigation](images/controller-options-and-detection.png)
+
+*Figure S06b. Controller detection and navigation options. Direct action bindings and D-pad navigation can be enabled separately; the game still receives action-binding button presses.*
 
 ## Default keyboard shortcuts
 

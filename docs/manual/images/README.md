@@ -2,7 +2,16 @@
 
 The unannotated source is [game-text-page.png](game-text-page.png), supplied by the project owner. The built-in image-generation/editing tool was used to add the four navigation callouts in [desktop-orientation.png](desktop-orientation.png). The annotated image is an instructional derivative; the original screenshot is retained separately and used for S07.
 
-All other published images from the first two batches are the supplied screenshots copied without modification. S21's supplied filename duplicated the overview title; it is stored as `library-dropdown-and-management.png` to describe its actual content. S18 uses the corrected screenshot supplied on 20 September 2026, with personal account names redacted by the project owner in both user-specific paths.
+All other published images are the supplied screenshots copied without modification. S21's supplied filename duplicated the overview title; it is stored as `library-dropdown-and-management.png` to describe its actual content. S18 uses the corrected screenshot supplied on 20 September 2026, with personal account names redacted by the project owner in both user-specific paths.
+
+The four screenshots supplied on 22 September 2026 retain the existing manual's figure sequence. The new lower-page views complement, rather than replace, the earlier overview images:
+
+| Supplied filename | Published asset | Figure |
+| --- | --- | --- |
+| S06a - controls-and-bindings.png | [controller-options-and-detection.png](controller-options-and-detection.png) | S06b |
+| S07a - game-text-page.png | [game-text-formatting-and-startup.png](game-text-formatting-and-startup.png) | S07b |
+| S09b - audio-setup-and-input-check.png | [audio-input-check-result.png](audio-input-check-result.png) | S09b |
+| S10 - explanation-settings.png | [explanation-settings.png](explanation-settings.png) | S10a |
 
 The screenshot models, settings, Profile names, and controller bindings are examples, not a recommended or permanent default configuration. The full-screen dashboard image is the supplied 3840×2160 capture; it is not evidence of the 1280×720 layout.
 

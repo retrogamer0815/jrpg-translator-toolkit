@@ -26,7 +26,9 @@ On a shorter screen, the start button may be below the initial view. Scroll or c
 
 *Figure S09a. Audio AI, language, and playback-device selection. The input-check result and start control are farther down the page.*
 
-> **Screenshot S09b — Audio test result and start control (to be added).** Show a completed local input check and the Start audio translation button.
+![Audio Translation page with a successful input check reading Audio detected. This device is ready, and expanded audio testing and troubleshooting help](images/audio-input-check-result.png)
+
+*Figure S09b. A successful local audio-input check. The expanded help explains how to test the selected playback device without making an AI request.*
 
 **Test audio** checks local audio capture; it is not an AI translation request and does not prove that the provider key or model works. A successful input test followed by a provider error usually points to the AI configuration rather than the selected output device.
 
@@ -49,6 +51,8 @@ For predictable results, stop the stream before changing provider, model, langua
 ## During play
 
 Use the page's start/stop control, the desktop footer Audio control, the full-screen Audio Translation tile, or your assigned shortcut to toggle the stream.
+
+> **Screenshot S09c — Audio start/stop control (to be added).** Show the page's Start audio translation button.
 
 The Translator overlay displays incoming translated text; it is not a synthesized-voice feature. There can be a delay while the service interprets speech. Music, sound effects, overlapping speakers, accents, and very short fragments can affect results.
 

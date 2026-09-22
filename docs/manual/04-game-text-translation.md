@@ -12,8 +12,6 @@ The game does not need to provide selectable text. Image quality still matters: 
 
 *Figure S07a. Game Text AI settings and capture actions. Formatting and startup settings continue farther down the page.*
 
-> **Screenshot S07b — Lower Game Text settings (to be added).** Show Formatting and Startup & advanced capture, including the capture image size limit.
-
 ## Provider, model, and prompt
 
 - **Provider** chooses the service used for screenshot translation.
@@ -79,6 +77,10 @@ This is a current-session batch, not an import of every image in the screenshot 
 Captures can remain on disk. Translation should not be treated as a secure-delete operation. The startup cleanup setting described below is separate from making a request.
 
 ## Formatting options
+
+![Lower Game Text page showing multiple-capture help, guessed-subject and speaker-color formatting, and expanded startup and advanced capture options](images/game-text-formatting-and-startup.png)
+
+*Figure S07b. Formatting and Startup & advanced capture, including the capture image size limit. The displayed values are examples; startup choices apply the next time the tool opens.*
 
 ### Highlight guessed subjects
 

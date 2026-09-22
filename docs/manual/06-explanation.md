@@ -8,7 +8,7 @@ The Explainer is an optional learning assistant for Japanese text obtained throu
 
 It uses its own provider, model, and prompt. A fast translation model and a different explanation model can therefore be used together.
 
-**Explain latest text does not take a new screenshot.** It uses the latest available Japanese source from the image-translation workflow. If you have advanced the game since the last capture, capture and translate the new line first.
+**Explain last text does not take a new screenshot.** It uses the latest available Japanese source from the image-translation workflow. If you have advanced the game since the last capture, capture and translate the new line first.
 
 ## Create your first explanation
 
@@ -16,12 +16,14 @@ It uses its own provider, model, and prompt. A fast translation model and a diff
 2. Capture and translate a dialogue line.
 3. Open **Explanation**.
 4. Choose its **Provider**, **Model**, and **Prompt**.
-5. Choose **Explain latest text**, or use the configured explanation action.
+5. Choose **Explain last text**, or use the configured explanation action.
 6. Read the response in the Explainer overlay.
 
 If no Japanese source is available, check the translation prompt and output format rather than repeatedly requesting explanations. A translation-only response may not provide the source the Explainer needs.
 
-> **Screenshot S10 — Explanation settings (to be added).** Show the AI choices, Explain latest text, and saving options.
+![Explanation page showing its own provider, model, and prompt selections, plus Explain last text and Open Study Library](images/explanation-settings.png)
+
+*Figure S10a. Explanation AI settings and actions. Explain last text uses the latest Japanese source from Game Text Translation; Open Study Library opens previously saved study material.*
 
 ![Explainer analysis on the left of a Japanese game, with the Translator's Japanese transcript and English translation on the right](images/explainer-output.png)
 
@@ -58,6 +60,8 @@ Choose the intended Library before generating material. If you want the choice r
 Plain-text copies are stored under `Settings\Explanations` and its Profile subfolders. They are useful for independent reading or backups but are not a replacement for the Library database and its metadata.
 
 The saving options control future output. Disabling one does not delete explanations or screenshots already saved.
+
+> **Screenshot S10b — Explanation saving and startup options (to be added).** Show the lower-page Library, screenshot, plain-text saving, and Explainer startup controls.
 
 ## Startup options
 

@@ -2,9 +2,9 @@
 
 [Manual contents](README.md)
 
-The first two batches illustrate **27 of 28 topics: 19 complete, 8 partial, and 1 awaiting its first image**. Partial topics have a published image plus a numbered placeholder for the missing companion view. S10 has not yet been supplied. No nonexistent image is embedded.
+The supplied screenshots illustrate **28 of 28 topics: 21 complete, 7 partial, and none awaiting its first image**. Partial topics have a published image plus a numbered placeholder for the missing companion view. No nonexistent image is embedded.
 
-S05 is an annotated overview based on the supplied S07 screenshot; the unannotated original is retained. All other published images are the supplied screenshots, unmodified. Click an image filename below to inspect the full-resolution asset. Screenshot coverage last updated: 20 September 2026.
+S05 is an annotated overview based on the supplied S07 screenshot; the unannotated original is retained. All other published images are the supplied screenshots, unmodified. Click an image filename below to inspect the full-resolution asset. Screenshot coverage last updated: 22 September 2026.
 
 ## Capture guidelines
 
@@ -27,11 +27,11 @@ S05 is an annotated overview based on the supplied S07 screenshot; the unannotat
 | S03 | Complete | [API-key settings](02-setup.md) | [api-key-settings.png](images/api-key-settings.png) | Added: in-app key storage with both credentials masked. |
 | S04 | Complete | [First capture and result](02-setup.md) | [first-capture-and-result.png](images/first-capture-and-result.png) | Added: original game dialogue and matching translated output; no region-selection outline. |
 | S05 | Complete | [Desktop orientation](03-interface-and-controller.md) | [desktop-orientation.png](images/desktop-orientation.png) | Added: four numbered labels identifying sidebar, header Profile selector, page content, and footer. Original preserved as S07. |
-| S06 | Partial | [Controls and bindings](03-interface-and-controller.md) | [controls-and-bindings.png](images/controls-and-bindings.png) | S06a added: action bindings. **Still needed S06b:** lower controller options, direct-action/D-pad switches, and detection status. |
-| S07 | Partial | [Game Text page](04-game-text-translation.md) | [game-text-page.png](images/game-text-page.png) | S07a added: AI settings and capture actions. **Still needed S07b:** Formatting and Startup & advanced capture, including image-size limit. |
+| S06 | Complete | [Controls and bindings](03-interface-and-controller.md) | [controls-and-bindings.png](images/controls-and-bindings.png), [controller-options-and-detection.png](images/controller-options-and-detection.png) | S06a: action bindings. S06b: lower controller options, direct-action/D-pad switches, and detection status. |
+| S07 | Complete | [Game Text page](04-game-text-translation.md) | [game-text-page.png](images/game-text-page.png), [game-text-formatting-and-startup.png](images/game-text-formatting-and-startup.png) | S07a: AI settings and capture actions. S07b: multiple-capture help, Formatting, and Startup & advanced capture, including image-size limit. |
 | S08 | Complete | [Capture choices](04-game-text-translation.md) | [capture-choices.png](images/capture-choices.png) | Added: desktop Capture region / Capture window menu. Its size limit lives in advanced capture settings, not in this popup. |
-| S09 | Partial | [Audio setup and input check](05-audio-translation.md) | [audio-setup-and-input-check.png](images/audio-setup-and-input-check.png) | S09a added: AI/language and playback-device selection. **Still needed S09b:** completed input-check result and Start audio translation. |
-| S10 | Pending | [Explanation settings](06-explanation.md) | `explanation-settings.png` | Show the AI choices, Explain latest text, and saving options. |
+| S09 | Partial | [Audio setup and input check](05-audio-translation.md) | [audio-setup-and-input-check.png](images/audio-setup-and-input-check.png), [audio-input-check-result.png](images/audio-input-check-result.png) | S09a: AI/language and playback-device selection. S09b: successful local input check and expanded troubleshooting. **Still needed S09c:** page start/stop control. |
+| S10 | Partial | [Explanation settings](06-explanation.md) | [explanation-settings.png](images/explanation-settings.png) | S10a: AI choices, Explain last text, and Open Study Library. **Still needed S10b:** lower-page saving and startup options. |
 | S11 | Complete | [Explainer output](06-explanation.md) | [explainer-output.png](images/explainer-output.png) | Added: Japanese-source analysis beside the transcript and translation. |
 | S12 | Complete | [Overlay appearance and typography](07-overlay-windows.md) | [overlay-appearance-and-typography.png](images/overlay-appearance-and-typography.png) | Added: Translator appearance, speaker color, font, size, and bold. |
 | S13 | Complete | [Overlay positioning](07-overlay-windows.md) | [overlay-positioning.png](images/overlay-positioning.png) | Added: real positioning mode with move, resize, save, and cancel instructions. |
