@@ -31,6 +31,7 @@ The application uses provider APIs, not a provider's ordinary chat website. Crea
 ### Google Gemini
 
 Create or manage a key in [Google AI Studio](https://aistudio.google.com/app/apikey). Google's [API-key guide](https://ai.google.dev/gemini-api/docs/api-key) explains the project/key setup, and its [billing guide](https://ai.google.dev/gemini-api/docs/billing) explains account tiers and billing.
+
 At the time of writing Google offers a free tier API key which allow you to use the recommended Flash and Flash-Lite models, the number of requests is not unlimited but might be enough for playing a few hours every day and testing this application.
 
 ### OpenAI
