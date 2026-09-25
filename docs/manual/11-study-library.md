@@ -35,7 +35,11 @@ Use the manager to create, rename, archive, or restore named Libraries.
 
 *Figure S21a. Manage Study Libraries is the final, separated command in the Library dropdown.*
 
-> **Screenshot S21b — Library manager (to be added).** Show the create, rename, archive, and restore options for named Libraries.
+![Rename Study Library dialog with the Library name field, preservation guidance, Rename library, and Cancel](images/rename-study-library.png)
+
+*Figure S21b. Rename a named Library without removing its explanations, screenshots, backups, or Trash. The built-in Default name is reserved.*
+
+> **Screenshot S21c — Library manager (to be added).** Show the create, rename, archive, and restore options for named Libraries.
 
 - **Default** is a special built-in Library; it cannot be renamed or archived like a named Library.
 - **Archive** moves a Library out of the active list. It is not the same as deleting all its data.
@@ -68,8 +72,6 @@ Use **Columns...** to choose the useful columns and their presentation. Column v
 
 *Figure S22a. Profile and speaker filters narrow the table to matching dialogue. This crop shows the filter choices, not the complete dialog or column settings.*
 
-> **Screenshot S22b — Complete filters and column selection (to be added).** Show the full Filters dialog, including its action buttons, and the Columns settings or a table displaying Profile, Chapter, Japanese, Key grammar, and Versions. Use separate images if needed.
-
 An Anki link-check result such as **Found in Anki**, **Not found**, or **Not checked** is not interchangeable with a manually edited “Added to Anki” flag. See the [Anki chapter](11b-anki.md).
 
 ## Chapters, speakers, and tags
@@ -84,7 +86,9 @@ A practical tagging system is small and consistent: for example, `grammar-past`,
 
 *Figure S23a. Set a chapter for future explanations in the Library and Profile identified by the dialog. Existing entries are not changed by this setting.*
 
-> **Screenshot S23b — Edit existing-entry details (to be added).** Show editing chapter, speaker, or tags for a selected saved explanation.
+![Edit explanation details dialog with Chapter / section, Speaker, Tags, the Added to Anki checkbox, Save details, and Cancel](images/edit-explanation-details.png)
+
+*Figure S23b. Update the selected saved explanation's chapter, speaker, and comma-separated tags, then choose Save details. Unlike Current chapter, this edits an existing entry.*
 
 ## Read an explanation
 

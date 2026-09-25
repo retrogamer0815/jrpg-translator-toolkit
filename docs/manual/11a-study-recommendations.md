@@ -46,6 +46,10 @@ Generation uses the **Explanation provider/model**. It is an AI request and can 
 
 Normal generation targets candidates not yet assessed under the applicable configuration. **Regenerate** replaces assessments for the targeted candidates; use it intentionally if you change your criteria or disagree with earlier results.
 
+![Regenerate recommendations confirmation showing candidate counts, the AI provider and model, learner levels, selection style, and the Regenerate action](images/regenerate-recommendations.png)
+
+*Figure S26b. Regeneration replaces existing ratings for the displayed candidates using the chosen settings. Existing Anki matches and globally ignored vocabulary remain excluded; nothing is regenerated until you confirm.*
+
 Results are cached. Reopening or refreshing the review window does not by itself regenerate the ratings. Changes to content, model, or preferences can make an old assessment inapplicable and require another assessment.
 
 ## Customize the recommendation criteria
@@ -61,7 +65,7 @@ Keep at least one focus area enabled. Set the learner level honestly: an easy se
 
 You can supply additional criteria, such as preferring everyday dialogue or avoiding very game-specific names. Selection style affects how broadly the model recommends material; it does not change how many cards Anki will add automatically, because adding remains a separate action.
 
-> **Screenshot S26b — Customized recommendation criteria (to be added).** Show the focus areas and optional custom instructions inside Customize.
+> **Screenshot S26c — Customized recommendation criteria (to be added).** Show the focus areas and optional custom instructions inside Customize.
 
 If you edit the custom recommendation prompt, follow its **Save draft** and **Apply preferences** steps. Saving a draft is not the same as applying it and running a new assessment.
 

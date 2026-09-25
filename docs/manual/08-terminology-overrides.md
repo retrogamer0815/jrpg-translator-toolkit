@@ -12,7 +12,9 @@ Open **Settings → Terminology** and enable **Use terminology overrides**. Ther
 
 *Figure S14a. The master switch and local-correction glossary. The independent Japanese-to-target-language rule section is farther down the page.*
 
-> **Screenshot S14b — Both terminology rule selections (to be added).** Show the local-correction and Japanese-to-target-language glossary selectors and their management controls; use two crops if needed.
+![Terminology settings showing the Local corrections and Model instructions glossary selections, with the Local corrections entry manager open in front](images/terminology-selectors-and-local-corrections.png)
+
+*Figure S14b. Local corrections and Model instructions have separate glossary selections and management controls. The foreground window shows local output replacements; it partially covers the settings page and is cropped on the right.*
 
 ## The two rule types
 

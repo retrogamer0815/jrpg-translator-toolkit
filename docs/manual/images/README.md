@@ -4,7 +4,7 @@ The unannotated source is [game-text-page.png](game-text-page.png), supplied by 
 
 All other published images are the supplied screenshots copied without modification. S21's supplied filename duplicated the overview title; it is stored as `library-dropdown-and-management.png` to describe its actual content. S18 uses the corrected screenshot supplied on 20 September 2026, with personal account names redacted by the project owner in both user-specific paths.
 
-The original S06 and S07 overview screenshots are retained as figures S06a and S07a. Their lower-page companions are S06b and S07b. The table records the corrected supplied filenames confirmed on 22 September 2026; the lower-page views do not replace the originals:
+The original S06 and S07 overview screenshots are retained as figures S06a and S07a. Their lower-page companions are S06b and S07b. The table records the corrected supplied filenames confirmed on 22 September 2026 and the companion screenshots added on 25 September 2026; the lower-page views do not replace the originals:
 
 | Supplied filename | Published asset | Figure |
 | --- | --- | --- |
@@ -13,7 +13,15 @@ The original S06 and S07 overview screenshots are retained as figures S06a and S
 | S07 - game-text-page.png | [game-text-page.png](game-text-page.png) | S07a |
 | S07b - game-text-page.png | [game-text-formatting-and-startup.png](game-text-formatting-and-startup.png) | S07b |
 | S09b - audio-setup-and-input-check.png | [audio-input-check-result.png](audio-input-check-result.png) | S09b |
+| S09c - audio-setup-and-input-check.png | [audio-start-stop-control.png](audio-start-stop-control.png) | S09c |
 | S10 - explanation-settings.png | [explanation-settings.png](explanation-settings.png) | S10a |
+| S10b - explanation-settings.png | [explanation-saving-and-startup.png](explanation-saving-and-startup.png) | S10b |
+| S14b - terminology-overview.png | [terminology-selectors-and-local-corrections.png](terminology-selectors-and-local-corrections.png) | S14b |
+| S21b - study-library-overview.png | [rename-study-library.png](rename-study-library.png) | S21b |
+| S23b - metadata-and-current-chapter.png | [edit-explanation-details.png](edit-explanation-details.png) | S23b |
+| S26b - recommendation-preferences.png | [regenerate-recommendations.png](regenerate-recommendations.png) | S26b |
+
+The six companion screenshots added on 25 September 2026 are also unchanged originals. Their captions describe the supplied views: S21b is the Rename Library dialog, and S26b is the regeneration confirmation, not the Library manager or the Customize dialog. Those still-missing views are tracked as S21c and S26c. The unfilled S22b placeholder was removed at the project owner's request; the existing S22a image remains.
 
 The screenshot models, settings, Profile names, and controller bindings are examples, not a recommended or permanent default configuration. The full-screen dashboard image is the supplied 3840×2160 capture; it is not evidence of the 1280×720 layout.
 

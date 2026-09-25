@@ -52,7 +52,9 @@ For predictable results, stop the stream before changing provider, model, langua
 
 Use the page's start/stop control, the desktop footer Audio control, the full-screen Audio Translation tile, or your assigned shortcut to toggle the stream.
 
-> **Screenshot S09c — Audio start/stop control (to be added).** Show the page's Start audio translation button.
+![Audio Translation page showing the Live translation section with Start audio translation and the current Off status](images/audio-start-stop-control.png)
+
+*Figure S09c. Scroll to Live translation to start or stop the stream. This example is stopped, and its selected input has not yet been tested.*
 
 The Translator overlay displays incoming translated text; it is not a synthesized-voice feature. There can be a delay while the service interprets speech. Music, sound effects, overlapping speakers, accents, and very short fragments can affect results.
 

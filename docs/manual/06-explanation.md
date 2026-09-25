@@ -61,7 +61,9 @@ Plain-text copies are stored under `Settings\Explanations` and its Profile subfo
 
 The saving options control future output. Disabling one does not delete explanations or screenshots already saved.
 
-> **Screenshot S10b — Explanation saving and startup options (to be added).** Show the lower-page Library, screenshot, plain-text saving, and Explainer startup controls.
+![Explanation page with Save to Study Library, Include source screenshots, Save plain-text copies, and expanded Explainer startup options](images/explanation-saving-and-startup.png)
+
+*Figure S10b. Choose which explanation outputs to keep. The expanded startup options control whether the Explainer opens on startup and stays on top when it next opens.*
 
 ## Startup options
 
