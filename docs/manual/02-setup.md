@@ -53,7 +53,6 @@ Open **Settings → API keys** and choose the method that fits how you use the a
 - **Windows user environment variables — recommended on one machine.** Keys stay with your Windows account on that PC, outside the application folder. This reduces the risk of accidentally including them when copying or sharing the app folder. Configure them separately on each PC/account you use.
 - **In-app storage — convenient for portability.** Keys are saved in `Settings\.env` and travel with the complete app folder, including on a USB stick. Anyone who can read that file can read the keys, so keep the drive, folder, and its backups private.
 
-Neither option is an encrypted secret vault. Windows environment variables are also stored without encryption and can be exposed if the account, machine, or process is compromised. The recommendation above is about keeping credentials out of copied application files, not making them inaccessible to other software. See [Microsoft's environment-variable security warning](https://learn.microsoft.com/en-us/aspnet/core/security/app-secrets#work-with-environment-variables).
 
 ### Option 1: Windows user environment variables
 
