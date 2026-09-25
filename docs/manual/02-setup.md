@@ -8,6 +8,8 @@ Use Windows 10 or 11 and a packaged release of JRPG Translator. You will also ne
 
 The packaged application is portable: extract it into a writable folder and keep its supporting files together. A full packaged build includes the runtime components needed by the tool; you should not need to install Python or AutoHotkey separately for ordinary use. The GitHub source-code ZIP is not the same thing as a ready-to-run release.
 
+You have two choices for API-key storage: keep keys with your Windows user account (recommended for a single-machine setup), or save them in the app folder for convenience when moving between your own machines, for example on a USB stick. Both methods are explained below; in-app storage is optional.
+
 LaunchBox, Big Box, JoyToKey, and Anki are optional, separate applications.
 
 ## Download and extract
@@ -42,28 +44,63 @@ Model availability, quotas, pricing, and regional access can change. This manual
 
 An API key is a credential. Do not include it in screenshots, exported support files, public GitHub issues, or a shared portable folder. If one is exposed, revoke it in the provider dashboard and create a replacement.
 
-## Add keys in JRPG Translator
+## Choose where to store API keys
+
+Open **Settings → API keys** and choose the method that fits how you use the app. You only need a key for each provider you plan to use.
+
+- **Windows user environment variables — recommended on one machine.** Keys stay with your Windows account on that PC, outside the application folder. This reduces the risk of accidentally including them when copying or sharing the app folder. Configure them separately on each PC/account you use.
+- **In-app storage — convenient for portability.** Keys are saved in `Settings\.env` and travel with the complete app folder, including on a USB stick. Anyone who can read that file can read the keys, so keep the drive, folder, and its backups private.
+
+Neither option is an encrypted secret vault. Windows environment variables are also stored without encryption and can be exposed if the account, machine, or process is compromised. The recommendation above is about keeping credentials out of copied application files, not making them inaccessible to other software. See [Microsoft's environment-variable security warning](https://learn.microsoft.com/en-us/aspnet/core/security/app-secrets#work-with-environment-variables).
+
+### Option 1: Windows user environment variables
+
+You do not need to find the Windows dialog yourself or use a terminal: JRPG Translator opens it directly.
+
+![API keys settings with the Windows environment variables explanation and Open environment variables button](images/api-key-windows-shortcut.png)
+
+*Figure S03b. Open environment variables takes you straight to the Windows dialog. You do not need to enable in-app key entry to use this option.*
 
 1. Open **Settings → API keys**.
-2. Enable in-app key storage/editing if you want the application to manage the keys.
+2. Select **Open environment variables...** in the **Windows environment variables** card.
+3. In the upper **User variables** section, choose **New...**. If the variable already exists, select it and choose **Edit...** instead. Leave **System variables** and unrelated entries such as `Path` unchanged.
+4. Enter the appropriate name in **Variable name** and paste only your API key into **Variable value**:
+
+   - Gemini: `GEMINI_API_KEY`.
+   - OpenAI: `OPENAI_API_KEY`.
+
+5. Confirm with **OK**. Repeat for the other provider only if you use it, then choose **OK** in the Environment Variables dialog to save.
+6. Fully close and restart JRPG Translator. If you launch it through LaunchBox / Big Box, restart that launcher first as well, so the new process inherits the updated variables.
+
+![Windows Environment Variables dialog with GEMINI_API_KEY and OPENAI_API_KEY in User variables; credential values, account name, and personal path segments are redacted](images/windows-user-api-variables.png)
+
+*Figure S03c. Add your provider keys in the upper User variables section, not System variables. The black blocks are privacy redactions for this manual; Windows normally displays these values openly.*
+
+The in-app key fields can remain empty with this method; you do not need to copy the keys into both places or choose **Save keys**. Gemini also accepts `GOOGLE_API_KEY` for compatibility, but `GEMINI_API_KEY` is the straightforward choice for this setup.
+
+Windows retains user variables across restarts; running programs inherit their environment from the process that launched them. If a fresh app launch still uses old values, close its launcher or terminal too; signing out and back in can refresh the session. See [Microsoft's environment-variable documentation](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_environment_variables).
+
+### Option 2: In-app storage for a portable setup
+
+Choose this if you want your keys to accompany the app between your own trusted machines without configuring Windows on each one.
+
+1. Open **Settings → API keys**.
+2. Enable **Enter API keys in JRPG Translator (.env)**.
 3. Enter the key for each provider you plan to use.
 4. Choose **Save keys**.
 5. Check the displayed storage/status information.
 
 ![In-app API-key settings with masked Gemini and OpenAI fields, Save keys, and Delete .env](images/api-key-settings.png)
 
-*Figure S03. In-app key entry with both credentials masked. Save keys writes the local .env file; Delete .env is a separate action.*
+*Figure S03a. Optional in-app key entry with both credentials masked. Save keys writes the local .env file; Delete .env is a separate action.*
 
-In-app storage writes a local `Settings\.env` file. It is convenient, but it is a plain-text file, not an encrypted password vault. Masking a field on screen does not encrypt the saved value.
+In-app storage writes a local `Settings\.env` file. Keep that file with your private portable installation if you want the keys to travel with it. Do not include it in public uploads, support bundles, or app copies you give to someone else. Masking a field on screen does not encrypt the saved value.
 
-Turning off in-app key editing does **not** delete an existing `.env`. Use the explicit deletion action if you want to remove it, after ensuring another intended credential source is available.
+### Switching methods or troubleshooting an old key
 
-Advanced users can supply environment variables instead:
+Turning off in-app key editing does **not** delete an existing `.env`. To move to Windows-only storage, configure the Windows user variables first, then use **Delete .env** to remove the saved in-app keys. If that button is disabled, enable in-app entry to access it; you do not need to save the keys again. This removes the app's `.env` file, not your Windows variables. Restart the app and its launcher before testing. Older backups or copied folders may still contain the old file.
 
-- `OPENAI_API_KEY` for OpenAI.
-- `GEMINI_API_KEY` for Gemini; the application also supports its Google-key compatibility setting.
-
-Existing process environment values take precedence over values loaded from `.env`. If an old key keeps being used, check both sources. Restart JRPG Translator after changing external environment variables; restart LaunchBox too if it launches the tool.
+An existing process environment variable is not overwritten by the same variable in `.env`. If an old key keeps being used, check both sources, including any Gemini compatibility alias. This also matters on a destination PC when using a USB copy: its Windows key may take precedence over the key carried with the app.
 
 ## Choose the translation AI
 
@@ -100,7 +137,7 @@ If nothing appears, check the capture target, provider key, selected model, and 
 
 Most ordinary settings take effect and persist as you change them. There are important exceptions:
 
-- API-key editing uses **Save keys**.
+- In-app API-key editing uses **Save keys**; Windows user variables are saved with **OK** in the Windows dialog and require restarting the app/launcher.
 - Prompt, glossary, and other editors have their own save/confirm actions.
 - A named **Profile** is a snapshot. Use **Save current** to update it; changing the live settings is not the same as rewriting that Profile.
 - Startup overlay options control a future start/open sequence; they are not substitutes for the current show/hide controls.

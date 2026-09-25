@@ -4,7 +4,7 @@
 
 The supplied screenshots illustrate **28 of 28 topics: all complete, with no outstanding screenshot placeholders**. No nonexistent image is embedded.
 
-S05 is an annotated overview based on the supplied S07 screenshot; the unannotated original is retained. All other published images are the supplied screenshots, unmodified. Click an image filename below to inspect the full-resolution asset. Screenshot coverage last updated: 25 September 2026.
+S05 is an annotated overview based on the supplied S07 screenshot; the unannotated original is retained. S03c is a privacy-redacted derivative of the supplied Windows dialog screenshot. All other published images are the supplied screenshots, unmodified. Click an image filename below to inspect the published asset. Screenshot coverage last updated: 25 September 2026.
 
 ## Capture guidelines
 
@@ -24,7 +24,7 @@ S05 is an annotated overview based on the supplied S07 screenshot; the unannotat
 | --- | --- | --- | --- | --- |
 | S01 | Complete | [Overall workflow](01-introduction.md) | [overall-workflow.png](images/overall-workflow.png) | Added: game, transcript/translation, and Explainer together. |
 | S02 | Complete | [Extracted application](02-setup.md) | [extracted-application.png](images/extracted-application.png) | Added: extracted portable files with no personal parent path. |
-| S03 | Complete | [API-key settings](02-setup.md) | [api-key-settings.png](images/api-key-settings.png) | Added: in-app key storage with both credentials masked. |
+| S03 | Complete | [API-key storage choices](02-setup.md) | S03a: [api-key-settings.png](images/api-key-settings.png), S03b: [api-key-windows-shortcut.png](images/api-key-windows-shortcut.png), S03c: [windows-user-api-variables.png](images/windows-user-api-variables.png) | S03a: optional in-app key storage with masked fields. S03b: direct shortcut to Windows Environment Variables. S03c: provider keys in User variables, with credentials and personal details redacted. |
 | S04 | Complete | [First capture and result](02-setup.md) | [first-capture-and-result.png](images/first-capture-and-result.png) | Added: original game dialogue and matching translated output; no region-selection outline. |
 | S05 | Complete | [Desktop orientation](03-interface-and-controller.md) | [desktop-orientation.png](images/desktop-orientation.png) | Added: four numbered labels identifying sidebar, header Profile selector, page content, and footer. Original preserved as S07a. |
 | S06 | Complete | [Controls and bindings](03-interface-and-controller.md) | S06a: [controls-and-bindings.png](images/controls-and-bindings.png), S06b: [controller-options-and-detection.png](images/controller-options-and-detection.png) | S06a: original S06 action-bindings overview. S06b: lower controller options, direct-action/D-pad switches, and detection status. |
