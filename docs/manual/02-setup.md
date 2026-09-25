@@ -28,13 +28,13 @@ Do not move only the executable: scripts, overlay components, Python, and settin
 
 The application uses provider APIs, not a provider's ordinary chat website. Create an API key in your own account and check the API project's billing, limits, and model access before sending requests.
 
+### Google Gemini
+
+Create or manage a key in [Google AI Studio](https://aistudio.google.com/app/apikey). Google's [API-key guide](https://ai.google.dev/gemini-api/docs/api-key) explains the project/key setup, and its [billing guide](https://ai.google.dev/gemini-api/docs/billing) explains account tiers and billing. At the time of writing Google offers a free tier API key which allow you to use the recommended Flash and Flash-Lite models, the number of requests is not unlimited but might be enough for playing a few hours every day and testing this application.
+
 ### OpenAI
 
 Use the [OpenAI API quickstart](https://developers.openai.com/api/docs/quickstart) and [API keys dashboard](https://platform.openai.com/api-keys). Consult [current API pricing](https://developers.openai.com/api/docs/pricing) for costs. Do not assume a chat-product subscription supplies API credits.
-
-### Google Gemini
-
-Create or manage a key in [Google AI Studio](https://aistudio.google.com/app/apikey). Google's [API-key guide](https://ai.google.dev/gemini-api/docs/api-key) explains the project/key setup, and its [billing guide](https://ai.google.dev/gemini-api/docs/billing) explains account tiers and billing.
 
 Model availability, quotas, pricing, and regional access can change. This manual deliberately does not promise a particular model or free allowance.
 
