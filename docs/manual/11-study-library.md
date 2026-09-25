@@ -35,11 +35,9 @@ Use the manager to create, rename, archive, or restore named Libraries.
 
 *Figure S21a. Manage Study Libraries is the final, separated command in the Library dropdown.*
 
-![Rename Study Library dialog with the Library name field, preservation guidance, Rename library, and Cancel](images/rename-study-library.png)
+![Manage Study Libraries window listing Libraries, active status, source and explanation counts, storage use, and management actions](images/manage-study-libraries.png)
 
-*Figure S21b. Rename a named Library without removing its explanations, screenshots, backups, or Trash. The built-in Default name is reserved.*
-
-> **Screenshot S21c — Library manager (to be added).** Show the create, rename, archive, and restore options for named Libraries.
+*Figure S21b. Select a Library to switch to it, rename it, archive it, or open its folder. New library creates a separate Library; Archived libraries opens the archive management view. Default cannot be renamed or archived.*
 
 - **Default** is a special built-in Library; it cannot be renamed or archived like a named Library.
 - **Archive** moves a Library out of the active list. It is not the same as deleting all its data.

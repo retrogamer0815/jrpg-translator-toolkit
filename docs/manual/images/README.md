@@ -17,11 +17,12 @@ The original S06 and S07 overview screenshots are retained as figures S06a and S
 | S10 - explanation-settings.png | [explanation-settings.png](explanation-settings.png) | S10a |
 | S10b - explanation-settings.png | [explanation-saving-and-startup.png](explanation-saving-and-startup.png) | S10b |
 | S14b - terminology-overview.png | [terminology-selectors-and-local-corrections.png](terminology-selectors-and-local-corrections.png) | S14b |
-| S21b - study-library-overview.png | [rename-study-library.png](rename-study-library.png) | S21b |
+| S21b - study-library-overview.png | [manage-study-libraries.png](manage-study-libraries.png) | S21b |
 | S23b - metadata-and-current-chapter.png | [edit-explanation-details.png](edit-explanation-details.png) | S23b |
 | S26b - recommendation-preferences.png | [regenerate-recommendations.png](regenerate-recommendations.png) | S26b |
+| S26c - recommendation-preferences.png | [recommendation-customization.png](recommendation-customization.png) | S26c |
 
-The six companion screenshots added on 25 September 2026 are also unchanged originals. Their captions describe the supplied views: S21b is the Rename Library dialog, and S26b is the regeneration confirmation, not the Library manager or the Customize dialog. Those still-missing views are tracked as S21c and S26c. The unfilled S22b placeholder was removed at the project owner's request; the existing S22a image remains.
+The companion screenshots added on 25 September 2026 are also unchanged originals. S21b now uses the supplied Manage Study Libraries replacement instead of the earlier Rename Library image; the redundant S21c placeholder was removed at the project owner's request. S26b shows the regeneration confirmation, and S26c shows the Customize dialog's study-focus areas and optional selection guidance. The unfilled S22b placeholder was also removed at the project owner's request; the existing S22a image remains. Superseded images remain recoverable from Git history.
 
 The screenshot models, settings, Profile names, and controller bindings are examples, not a recommended or permanent default configuration. The full-screen dashboard image is the supplied 3840×2160 capture; it is not evidence of the 1280×720 layout.
 

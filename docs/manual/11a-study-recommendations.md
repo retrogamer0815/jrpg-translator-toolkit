@@ -65,7 +65,9 @@ Keep at least one focus area enabled. Set the learner level honestly: an easy se
 
 You can supply additional criteria, such as preferring everyday dialogue or avoiding very game-specific names. Selection style affects how broadly the model recommends material; it does not change how many cards Anki will add automatically, because adding remains a separate action.
 
-> **Screenshot S26c — Customized recommendation criteria (to be added).** Show the focus areas and optional custom instructions inside Customize.
+![Recommendation preferences with four study-focus checkboxes, optional selection guidance, Edit / view prompt, Restore defaults, Apply preferences, and Cancel](images/recommendation-customization.png)
+
+*Figure S26c. Choose study-focus areas and optionally add selection guidance, then select Apply preferences. Applying preferences does not send an AI request; generation is a separate confirmation.*
 
 If you edit the custom recommendation prompt, follow its **Save draft** and **Apply preferences** steps. Saving a draft is not the same as applying it and running a new assessment.
 
