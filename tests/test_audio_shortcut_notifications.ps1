@@ -16,14 +16,14 @@ foreach ($name in @('StartStopAudio', 'StartAudio', 'StopAudio', 'ToggleAudioFro
 $binding = [regex]::Match($source, '(?ms)^Rebind_StartStopAudio\([^\r\n]*\)\s*\{.*?^\}').Value
 if (!$binding.Contains('SafeCall(StartStopAudio)')) { throw 'Configured keyboard/JoyToKey shortcut must reach the notification handler.' }
 $toast = [regex]::Match($source, '(?ms)^Toast\([^\r\n]*\)\s*\{.*?^\}').Value
-if (!$toast.Contains('NoActivate x20 y20') -or !$toast.Contains('+AlwaysOnTop') -or !$toast.Contains('CPToastGui.Opt("+E0x20")')) {
+if (!$toast.Contains('+AlwaysOnTop') -or !$toast.Contains('+E0x08080020') -or !$toast.Contains('ToastPresent(')) {
     throw 'Shortcut notification must reuse the top-left, non-activating, click-through toast.'
 }
-$constructor = [regex]::Match($toast, 'CPToastGui := Gui\([^\r\n]+').Value
-if ($constructor.Contains('+E0x20') -or
-    $toast.IndexOf('CPToastGui.Opt("+E0x20")') -lt $toast.IndexOf('CPToastText.Redraw()') -or
-    !$toast.Contains('WinSetTransparent(255, CPToastGui.Hwnd)')) {
-    throw 'Paint the opaque layered toast before enabling click-through; do not restore the Show-time paint stall.'
+$present = [regex]::Match($source, '(?ms)^ToastPresent\([^\r\n]*\)\s*\{.*?^\}').Value
+if (!$present.Contains('user32\UpdateLayeredWindow') -or !$present.Contains('ULW_OPAQUE') -or
+    !$present.Contains('"int", 20, "int", 20, position') -or
+    $toast.Contains('.Show(') -or $toast.Contains('.Redraw(') -or $toast.Contains('WinSetTransparent(')) {
+    throw 'Keep toast pixels compositor-owned; redirected transparent-window painting can stall the desktop.'
 }
 $output = New-Item -ItemType Directory -Path $OutputDirectory -Force
 $script = Join-Path $output.FullName 'audio-shortcuts-generated.ahk'

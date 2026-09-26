@@ -4,11 +4,15 @@ param(
     [switch]$ShutdownOnly,
     [switch]$ResizeOnly,
     [switch]$AudioFeedbackOnly,
+    [switch]$ProfileFeedbackOnly,
+    [switch]$ChapterOnly,
+    [switch]$PromptUnsavedOnly,
+    [switch]$GenerationActivityOnly,
     [string]$AutoHotkey = 'C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe',
     [string]$OutputDirectory = (Join-Path ([IO.Path]::GetTempPath()) ('jrpg-desktop-tests-' + [Guid]::NewGuid().ToString('N')))
 )
 $ErrorActionPreference = 'Stop'
-if (@($StudyOnly, $DialogsOnly, $ShutdownOnly, $ResizeOnly, $AudioFeedbackOnly).Where({ [bool]$_ }).Count -gt 1) {
+if (@($StudyOnly, $DialogsOnly, $ShutdownOnly, $ResizeOnly, $AudioFeedbackOnly, $ProfileFeedbackOnly, $ChapterOnly, $PromptUnsavedOnly, $GenerationActivityOnly).Where({ [bool]$_ }).Count -gt 1) {
     throw 'Choose only one focused test mode.'
 }
 $repo = Split-Path -Parent $PSScriptRoot
@@ -356,7 +360,7 @@ $audioRuntimeRequirements = [ordered]@{
     'worker-owned session marker' = 'EnvSet("AUDIO_SESSION_FILE", gAudioSessionFile)'
     'immediate footer refresh' = 'CPDesktopRefreshStatus()'
     'shutdown-owned audio cleanup' = 'try StopAudioCore(false, false)'
-    'toast text background' = '" Background" background " +0x200"'
+    'compositor-owned toast image' = 'ToastPresent(CPToastGui, CPToastText, background, foreground)'
 }
 foreach ($requirement in $audioRuntimeRequirements.GetEnumerator()) {
     if (!$source.Contains($requirement.Value)) {
@@ -576,6 +580,28 @@ foreach ($kind in @('CHOICE', 'CONTEXT')) {
 if ($StudyOnly) {
     $generated = $generated.Replace('; @STUDY_ONLY@', 'TestDesktopStudyWindows()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " desktop study assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
 }
+if ($ChapterOnly) {
+    $generated = $generated.Replace('; @STUDY_ONLY@', 'TestDesktopChapterSizing()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " chapter sizing assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
+}
+if ($PromptUnsavedOnly) {
+    $generated = $generated.Replace('; @STUDY_ONLY@', 'TestPromptUnsavedChanges()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " unsaved-prompt assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
+    $generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'prompt_unsaved_harness.ahk'))
+}
+if ($GenerationActivityOnly) {
+    $generated = $generated.Replace('; @STUDY_ONLY@', 'TestGenerationActivity()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " generation activity assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
+    $generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'generation_activity_harness.ahk'))
+    # Run production request lifecycles against synthetic process results only:
+    # no provider, real database, or Anki is contacted.
+    foreach ($name in @('StudyReaderGenerateVocabularyExample', 'StudyReaderGenerateNewVersion')) {
+        $body = [regex]::Match($source, '(?ms)^' + $name + '\(.*?^}').Value
+        if (!$body) { throw "Missing generation function: $name" }
+        $generated += "`r`n" + $body.Replace($name + '(', 'Test' + $name + '(').
+            Replace('RunWait(', 'TestGenerationWait(').
+            Replace('StudyReaderAnkiMessage(', 'TestGenerationNotice(').
+            Replace('CPThemedOwnedMessage(', 'TestGenerationNotice(').
+            Replace('StudyLibraryLoadGroup(', 'TestGenerationLoadGroup(')
+    }
+}
 if ($ShutdownOnly) {
     $generated = $generated.Replace('; @STUDY_ONLY@', 'DesktopTestExitWithLiveWindow()')
 }
@@ -589,12 +615,20 @@ if ($AudioFeedbackOnly) {
     $generated = $generated.Replace('; @STUDY_ONLY@', 'if TestAudioFeedbackBegin()' + "`r`n" + '        return')
     $generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'audio_feedback_ui_harness.ahk'))
 }
+if ($ProfileFeedbackOnly) {
+    # Never discover/send commands to the user's real overlay windows.
+    $isolatedSource = $source.Replace('WinExist(title)', 'WinExist("Synthetic profile " title)').Replace('WinExist("Translator")', 'WinExist("Synthetic profile Translator")').Replace('WinExist("Explainer")', 'WinExist("Synthetic profile Explainer")')
+    [IO.File]::WriteAllText((Join-Path $output.FullName 'JRPG Translator.ahk'), $isolatedSource, [Text.UTF8Encoding]::new($true))
+    $generated = $generated.Replace('; @STUDY_ONLY@', 'if TestProfileFeedbackBegin()' + "`r`n" + '        return')
+    $generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'audio_feedback_ui_harness.ahk'))
+    $generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'profile_feedback_ui_harness.ahk'))
+}
 $script = Join-Path $output.FullName 'desktop-generated.ahk'
 [IO.File]::WriteAllText($script, $generated, [Text.UTF8Encoding]::new($true))
 $stdout = Join-Path $output.FullName 'desktop.stdout.txt'
 $stderr = Join-Path $output.FullName 'desktop.stderr.txt'
 $process = Start-Process -FilePath $AutoHotkey -ArgumentList @('/ErrorStdOut', ('"' + $script + '"')) -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-$testTimeout = if ($AudioFeedbackOnly) { 45000 } else { 300000 }
+$testTimeout = if ($AudioFeedbackOnly -or $ProfileFeedbackOnly) { 60000 } else { 300000 }
 if (!$process.WaitForExit($testTimeout)) {
     $process.Kill()
     throw "Desktop test timed out. Logs: $output"
@@ -604,6 +638,23 @@ $result = [IO.File]::ReadAllText($stdout)
 $errors = [IO.File]::ReadAllText($stderr)
 if ($process.ExitCode -ne 0 -or $errors -or $result.Contains('Warning:') -or $result.Contains('FAIL:')) { throw "$result`n$errors`nArtifacts: $output" }
 $namingChecks = 0
+if ($GenerationActivityOnly) {
+    foreach ($line in [IO.File]::ReadAllLines((Join-Path $output.FullName 'activity-bounds.txt'))) {
+        $parts = $line.Split('|')
+        $first = [Drawing.Bitmap]::new((Join-Path $output.FullName ("activity-$($parts[0])-1.png")))
+        $second = [Drawing.Bitmap]::new((Join-Path $output.FullName ("activity-$($parts[0])-2.png")))
+        try {
+            $changed = 0
+            for ($y = [int]$parts[2]; $y -lt ([int]$parts[2] + [int]$parts[4]); $y++) {
+                for ($x = [int]$parts[1]; $x -lt ([int]$parts[1] + [int]$parts[3]); $x++) {
+                    if ($first.GetPixel($x, $y) -ne $second.GetPixel($x, $y)) { $changed++ }
+                }
+            }
+            if ($changed -eq 0) { throw "Activity bar is not animating: $($parts[0])" }
+            Write-Output "PASS: $($parts[0]) activity bar animates ($changed changed pixels)."
+        } finally { $first.Dispose(); $second.Dispose() }
+    }
+}
 $namingBounds = Join-Path $output.FullName 'naming-visibility.txt'
 if (Test-Path -LiteralPath $namingBounds) {
     # Geometry alone misses a static background painting over the form. Check
@@ -630,7 +681,7 @@ if (Test-Path -LiteralPath $namingBounds) {
     }
     Write-Output "PASS: $namingChecks naming-control visibility checks."
 }
-if ($StudyOnly -or $ShutdownOnly -or $DialogsOnly -or $ResizeOnly -or $AudioFeedbackOnly) {
+if ($StudyOnly -or $ShutdownOnly -or $DialogsOnly -or $ResizeOnly -or $AudioFeedbackOnly -or $ProfileFeedbackOnly -or $ChapterOnly -or $PromptUnsavedOnly -or $GenerationActivityOnly) {
     Write-Output $result.Trim()
     Write-Output "Test artifacts: $output"
     return

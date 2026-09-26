@@ -2624,6 +2624,48 @@ TestBigBoxSetupManagement() {
             "Prompt editing creates a backup and returns to its setting tile")
         CPBigBoxOpenAIChoice("detail")
         CPBigBoxOpenChoiceManager()
+        CPBigBoxPromptAction("edit")
+        CPBigBoxControls["setup_raw"].Value := "Unsaved fullscreen draft {jp}"
+        TestPromptCloseAnswer := "Cancel"
+        CPBigBoxCancelSetup()
+        TestAssert(CPBigBoxSetupState["flow"] = "promptText"
+            && CPBigBoxControls["setup_raw"].Value = "Unsaved fullscreen draft {jp}"
+            && FileRead(promptPath, "UTF-8") = "Edited prompt {jp}",
+            "Fullscreen Cancel preserves the editor draft and saved prompt")
+        CPBigBoxDashboardHide(false)
+        TestAssert(CPBigBoxSetupState["flow"] = "promptText" && CPBigBoxCurrentPage = "setupEdit",
+            "Dashboard hide cannot bypass cancelled unsaved-prompt confirmation")
+        TestAssert(CPBigBoxReturnToGame() = true && CPBigBoxSetupState["flow"] = "promptText",
+            "Fullscreen native Close vetoes default hiding after Cancel")
+        TestPromptCloseAnswer := "No"
+        CPBigBoxCancelSetup()
+        TestAssert(CPBigBoxSetupState["flow"] = "promptTools"
+            && FileRead(promptPath, "UTF-8") = "Edited prompt {jp}",
+            "Fullscreen Discard returns to tools without writing")
+        CPBigBoxPromptAction("edit")
+        CPBigBoxControls["setup_raw"].Value := "Saved on close {jp}"
+        TestPromptCloseAnswer := "Yes"
+        CPBigBoxCancelSetup()
+        TestAssert(CPBigBoxCurrentPage = "quickTranslation"
+            && FileRead(promptPath, "UTF-8") = "Saved on close {jp}",
+            "Fullscreen Save and close saves before returning to the parent")
+        CPBigBoxOpenAIChoice("detail")
+        CPBigBoxOpenChoiceManager()
+        CPBigBoxPromptAction("edit")
+        CPBigBoxControls["setup_raw"].Value := "Draft despite conflict {jp}"
+        ; The existing concurrency guard must veto close-save as well.
+        SaveTextAtomic(promptPath, "External changed prompt {jp} - longer")
+        CPBigBoxCancelSetup()
+        TestAssert(CPBigBoxSetupState["flow"] = "promptText"
+            && CPBigBoxControls["setup_raw"].Value = "Draft despite conflict {jp}"
+            && InStr(CPBigBoxSetupNotice, "changed"),
+            "Fullscreen rejected save keeps the editor and draft")
+        TestPromptCloseAnswer := "No"
+        CPBigBoxCancelSetup()
+        CPBigBoxCancelSetup()
+        CPBigBoxCloseAIChoice()
+        CPBigBoxOpenAIChoice("detail")
+        CPBigBoxOpenChoiceManager()
         CPBigBoxPromptAction("delete")
         CPBigBoxCancelSetup()
         TestAssert(FileExist(promptPath) && CPBigBoxCurrentPage = "setupTools",
@@ -3651,6 +3693,16 @@ CPDesktopRefreshAudio(*) => 0
 CPDialogDefaultOwner(*) => 0
 CPDialogPresentation(*) => "fullscreen"
 CPAdaptiveOwnedMessage(*) => "OK"
+
+; UI rendering/modal choices are exercised by test_desktop_layout
+; -PromptUnsavedOnly. Here control the response to test dashboard state flow.
+CPThemedOwnedMessage(owner, message, title, buttons, icon, width, yesLabel, noLabel, cancelLabel) {
+    global TestPromptCloseAnswer, CPBigBoxGui
+    TestAssert(owner = CPBigBoxGui.Hwnd && buttons = "yesnocancel"
+        && yesLabel = "Save and close" && noLabel = "Discard changes" && cancelLabel = "Cancel",
+        "Fullscreen prompt close uses the shared three-choice confirmation")
+    return TestPromptCloseAnswer
+}
 SyncUnifiedWindowAppearance(*) => 0
 SyncPromptPostproc(name) => name = "literal" ? "literal" : "test"
 SetDebugMode(*) => 0

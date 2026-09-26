@@ -2378,11 +2378,11 @@ DesktopStudyHeartbeat() {
     DesktopStudyHeartbeats += 1
 }
 
-TestDesktopAnkiControls(reader, vocabulary := true, screenshot := true) {
+TestDesktopAnkiControls(reader, vocabulary := true, screenshot := true, bigBox := false) {
     srState := reader
     srState["media"] := screenshot ? [Map("path", A_ScriptDir "\study-preview-landscape.bmp", "width", 720, "height", 540)] : []
     srState["mediaIndex"] := screenshot ? 1 : 0
-    saBigBox := false, saIsVocabulary := vocabulary, saProfile := "Kabuki Den"
+    saBigBox := bigBox, saIsVocabulary := vocabulary, saProfile := "Kabuki Den"
     saCardKind := vocabulary ? "vocabulary" : "explanation"
     saMapping := Map("model", "Basic", "japaneseField", "Front", "explanationField", "Back", "addDeck", "Japanese", "deck", "Japanese")
     saDecks := ["Japanese", "Vocabulary", "Sentence practice"], saCancelReturn := 0, saHandoffSource := 0
@@ -2600,6 +2600,77 @@ TestDesktopStudyDialogs() {
     CPStudyLibraryState := 0, CPStudyReaderState := 0, CPStudyCandidateState := 0
 }
 
+TestDesktopChapterSizing() {
+    global controlDarkMode
+    library := TestDesktopStudyLibrary()
+    s := TestDesktopChapterControls(library), g := s["gui"], combo := s["desktopControls"]["chapter"]
+    StudyDesktopDialogShow(s, 900, 640, combo)
+    dpi := GetWindowDPI(g.Hwnd) / 96
+    for dark in [true, false] {
+        controlDarkMode := dark
+        CPApplyOwnedDialogTheme(g)
+        for points in [10, 12, 16, 10] {
+            combo.SetFont("s" points, "Segoe UI")
+            TestDesktopComboTextFits(combo)
+            for size in [[760, 600], [1000, 800], [820, 600]] {
+                combo.Text := "Chapter 1 — 日本語 Agjpqy"
+                g.Show("w" size[1] " h" size[2])
+                Sleep(25)
+                TestDesktopComboTextFits(combo)
+                DesktopAssert(combo.Text = "Chapter 1 — 日本語 Agjpqy", "Resize keeps typed chapter text")
+                CPApplyOwnedDialogTheme(g)
+                TestDesktopComboTextFits(combo)
+                combo.Choose(2)
+                DesktopAssert(combo.Text = "Chapter 1", "Saved chapter history remains selectable")
+                ; Open and close the native history list without substituting
+                ; a custom textbox or changing the user's stored chapters.
+                SendMessage(0x014F, 1, 0, combo.Hwnd)
+                DesktopAssert(SendMessage(0x0157, 0, 0, combo.Hwnd), "Chapter history dropdown opens")
+                SendMessage(0x014F, 0, 0, combo.Hwnd)
+                TestDesktopComboTextFits(combo)
+            }
+        }
+        combo.Focus()
+        TestDesktopStudyCapture(g, "chapter-field-" (dark ? "dark" : "light") ".png", Round(820 * dpi), Round(600 * dpi))
+    }
+    controlDarkMode := true
+    CPApplyOwnedDialogTheme(g)
+    process := DllCall("kernel32\GetCurrentProcess", "ptr")
+    beforeGdi := DllCall("user32\GetGuiResources", "ptr", process, "uint", 0)
+    Loop 100
+        CPDesktopLayoutComboEdit(combo.Hwnd)
+    DesktopAssert(DllCall("user32\GetGuiResources", "ptr", process, "uint", 0) <= beforeGdi,
+        "Repeated combo sizing releases its font measurement DC")
+    g.Destroy()
+    library["gui"].Destroy()
+}
+
+TestDesktopComboTextFits(combo) {
+    info := Buffer(A_PtrSize = 8 ? 64 : 52, 0), NumPut("uint", info.Size, info)
+    DesktopAssert(DllCall("user32\GetComboBoxInfo", "ptr", combo.Hwnd, "ptr", info), "Editable dropdown exposes its native edit child")
+    comboEdit := NumGet(info, A_PtrSize = 8 ? 48 : 44, "ptr")
+    editRect := Buffer(16), comboRect := Buffer(16), windowRect := Buffer(16)
+    DllCall("user32\GetClientRect", "ptr", comboEdit, "ptr", editRect)
+    DllCall("user32\GetClientRect", "ptr", combo.Hwnd, "ptr", comboRect)
+    DllCall("user32\GetWindowRect", "ptr", comboEdit, "ptr", windowRect)
+    DllCall("user32\MapWindowPoints", "ptr", 0, "ptr", combo.Hwnd, "ptr", windowRect, "uint", 2)
+    dc := DllCall("user32\GetDC", "ptr", comboEdit, "ptr")
+    oldFont := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", SendMessage(0x31, 0, 0, comboEdit), "ptr")
+    metrics := Buffer(60, 0)
+    try DllCall("gdi32\GetTextMetricsW", "ptr", dc, "ptr", metrics)
+    finally {
+        DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldFont)
+        DllCall("user32\ReleaseDC", "ptr", comboEdit, "ptr", dc)
+    }
+    textH := NumGet(metrics, 0, "int"), editH := NumGet(editRect, 12, "int")
+    comboH := NumGet(comboRect, 12, "int"), editTop := NumGet(windowRect, 4, "int"), editBottom := NumGet(windowRect, 12, "int")
+    FileAppend("dpi=" GetWindowDPI(combo.Hwnd) " field=" comboH " edit=" editH " text=" textH
+        " top=" editTop " bottom=" editBottom " item=" SendMessage(0x154, -1, 0, combo.Hwnd) "`n", A_ScriptDir "\chapter-metrics.txt")
+    DesktopAssert(editH >= textH, "Chapter edit child fits the complete font line height")
+    DesktopAssert(editBottom <= comboH - 2 && editTop >= 2, "Chapter text stays inside the rounded border")
+    DesktopAssert(Abs(editTop - (comboH - editBottom)) <= 2, "Chapter text is vertically centered")
+}
+
 TestDesktopChapterControls(library) {
     slState := library, slProfileName := "Kabuki Den", slProfileLabel := slProfileName
     slDirectory := A_ScriptDir "\chapter-fixture", slCurrentChapter := "Chapter 2"
@@ -2660,6 +2731,10 @@ TestDesktopMetadataDialogs(library) {
                     DesktopAssert(y + ch <= h + 1, kind " control does not overflow the footer")
                 if ctrl.Type = "Edit"
                     DesktopAssert(!(WinGetExStyle(ctrl.Hwnd) & 0x200), kind " field has no bright native edge")
+                if ctrl.Type = "ComboBox"
+                    TestDesktopComboTextFits(ctrl)
+                if kind = "details" && ctrl.Type = "Edit"
+                    TestDesktopCompactSingleLineField(ctrl, "Explanation details")
             }
             dpi := GetWindowDPI(hwnd) / 96
             TestDesktopStudyCapture(g, "desktop-study-dialog-" kind "-" w ".png", Round(w * dpi), Round(h * dpi))
@@ -2678,10 +2753,11 @@ TestDesktopMetadataDialogs(library) {
             c["checks"][1].Value := !c["checks"][1].Value
             DesktopAssert(c["checks"][1].Value != (library["columns"][1]["visible"] ? 1 : 0), "Column changes are a local draft")
         } else if kind = "details" {
-            c["chapter"].Value := "Edited chapter", c["tags"].Value := "edited"
+            c["chapter"].Value := "Edited chapter", c["speaker"].Value := "日本語の名前", c["tags"].Value := "edited"
             c["anki"].Value := 1
             StudyDesktopDialogResize(s, g, 0, 720, 600)
-            DesktopAssert(c["chapter"].Value = "Edited chapter" && c["tags"].Value = "edited", "Details survive resizing")
+            DesktopAssert(c["chapter"].Value = "Edited chapter" && c["speaker"].Value = "日本語の名前"
+                && c["tags"].Value = "edited", "All three details fields survive resizing")
             DesktopAssert(library["currentChapter"] = "Chapter 2" && library["currentAddedToAnkiAt"] = "", "Details and manual Anki state remain uncommitted")
         } else if kind = "filters" {
             for save in [false, true] {
@@ -2783,9 +2859,12 @@ TestDesktopSecondaryStudyDialogs(library, reader) {
             DesktopAssert(NumGet(selection, 0, "uint") = 0 && NumGet(selection, 4, "uint") = 0,
                 "Explanation prompt opens with a caret instead of selecting all text")
         }
-        prompt["controls"]["editor"].Value := "Unsaved changes"
+        ; Dirty-close choices have their own focused regression suite. This
+        ; layout test closes an unchanged editor and a cancelled naming form.
+        if mode = "name"
+            prompt["controls"]["editor"].Value := "Unconfirmed prompt name"
         DesktopDialogTestClose(prompt)
-        DesktopAssert(prompt["result"].Result = "Cancel", "Prompt close discards unconfirmed result: " mode)
+        DesktopAssert(prompt["result"].Result = "Cancel", "Prompt close accepts no new result: " mode)
     }
     prompt := StudyReaderPromptDialogCreate(version, "name")
     prompt["controls"]["editor"].Value := "New fixture prompt"
@@ -4219,6 +4298,7 @@ TestDesktopManagementDialogs(library) {
             DesktopDialogAssertChrome(s, w, h)
             DesktopAssert(s["nameEdit"].Value = initial, mode " preserves name during resize")
             DesktopAssert(!(WinGetExStyle(s["nameEdit"].Hwnd) & 0x200), mode " field has no white client edge")
+            TestDesktopCompactSingleLineField(s["nameEdit"], "Library name")
             DesktopAssert(s["desktop"]["paint"][s["addButton"].Hwnd]["kind"] = "primary", mode " has a clear primary action")
             dpi := GetWindowDPI(s["gui"].Hwnd) / 96
             TestDesktopStudyCapture(s["gui"], "desktop-library-" mode "-" w ".png", Round(w * dpi), Round(h * dpi))
@@ -4254,6 +4334,26 @@ TestDesktopManagementDialogs(library) {
     DesktopDialogTestClose(s)
     DesktopDialogTestClose(archives)
     DesktopDialogTestClose(manager)
+}
+
+TestDesktopCompactSingleLineField(ctrl, label) {
+    ; Measure the actual native font at the active DPI, not the screenshot's
+    ; apparent size. A single-line name should not have a second row of space.
+    rect := Buffer(16, 0), metrics := Buffer(60, 0)
+    DllCall("user32\GetClientRect", "ptr", ctrl.Hwnd, "ptr", rect)
+    dc := DllCall("user32\GetDC", "ptr", ctrl.Hwnd, "ptr")
+    oldFont := DllCall("gdi32\SelectObject", "ptr", dc, "ptr", SendMessage(0x31, 0, 0, ctrl.Hwnd), "ptr")
+    try DllCall("gdi32\GetTextMetricsW", "ptr", dc, "ptr", metrics)
+    finally {
+        DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldFont)
+        DllCall("user32\ReleaseDC", "ptr", ctrl.Hwnd, "ptr", dc)
+    }
+    textH := NumGet(metrics, 0, "int"), nameFieldH := NumGet(rect, 12, "int")
+    dpi := GetWindowDPI(ctrl.Hwnd) / 96
+    FileAppend(label " dpi=" dpi " text=" textH " field=" nameFieldH "`n", A_ScriptDir "\compact-field-metrics.txt")
+    DesktopAssert(!(WinGetStyle(ctrl.Hwnd) & 0x4), label " keeps native single-line editing")
+    DesktopAssert(nameFieldH >= textH, label " fits the full font height")
+    DesktopAssert(nameFieldH <= textH + Ceil(6 * dpi), label " uses a compact single-line field")
 }
 
 DesktopDialogTestClose(s) {

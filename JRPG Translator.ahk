@@ -1772,7 +1772,7 @@ CPStudyComboWindowProc(cpComboHwnd, cpComboMsg, cpComboWParam, cpComboLParam) {
             "ptr")
     try {
         if CPDesktopIsCombo(cpComboHwnd) {
-            if cpComboMsg = 0x0005 || cpComboMsg = 0x0153 ; WM_SIZE / CB_SETITEMHEIGHT
+            if cpComboMsg = 0x0005 || cpComboMsg = 0x0153 || cpComboMsg = 0x0030 ; WM_SIZE / CB_SETITEMHEIGHT / WM_SETFONT
                 CPDesktopLayoutComboEdit(cpComboHwnd)
             if cpComboMsg = 0x0007 || cpComboMsg = 0x0008 || cpComboMsg = 0x014E || cpComboMsg = 0x014F
                 DllCall("user32\InvalidateRect", "ptr", cpComboHwnd, "ptr", 0, "int", 0)
@@ -4921,6 +4921,7 @@ CPBigBoxPromptAction(action, *) {
         state["stamp"] := CPBigBoxFileStamp(path)
         state["isNew"] := false
         CPBigBoxControls["setup_raw"].Value := FileRead(path, "UTF-8")
+        state["savedText"] := CPPromptEditorComparableText(CPBigBoxControls["setup_raw"].Value)
         CPBigBoxSetupEnter("setupEdit")
     } else if action = "delete" {
         if ControlGetItems(spec["combo"].Hwnd).Length <= 1 {
@@ -4949,9 +4950,18 @@ CPBigBoxStartPromptText(name) {
     state["name"] := name
     state["stamp"] := "missing"
     state["isNew"] := true
-    CPBigBoxControls["setup_raw"].Value := state["domain"] = "explanation"
-        ? "You are a friendly tutor for learners of Japanese.`r`n`r`nJapanese:`r`n{jp}" : ""
+    CPBigBoxControls["setup_raw"].Value := ""
+    state["savedText"] := ""
     CPBigBoxSetupEnter("setupEdit")
+}
+
+CPBigBoxPromptConfirmClose() {
+    global CPBigBoxSetupState, CPBigBoxGui, CPBigBoxControls
+    s := CPBigBoxSetupState
+    s["gui"] := CPBigBoxGui
+    s["controls"] := Map("editor", CPBigBoxControls["setup_raw"])
+    s["saveAction"] := CPBigBoxSaveSetup
+    return CPPromptEditorConfirmClose(s)
 }
 
 CPBigBoxFinishPromptManage(name := "") {
@@ -5052,7 +5062,7 @@ CPBigBoxSaveSetup(*) {
             CPBigBoxRefreshPromptSelection(spec, state["name"])
             CPBigBoxSetupNotice := "Saved · " state["name"]
             CPBigBoxFinishPromptManage(state["name"])
-            return
+            return true
         }
     } catch ValueError as ex {
         CPBigBoxSetupNotice := ex.Message
@@ -5060,6 +5070,7 @@ CPBigBoxSaveSetup(*) {
         CPBigBoxSetupNotice := "The value could not be saved. The previous setting remains active."
     }
     CPBigBoxDashboardUpdateContent()
+    return false
 }
 
 CPBigBoxConfirmSetup(*) {
@@ -5147,6 +5158,13 @@ CPBigBoxCancelSetup(*) {
         return
     state := CPBigBoxSetupState
     flow := state.Get("flow", "")
+    if flow = "promptText" {
+        if !CPBigBoxPromptConfirmClose()
+            return false
+        ; Save and close already returned to the prompt's parent page.
+        if CPBigBoxSetupState.Get("flow", "") != "promptText"
+            return true
+    }
     if flow = "promptDelete" {
         state["flow"] := "promptTools"
         CPBigBoxSetupEnter("setupTools")
@@ -10096,7 +10114,7 @@ CPBigBoxDashboardShowReady() {
 
 CPBigBoxDashboardHide(restoreGame := true) {
     global CPBigBoxGui, CPBigBoxAICommitting, CPBigBoxAudioSwitching
-    global CPBigBoxOverlayPosition, CPBigBoxOverlayEdit
+    global CPBigBoxOverlayPosition, CPBigBoxOverlayEdit, CPBigBoxCurrentPage
     if CPBigBoxAICommitting || CPBigBoxAudioSwitching || CPBigBoxOverlayPosition["active"]
         return
     if CPBigBoxOverlayEdit["active"]
@@ -10104,7 +10122,11 @@ CPBigBoxDashboardHide(restoreGame := true) {
     Loop 4 {
         if !CPBigBoxSetupSubpage()
             break
+        previousPage := CPBigBoxCurrentPage
         CPBigBoxCancelSetup()
+        ; A cancelled confirmation or failed save must not discard the draft.
+        if CPBigBoxCurrentPage = previousPage
+            return
     }
     CPBigBoxResetSetup()
     CPBigBoxResetControlFlow()
@@ -10125,6 +10147,8 @@ CPBigBoxDashboardHide(restoreGame := true) {
 
 CPBigBoxReturnToGame(*) {
     CPBigBoxDashboardHide(true)
+    ; The Close event must not perform its default hide after Cancel/failed Save.
+    return true
 }
 
 CPBigBoxOpenAdvancedSettings(*) {
@@ -16331,6 +16355,7 @@ StudyReaderWriteAnkiReviewFile(saPath, saText, saOwnerState) {
 StudyReaderCloseAnkiAddDialog(saAddState, *) {
     if saAddState["closed"] || saAddState.Get("busy", false)
         return
+    StudySetActivity(saAddState, false)
     saAddState["closed"] := true
     if saAddState.Has("actionTimer") {
         SetTimer(saAddState["actionTimer"], 0)
@@ -16453,7 +16478,8 @@ StudyReaderHasGeneratedExample(saBack) {
 
 StudyReaderGenerateVocabularyExample(saAddState, *) {
     global pythonExe, explainProvider, explainOpenAIModel, explainGeminiModel
-    if saAddState["closed"] || saAddState.Get("uncertain", false) || saAddState["cardKind"] != "vocabulary"
+    if !StudyLibraryStateAlive(saAddState) || saAddState.Get("modelActivity", false)
+        || saAddState.Get("uncertain", false) || saAddState["cardKind"] != "vocabulary"
         return
 
     saProvider := CPSyncExplanationSelectionFromControls()
@@ -16523,12 +16549,9 @@ StudyReaderGenerateVocabularyExample(saAddState, *) {
     saAddState["busy"] := saAddState.Get("bigBoxPresentation", false)
     saExampleButton.Enabled := false
     saAddState["addButton"].Enabled := false
-    saAddState["status"].Value := "Generating a learner-friendly example sentence..."
-    try DllCall(
-        "user32\RedrawWindow", "ptr", saAddState["gui"].Hwnd,
-        "ptr", 0, "ptr", 0, "uint", 0x185
-    )
-    saExitCode := -1
+    saAddState["status"].Value := "Generating a learner-friendly example sentence... This may take a moment."
+    StudySetActivity(saAddState, true)
+    saExitCode := -1, saRunError := ""
     try {
         EnvSet("EXPLAIN_PROVIDER", saProvider)
         if (saProvider = "gemini") {
@@ -16553,16 +16576,21 @@ StudyReaderGenerateVocabularyExample(saAddState, *) {
         )
         DbgCP("Vocabulary example -> " saCommand)
         saExitCode := RunWait(saCommand, , "Hide")
+    } catch Error as saError {
+        saRunError := saError.Message
     } finally {
+        StudySetActivity(saAddState, false)
+        saAddState["busy"] := false
+        if StudyLibraryStateAlive(saAddState) {
+            saExampleButton.Enabled := true
+            saAddState["addButton"].Enabled := true
+        }
         for saEnvironmentName, saEnvironmentValue in saOldEnvironment
             EnvSet(saEnvironmentName, saEnvironmentValue)
-        saAddState["busy"] := false
     }
 
     if !StudyLibraryStateAlive(saAddState)
         return
-    saExampleButton.Enabled := true
-    saAddState["addButton"].Enabled := true
     saRows := StudyLibraryReadRows(saResultFile)
     if (saExitCode != 0 || !saRows.Length || saRows[1].Length < 4
         || saRows[1][1] != "ok") {
@@ -16574,7 +16602,7 @@ StudyReaderGenerateVocabularyExample(saAddState, *) {
         StudyReaderAnkiMessage(
             saAddState,
             "The example sentence could not be generated.`n`n"
-                . (saError != "" ? saError : saOutput),
+                . (saRunError != "" ? saRunError : saError != "" ? saError : saOutput),
             "Generate example sentence", "ok", "error", 650
         )
         return
@@ -17258,6 +17286,7 @@ StudyReaderOpenReviewedAnkiDialog(
             : "The term could not be inferred confidently. Enter the front field manually."
     )
     CPRegisterMutedControl(saStatusText)
+    saProgressBar := StudyCreateActivityBar(saGui, "xm y+6 w560 h6")
     saAddButton := saGui.Add("Button", "xm y+8 w110 h32 Default", "Add to Anki")
     saCancelButton := saGui.Add("Button", "x+10 yp w100 h32", "Cancel")
     saAddState := Map(
@@ -17272,6 +17301,7 @@ StudyReaderOpenReviewedAnkiDialog(
         "screenshotPath", saScreenshotPath,
         "includeScreenshot", saIncludeScreenshot,
         "status", saStatusText,
+        "progressBar", saProgressBar,
         "addButton", saAddButton,
         "exampleButton", saExampleButton,
         "exampleGenerated", StudyReaderHasGeneratedExample(saBack),
@@ -17405,7 +17435,8 @@ StudyReaderAnkiPreviewBigBoxResize(saForm, saX, saY, saW, saH, saScale) {
     saControls["deck"].Move(saRightX, saY + saLabelH, saRightW, saRowH)
     saTop := saY + saLabelH + saRowH + saGap
     saActionY := saY + saH - saButtonH
-    saStatusY := saActionY - saGap - saStatusH
+    saProgressH := Max(4, Round(4 * saScale))
+    saStatusY := saActionY - saGap * 2 - saProgressH - saStatusH
     saPaneBottom := saStatusY - saGap
     saControls["frontLabel"].Move(saX, saTop, saLeftW, saLabelH)
     saFrontY := saTop + saLabelH
@@ -17453,6 +17484,7 @@ StudyReaderAnkiPreviewBigBoxResize(saForm, saX, saY, saW, saH, saScale) {
         }
     }
     saControls["status"].Move(saX, saStatusY, saW, saStatusH)
+    saState["progressBar"].Move(saX, saActionY - saGap - saProgressH, saW, saProgressH)
     saAddW := Min(Round(250 * saScale), Floor(saW * 0.4))
     saCancelW := Min(Round(180 * saScale), Floor(saW * 0.3))
     saControls["add"].Move(saX, saActionY, saAddW, saButtonH)
@@ -17867,7 +17899,7 @@ StudyLibraryBigBoxFormAdd(
     else if (slRole = "check") {
         slForm["editorControls"].Push(slControl)
         slForm["checkBoxes"].Push(slControl)
-    } else
+    } else if slRole != "progress"
         slForm["bodyControls"].Push(slControl)
     return slControl
 }
@@ -19678,6 +19710,30 @@ StudyCandidatesUpdateActions(scState, scRow := 0, *) {
     StudyDesktopCandidatesTabs(scState)
 }
 
+StudyCreateActivityBar(gui, options) {
+    global controlDarkMode
+    colors := CPPalette(controlDarkMode)
+    return gui.Add("Progress", options " Hidden +0x8 Range0-100 Background"
+        . colors["surface"] " c" colors["accent"], 0)
+}
+
+StudySetActivity(state, active) {
+    state["modelActivity"] := active && StudyLibraryStateAlive(state)
+    if !StudyLibraryStateAlive(state) || !state.Has("progressBar")
+        return
+    ; PBM_SETMARQUEE uses the native control's animation, not an AHK timer or
+    ; a pretend percentage. Stop it before hiding/destroying the control.
+    bar := state["progressBar"]
+    if active
+        bar.Visible := true
+    try SendMessage(0x40A, active ? 1 : 0, active ? 32 : 0, bar.Hwnd)
+    if !active
+        bar.Visible := false
+    ; Paint both the message and bar before waiting for the model process.
+    try DllCall("user32\RedrawWindow", "ptr", state["gui"].Hwnd,
+        "ptr", 0, "ptr", 0, "uint", 0x185)
+}
+
 StudyCandidatesRecommendationActivityText(scProviderLabel, scCounts) {
     scSentenceCount := scCounts.Has("sentences") ? scCounts["sentences"] : 0
     scVocabularyCount := scCounts.Has("vocabulary") ? scCounts["vocabulary"] : 0
@@ -19701,16 +19757,12 @@ StudyCandidatesSetRecommendationActivity(scState, scActive
                     scProviderLabel, scCounts
                 )
         scState["progressText"].Visible := true
-        scState["progressBar"].Visible := true
-        ; PBM_SETMARQUEE: native looping activity animation, deliberately not a
-        ; percentage because the model request does not expose partial progress.
-        try SendMessage(0x40A, 1, 32, scState["progressBar"].Hwnd)
+        StudySetActivity(scState, true)
         scState["refreshButton"].Enabled := false
         scState["recommendButton"].Enabled := false
         scState["recommendButton"].Text := "Generating, please wait…"
     } else {
-        try SendMessage(0x40A, 0, 0, scState["progressBar"].Hwnd)
-        scState["progressBar"].Visible := false
+        StudySetActivity(scState, false)
         scState["progressText"].Visible := false
         scState["refreshButton"].Enabled := true
         StudyCandidatesUpdateActions(scState)
@@ -21170,10 +21222,7 @@ StudyLibraryOpenCandidates(slState, *) {
         "Text", "x14 y50 w812 h18 cGray Hidden", ""
     )
     CPRegisterMutedControl(scProgressText)
-    scProgressBar := scGui.Add(
-        "Progress", "x14 y70 w812 h6 Hidden +0x8 Range0-100 Background"
-            . scColors["surface"] " c" scColors["accent"], 0
-    )
+    scProgressBar := StudyCreateActivityBar(scGui, "x14 y70 w812 h6")
     ; Tab2 keeps the desktop lists on the main surface when the native tab
     ; strip is replaced by the modern Sentences / Vocabulary buttons.
     scTabs := scGui.Add(!scWantBigBox && CPDesktopActive() ? "Tab2" : "Tab3",
@@ -22177,7 +22226,8 @@ StudyDesktopLayoutStudyTool(s, w, h) {
                 for i, key in ["edit", "add", "delete"]
                     c[key].Move(40 + (i - 1) * 154, 358, 142, 32)
                 c["intro"].Move(40, 430, cw, 42)
-                c["status"].Move(40, 484, cw, Max(24, h - 586))
+                c["status"].Move(40, 484, cw, 36)
+                s["progressBar"].Move(40, 526, cw, 4)
             } else {
                 d["panels"].Push([24, 174, w - 48, 296, "panel"], [24, 486, w - 48, h - 572, "panel"])
                 c["heading"].Move(40, 194, cw, 28)
@@ -22189,7 +22239,8 @@ StudyDesktopLayoutStudyTool(s, w, h) {
                 for i, key in ["edit", "add", "delete"]
                     c[key].Move(40 + (i - 1) * 154, 406, 142, 34)
                 c["intro"].Move(40, 506, cw, 48)
-                c["status"].Move(40, 568, cw, h - 674)
+                c["status"].Move(40, 568, cw, 36)
+                s["progressBar"].Move(40, 610, cw, 4)
             }
         case "newVersionPrompt", "newVersionName":
             d["panels"].Push([24, 174, w - 48, h - 260, "panel"])
@@ -22496,7 +22547,7 @@ StudyDesktopLibraryNameCreate(parent, mode, value := "") {
     g.SetFont("s10", "Segoe UI")
     s := Map("gui", g, "ownerState", root, "mode", mode)
     s["label"] := g.AddText("x0 y0 w1 h1", "Library name")
-    s["nameEdit"] := g.AddEdit("x0 y0 w1 h1", name)
+    s["nameEdit"] := g.AddEdit("x0 y0 w1 h1 -Multi", name)
     SendMessage(0x1501, 1, StrPtr("For example: Dragon Quest or PC Engine"), s["nameEdit"].Hwnd)
     s["hint"] := g.AddText("x0 y0 w1 h1", mode = "new"
         ? "New explanations will be saved here after creation. Existing explanations stay in their current library."
@@ -22524,7 +22575,9 @@ StudyDesktopLibraryNameCreate(parent, mode, value := "") {
 StudyDesktopLayoutLibraryName(s, w, h) {
     s["desktop"]["panels"].Push([24, 174, w - 48, h - 260, "panel"])
     s["label"].Move(40, 194, w - 80, 24)
-    s["nameEdit"].Move(40, 226, w - 80, 34)
+    ; Match the compact native edit in the library search field. Single-line
+    ; edits are top-aligned, so keep the normal font and remove excess height.
+    s["nameEdit"].Move(40, 231, w - 80, 24)
     s["hint"].Move(40, 282, w - 80, 50)
     s["help"].Move(40, 358, w - 80, 34)
     s["addButton"].Move(w - 338, h - 50, 180, 34)
@@ -22621,13 +22674,14 @@ StudyDesktopLayoutMetadata(s, w, h) {
             c["hint"].Move(40, h - 154, cw, 52)
         case "details":
             colW := Floor((cw - 24) / 2)
+            ; Match the compact library-name field without shrinking its font.
             for i, key in ["chapter", "speaker"] {
                 x := 40 + (i - 1) * (colW + 24)
                 c[key "Label"].Move(x, 194, colW, 24)
-                c[key].Move(x, 226, colW, 34)
+                c[key].Move(x, 231, colW, 24)
             }
             c["tagsLabel"].Move(40, 282, cw, 24)
-            c["tags"].Move(40, 314, cw, 34)
+            c["tags"].Move(40, 319, cw, 24)
             c["hint"].Move(40, 368, cw, 48)
             c["anki"].Move(40, 446, cw, 28)
         case "filters":
@@ -22729,7 +22783,7 @@ StudyDesktopAnkiCreate(s, controls) {
     controls["mapping"].SetFont("s10")
     for key in ["front", "back"]
         s[key].SetFont("s11")
-    for ctrl in [s["addButton"], controls["cancel"], s["status"]]
+    for ctrl in [s["addButton"], controls["cancel"], s["status"], s["progressBar"]]
         StudyDesktopDialogFooter(s, ctrl)
     StudyDesktopTheme(s["desktop"])
 }
@@ -22754,7 +22808,8 @@ StudyDesktopLayoutAnki(s, w, h) {
     StudyDesktopAnkiImage(s, x, imageY, cw, imageH)
     s["includeScreenshot"].Move(x, bottom - 96, cw, 28)
     c["imageHint"].Move(x, bottom - 58, cw, 44)
-    s["status"].Move(24, h - 52, Max(250, w - 386), 42)
+    s["status"].Move(24, h - 64, Max(250, w - 386), 42)
+    s["progressBar"].Move(24, h - 20, Max(250, w - 386), 4)
     s["addButton"].Move(w - 338, h - 50, 180, 34)
     c["cancel"].Move(w - 146, h - 50, 122, 34)
 }
@@ -24232,16 +24287,14 @@ StudyReaderSaveNewVersionPrompt(
     srNewState, srEditorGui, srEditor, srPath, srName, *
 ) {
     try {
-        if FileExist(srPath)
-            FileCopy(srPath, srPath ".bak", true)
-        srFile := FileOpen(srPath, "w", "UTF-8")
-        if !srFile
-            throw Error("The prompt file could not be opened for writing.")
-        srFile.Write(srEditor.Value)
-        srFile.Close()
+        savedText := srEditor.Value
+        SaveTextAtomic(srPath, savedText)
+        if srEditorGui.HasProp("CPPromptEditor")
+            srEditorGui.CPPromptEditor["savedText"] := CPPromptEditorComparableText(savedText)
         StudyReaderRefreshNewVersionPromptList(srNewState, srName)
         StudyReaderRefreshMainExplainPromptList()
         Toast("Saved EXPLAIN prompt: " srName)
+        return true
     } catch as srPromptError {
         CPThemedOwnedMessage(
             srEditorGui.Hwnd,
@@ -24249,6 +24302,7 @@ StudyReaderSaveNewVersionPrompt(
                 . srPromptError.Message,
             "Edit Explanation Prompt", "ok", "error"
         )
+        return false
     }
 }
 
@@ -24262,8 +24316,9 @@ StudyReaderEditNewVersionPrompt(srNewState, *) {
 
     if CPDesktopActive() || srNewState.Get("bigBoxPresentation", false) {
         srDialog := StudyReaderPromptDialogCreate(srNewState, "edit", srText, srName)
-        srDialog["controls"]["save"].OnEvent("Click", StudyReaderSaveNewVersionPrompt.Bind(
-            srNewState, srDialog["gui"], srDialog["controls"]["editor"], srPath, srName))
+        srDialog["saveAction"] := StudyReaderSaveNewVersionPrompt.Bind(
+            srNewState, srDialog["gui"], srDialog["controls"]["editor"], srPath, srName)
+        srDialog["controls"]["save"].OnEvent("Click", srDialog["saveAction"])
         StudyReaderPromptDialogRun(srDialog)
         return
     }
@@ -24277,13 +24332,9 @@ StudyReaderEditNewVersionPrompt(srNewState, *) {
     )
     srSave := srEditorGui.Add("Button", "xm y+8 w100", "Save")
     srClose := srEditorGui.Add("Button", "x+8 yp w100", "Close")
-    srSave.OnEvent(
-        "Click",
-        StudyReaderSaveNewVersionPrompt.Bind(
-            srNewState, srEditorGui, srEditor, srPath, srName
-        )
-    )
-    srClose.OnEvent("Click", (*) => srEditorGui.Destroy())
+    CPPromptEditorWireLegacy(srEditorGui, srEditor, srSave, srClose, srPath,
+        "Saved EXPLAIN prompt: " srName, "the explanation prompt", "",
+        StudyReaderSaveNewVersionPrompt.Bind(srNewState, srEditorGui, srEditor, srPath, srName))
     srEditorGui.OnEvent("Size", (gui, mm, w, h) => (
         srEditor.Move(, , Max(300, w - 40), Max(180, h - 90)),
         srButtonY := h - 52,
@@ -24325,13 +24376,10 @@ StudyReaderAddNewVersionPrompt(srNewState, *) {
         )
         return
     }
-    FileAppend(
-        "You are a friendly tutor for learners of Japanese.`r`n`r`n"
-            . "Japanese:`r`n{jp}",
-        srPath, "UTF-8"
-    )
+    FileAppend("", srPath, "UTF-8")
     StudyReaderRefreshNewVersionPromptList(srNewState, srName)
     StudyReaderRefreshMainExplainPromptList()
+    StudyReaderEditNewVersionPrompt(srNewState)
 }
 
 StudyReaderDeleteNewVersionPrompt(srNewState, *) {
@@ -24350,8 +24398,16 @@ StudyReaderDeleteNewVersionPrompt(srNewState, *) {
     ) != "Yes")
         return
     try FileDelete(ExplainProfilePath(srName))
+    catch as ex {
+        DbgCP("Could not delete explanation prompt '" srName "': " ex.Message)
+        CPThemedOwnedMessage(srNewState["gui"].Hwnd,
+            "Could not delete explanation prompt '" srName "'.`n`n" ex.Message,
+            "Delete EXPLAIN prompt", "ok", "error")
+        return
+    }
     StudyReaderRefreshNewVersionPromptList(srNewState)
     StudyReaderRefreshMainExplainPromptList()
+    Toast("Explanation prompt deleted: " srName)
 }
 
 StudyReaderPromptDialogCreate(parent, mode, text := "", name := "") {
@@ -24369,12 +24425,14 @@ StudyReaderPromptDialogCreate(parent, mode, text := "", name := "") {
     c := Map()
     c["label"] := g.AddText("x40 y194 w700 h28", isPromptEdit ? "Prompt: " name : "Prompt name")
     c["intro"] := g.AddText("x40 y232 w700 h48", isPromptEdit
-        ? "Save updates this prompt file for future use, including other places that select it. Close discards edits made since the last save."
+        ? "Save updates this prompt file for future use, including other places that select it. Closing with unsaved changes asks whether to save, discard, or keep editing."
         : "Use a descriptive name. Creating a prompt selects it for this new version; nothing is generated until you confirm generation.")
     c["editor"] := g.AddEdit(isPromptEdit ? "x40 y292 w700 h300 Multi VScroll WantReturn" : "x40 y236 w600 h34", text)
     c["save"] := g.AddButton("x420 y600 w180 h34" (isPromptEdit ? "" : " Default"), isPromptEdit ? "Save prompt" : "Create prompt")
     c["cancel"] := g.AddButton("x612 y600 w110 h34", isPromptEdit ? "Close" : "Cancel")
     s["controls"] := c, g.StudyPreserveEditSelection := true
+    if isPromptEdit
+        CPPromptEditorTrack(s)
     if !isPromptEdit
         c["save"].OnEvent("Click", StudyReaderPromptDialogClose.Bind(s, true))
     c["cancel"].OnEvent("Click", StudyReaderPromptDialogClose.Bind(s, false))
@@ -24396,6 +24454,8 @@ StudyReaderPromptDialogCreate(parent, mode, text := "", name := "") {
 StudyReaderPromptDialogClose(s, accept := false, *) {
     if s["closed"]
         return
+    if !CPPromptEditorConfirmClose(s)
+        return true
     if accept
         s["result"] := {Result: "OK", Value: s["controls"]["editor"].Value}
     s["closed"] := true
@@ -24403,6 +24463,8 @@ StudyReaderPromptDialogClose(s, accept := false, *) {
         s["bigBoxForm"]["closed"] := true
         StudyBigBoxFocusFrameStop(s["bigBoxForm"])
     }
+    s["saveAction"] := 0
+    try s["gui"].DeleteProp("CPPromptEditor")
     try s["gui"].Destroy()
 }
 
@@ -24428,6 +24490,10 @@ StudyReaderPromptDialogRun(s) {
         while !s["closed"] && DllCall("user32\IsWindow", "ptr", owner)
             Sleep(25)
     } finally {
+        ; The modal loop only ends after an approved close or owner teardown.
+        ; Teardown cannot display another confirmation against a dead owner.
+        if !DllCall("user32\IsWindow", "ptr", owner) && s.Has("savedText")
+            s.Delete("savedText")
         StudyReaderPromptDialogClose(s)
         if DllCall("user32\IsWindow", "ptr", owner) {
             DllCall("user32\EnableWindow", "ptr", owner, "int", enabled)
@@ -24459,6 +24525,7 @@ StudyReaderNewVersionProviderChanged(srNewState, *) {
 StudyReaderCloseNewVersionDialog(srNewState, *) {
     if srNewState.Has("closed") && srNewState["closed"]
         return
+    StudySetActivity(srNewState, false)
     srNewState["closed"] := true
     try srNewState["readerState"]["newVersionDialog"] := 0
     try srNewState["gui"].Destroy()
@@ -24467,8 +24534,10 @@ StudyReaderCloseNewVersionDialog(srNewState, *) {
 
 StudyReaderGenerateNewVersion(srNewState, *) {
     global pythonExe, explainScript, debugMode, CPStudyLibraryState
+    if !StudyLibraryStateAlive(srNewState) || srNewState.Get("modelActivity", false)
+        return
     srReaderState := srNewState["readerState"]
-    if (srReaderState["currentGroupId"] <= 0)
+    if !StudyLibraryStateAlive(srReaderState) || srReaderState["currentGroupId"] <= 0
         return
     srProvider := StrLower(Trim(srNewState["provider"].Text))
     if (srProvider != "gemini" && srProvider != "openai")
@@ -24567,13 +24636,10 @@ StudyReaderGenerateNewVersion(srNewState, *) {
     srSectionKey := StudyReaderCurrentSectionKey(srReaderState)
     srNewState["generateButton"].Enabled := false
     srNewState["cancelButton"].Enabled := false
-    srNewState["status"].Value := "Generating another explanation..."
-    try DllCall(
-        "user32\\RedrawWindow", "ptr", srNewState["gui"].Hwnd,
-        "ptr", 0, "ptr", 0, "uint", 0x185
-    )
+    srNewState["status"].Value := "Generating another explanation... This may take a moment."
+    StudySetActivity(srNewState, true)
     Toast("Generating another explanation…")
-    srExitCode := -1
+    srExitCode := -1, srRunError := ""
     try {
         EnvSet("EXPLAIN_PROVIDER", srProvider)
         if (srProvider = "gemini") {
@@ -24608,10 +24674,19 @@ StudyReaderGenerateNewVersion(srNewState, *) {
         )
         DbgCP("Study Reader new version -> " srCommand)
         srExitCode := RunWait(srCommand, , "Hide")
+    } catch Error as srError {
+        srRunError := srError.Message
     } finally {
+        StudySetActivity(srNewState, false)
+        if StudyLibraryStateAlive(srNewState) {
+            srNewState["generateButton"].Enabled := true
+            srNewState["cancelButton"].Enabled := true
+        }
         for srEnvironmentName, srEnvironmentValue in srOldEnvironment
             EnvSet(srEnvironmentName, srEnvironmentValue)
     }
+    if !StudyLibraryStateAlive(srNewState) || !StudyLibraryStateAlive(srReaderState)
+        return
     srOutput := FileExist(srOutFile)
         ? Trim(FileRead(srOutFile, "UTF-8")) : ""
     srError := FileExist(srErrFile)
@@ -24623,7 +24698,7 @@ StudyReaderGenerateNewVersion(srNewState, *) {
         CPThemedOwnedMessage(
             srNewState["gui"].Hwnd,
             "The new version could not be generated.`n`n"
-                . (srError != "" ? srError : srOutput),
+                . (srRunError != "" ? srRunError : srError != "" ? srError : srOutput),
             "Generate new explanation version", "ok", "error", 650
         )
         return
@@ -24741,6 +24816,7 @@ StudyReaderOpenNewVersionDialog(srState, *) {
     srPromptAdd := srNewGui.Add("Button", "x+6 yp w70", "Add")
     srPromptDelete := srNewGui.Add("Button", "x+6 yp w70", "Delete")
     srStatus := srNewGui.Add("Text", "xm y+18 w680 h24", "Ready.")
+    srProgressBar := StudyCreateActivityBar(srNewGui, "xm y+6 w680 h6")
     srGenerate := srNewGui.Add(
         "Button", "xm y+10 w190 h34 Default", "Generate new version"
     )
@@ -24754,6 +24830,7 @@ StudyReaderOpenNewVersionDialog(srState, *) {
         "openAIModel", srOpenAIModel,
         "prompt", srPrompt,
         "status", srStatus,
+        "progressBar", srProgressBar,
         "generateButton", srGenerate,
         "cancelButton", srCancel,
         "closed", false
@@ -24802,6 +24879,9 @@ StudyReaderOpenNewVersionDialog(srState, *) {
             srForm, "status", srStatus, 0, 710, 1000, 70, "emphasis"
         )
         StudyLibraryBigBoxFormAdd(
+            srForm, "progressBar", srProgressBar, 0, 795, 1000, 8, "progress"
+        )
+        StudyLibraryBigBoxFormAdd(
             srForm, "generate", srGenerate, 560, 840, 270, 115, "button"
         )
         StudyLibraryBigBoxFormAdd(
@@ -24843,6 +24923,7 @@ StudyReaderOpenNewVersionDialog(srState, *) {
         "providerLabel", srProviderLabel, "provider", srProvider, "geminiLabel", srGeminiLabel, "gemini", srGeminiModel,
         "openaiLabel", srOpenAILabel, "openai", srOpenAIModel, "promptLabel", srPromptLabel, "prompt", srPrompt,
         "edit", srPromptEdit, "add", srPromptAdd, "delete", srPromptDelete, "status", srStatus,
+        "progressBar", srProgressBar,
         "save", srGenerate, "cancel", srCancel))
     StudyReaderNewVersionProviderChanged(srNewState)
     ; @DESKTOP_NEW_VERSION_CONTROLS_END@
@@ -33819,13 +33900,17 @@ CPTextEditorDialogSave(s, path, toastText, errorLabel, debugPrefix := "", *) {
     if s["closed"]
         return false
     try {
-        SaveTextAtomic(path, s["controls"]["editor"].Value)
+        savedText := s["controls"]["editor"].Value
+        SaveTextAtomic(path, savedText)
+        if s.Has("savedText")
+            s["savedText"] := CPPromptEditorComparableText(savedText)
         Toast(toastText)
         if debugPrefix != ""
             DbgCP(debugPrefix path)
         return true
     } catch as ex {
-        CPAdaptiveOwnedMessage(s["gui"].Hwnd,
+        ; Keep save errors owned by this editor in classic/light mode too.
+        CPThemedOwnedMessage(s["gui"].Hwnd,
             "Could not save " errorLabel ":`n`n" ex.Message,
             s["gui"].Title, "ok", "error")
         return false
@@ -33835,8 +33920,12 @@ CPTextEditorDialogSave(s, path, toastText, errorLabel, debugPrefix := "", *) {
 CPTextEditorDialogClose(s, *) {
     if s["closed"]
         return
+    if !CPPromptEditorConfirmClose(s)
+        return true
     s["closed"] := true
     owner := s["owner"], previousFocus := s.Get("previousFocus", 0)
+    s["saveAction"] := 0 ; Release callbacks bound to this state before destruction.
+    try s["gui"].DeleteProp("CPPromptEditor")
     try s["gui"].Destroy()
     if DllCall("user32\IsWindow", "ptr", owner) {
         try WinActivate("ahk_id " owner)
@@ -33847,7 +33936,63 @@ CPTextEditorDialogClose(s, *) {
 }
 
 CPTextEditorClose(dlg, *) {
+    if dlg.HasProp("CPPromptEditor") {
+        s := dlg.CPPromptEditor
+        if s["closed"] || !CPPromptEditorConfirmClose(s)
+            return true
+        s["closed"] := true
+        s["saveAction"] := 0
+        dlg.DeleteProp("CPPromptEditor")
+    }
     try dlg.Destroy()
+}
+
+CPPromptEditorComparableText(text) {
+    ; Native Edit controls normalize line endings. Preserve case and whitespace.
+    return StrReplace(StrReplace(text, "`r`n", "`n"), "`r", "`n")
+}
+
+CPPromptEditorTrack(s, saveAction := 0) {
+    s["savedText"] := CPPromptEditorComparableText(s["controls"]["editor"].Value)
+    s["saveAction"] := saveAction
+    s["gui"].CPPromptEditor := s
+}
+
+CPPromptEditorConfirmClose(s) {
+    if s.Get("confirmingClose", false)
+        return false
+    if !s.Has("savedText")
+        return true
+    draft := CPPromptEditorComparableText(s["controls"]["editor"].Value)
+    if StrCompare(draft, s["savedText"], true) = 0
+        return true
+    s["confirmingClose"] := true
+    try {
+        answer := CPThemedOwnedMessage(s["gui"].Hwnd,
+            "Save changes to this prompt before closing?`n`nIf you discard changes, edits made since the last save will be lost.",
+            "Unsaved prompt changes", "yesnocancel", "warning", 580,
+            "Save and close", "Discard changes", "Cancel")
+        if answer = "No"
+            return true
+        if answer = "Yes" && IsObject(s.Get("saveAction", 0))
+            return s["saveAction"].Call() ? true : false
+        return false
+    } finally {
+        s["confirmingClose"] := false
+    }
+}
+
+CPPromptEditorWireLegacy(g, editor, save, close, path, toastText, errorLabel,
+    debugPrefix := "", saveAction := 0) {
+    s := Map("gui", g, "closed", false, "path", path,
+        "controls", Map("editor", editor, "save", save, "close", close))
+    if !IsObject(saveAction)
+        saveAction := CPTextEditorDialogSave.Bind(s, path, toastText, errorLabel, debugPrefix)
+    CPPromptEditorTrack(s, saveAction)
+    save.OnEvent("Click", saveAction)
+    close.OnEvent("Click", CPTextEditorClose.Bind(g))
+    g.OnEvent("Close", CPTextEditorClose.Bind(g))
+    return s
 }
 
 CPShowTextEditorDialog(dlg, editorCtrl, ownerHwnd := 0) {
@@ -35380,22 +35525,81 @@ Toast(msg){
         message := "JRPG Translator"
     background := controlDarkMode ? "101825" : "FFFFFF"
     foreground := controlDarkMode ? "FFFFFF" : "111827"
-    CPToastGui := Gui("+ToolWindow -Caption +AlwaysOnTop +E0x08000000")
+    CPToastGui := Gui("+ToolWindow -Caption +AlwaysOnTop +E0x08080020")
     CPToastGui.BackColor := background
     CPToastGui.MarginX := 12, CPToastGui.MarginY := 8
     CPToastGui.SetFont("s11", "Segoe UI")
-    CPToastText := CPToastGui.Add("Text", "c" foreground " Background" background " +0x200", message)
-    ; WS_EX_TRANSPARENT alone defers painting to other windows on this thread.
-    ; With the composited desktop still invalid, Show/Redraw can get stuck in
-    ; that paint ordering (blank toast, stale footer, no dismissal timer).
-    ; Paint the first frame without that flag, then enable click-through on a
-    ; fully opaque layered window (also works over another process's game).
-    WinSetTransparent(255, CPToastGui.Hwnd)
-    CPToastGui.Show("AutoSize NoActivate x20 y20")
-    CPToastText.Redraw()
-    CPToastGui.Opt("+E0x20")
-    CPToastTimer := ToastDestroy.Bind(CPToastGui)
-    SetTimer(CPToastTimer, -1600)
+    ; The hidden label supplies native font metrics/text, but never participates
+    ; in painting. A normally painted WS_EX_TRANSPARENT window can starve this
+    ; thread's composited desktop even if click-through is enabled AFTER Show.
+    CPToastText := CPToastGui.Add("Text", "Hidden +0x280", message) ; SS_NOPREFIX | SS_CENTERIMAGE
+    try {
+        ToastPresent(CPToastGui, CPToastText, background, foreground)
+        CPToastTimer := ToastDestroy.Bind(CPToastGui)
+        SetTimer(CPToastTimer, -1600)
+    } catch as ex {
+        ToastDestroy()
+        DbgCP("Notification could not be displayed: " ex.Message)
+    }
+}
+
+ToastPresent(g, label, background, foreground) {
+    ; Submit a complete opaque bitmap directly to the window compositor. This
+    ; avoids WM_PAINT ordering altogether while retaining click-through across
+    ; processes, no activation, the theme, font, padding and top-left placement.
+    ; Do not combine UpdateLayeredWindow with WinSetTransparent: the latter
+    ; switches layered windows back to the redirected WM_PAINT path.
+    label.GetPos(,, &textW, &textH)
+    scale := GetWindowDPI(g.Hwnd) / 96
+    width := Max(1, Round((textW + 24) * scale))
+    height := Max(1, Round((textH + 16) * scale))
+    screenDc := 0, memoryDc := 0, bitmap := 0, oldBitmap := 0, oldFont := 0, brush := 0
+    try {
+        screenDc := DllCall("user32\GetDC", "ptr", 0, "ptr")
+        memoryDc := DllCall("gdi32\CreateCompatibleDC", "ptr", screenDc, "ptr")
+        bitmap := DllCall("gdi32\CreateCompatibleBitmap", "ptr", screenDc, "int", width, "int", height, "ptr")
+        brush := DllCall("gdi32\CreateSolidBrush", "uint", CPColorRef(background), "ptr")
+        if !screenDc || !memoryDc || !bitmap || !brush
+            throw OSError()
+        oldBitmap := DllCall("gdi32\SelectObject", "ptr", memoryDc, "ptr", bitmap, "ptr")
+        font := SendMessage(0x31, 0, 0, label.Hwnd) ; WM_GETFONT; owned by the GUI.
+        oldFont := DllCall("gdi32\SelectObject", "ptr", memoryDc, "ptr", font, "ptr")
+        if !oldBitmap || !font || !oldFont
+            throw OSError()
+        rect := Buffer(16, 0)
+        NumPut("int", width, "int", height, rect, 8)
+        if !DllCall("user32\FillRect", "ptr", memoryDc, "ptr", rect, "ptr", brush)
+            throw OSError()
+        DllCall("gdi32\SetTextColor", "ptr", memoryDc, "uint", CPColorRef(foreground))
+        DllCall("gdi32\SetBkMode", "ptr", memoryDc, "int", 1)
+        NumPut("int", Round(12 * scale), "int", Round(8 * scale),
+            "int", width - Round(12 * scale), "int", height - Round(8 * scale), rect)
+        if !DllCall("user32\DrawTextW", "ptr", memoryDc, "wstr", label.Text, "int", -1, "ptr", rect, "uint", 0x800) ; NOPREFIX
+            throw OSError()
+        position := Buffer(8), size := Buffer(8), origin := Buffer(8, 0)
+        NumPut("int", 20, "int", 20, position)
+        NumPut("int", width, "int", height, size)
+        if !DllCall("user32\UpdateLayeredWindow", "ptr", g.Hwnd, "ptr", screenDc,
+            "ptr", position, "ptr", size, "ptr", memoryDc, "ptr", origin,
+            "uint", 0, "ptr", 0, "uint", 4, "int") ; ULW_OPAQUE
+            throw OSError()
+        if !DllCall("user32\SetWindowPos", "ptr", g.Hwnd, "ptr", -1,
+            "int", 0, "int", 0, "int", 0, "int", 0, "uint", 0x53, "int") ; SHOWWINDOW|NOACTIVATE|NOMOVE|NOSIZE
+            throw OSError()
+    } finally {
+        if oldFont
+            DllCall("gdi32\SelectObject", "ptr", memoryDc, "ptr", oldFont)
+        if oldBitmap
+            DllCall("gdi32\SelectObject", "ptr", memoryDc, "ptr", oldBitmap)
+        if brush
+            DllCall("gdi32\DeleteObject", "ptr", brush)
+        if bitmap
+            DllCall("gdi32\DeleteObject", "ptr", bitmap)
+        if memoryDc
+            DllCall("gdi32\DeleteDC", "ptr", memoryDc)
+        if screenDc
+            DllCall("user32\ReleaseDC", "ptr", 0, "ptr", screenDc)
+    }
 }
 
 ; =========================
@@ -37010,9 +37214,17 @@ DeleteSelectedGameProfile(*) {
         return
     path := GameProfilePath(name)
     try FileDelete(path)
+    catch as ex {
+        DbgCP("Could not delete profile '" name "': " ex.Message)
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(),
+            "Could not delete profile '" name "'.`n`n" ex.Message,
+            "Profiles", "ok", "error")
+        return
+    }
     if (IniRead(iniPath, "game_profiles", "active", "") = name)
         IniWriteRetry("", iniPath, "game_profiles", "active")
     RefreshGameProfilesList()
+    Toast("Profile deleted: " name)
 }
 
 ; =========================
@@ -40435,12 +40647,36 @@ CPDesktopLayoutComboEdit(hwnd) {
     editHwnd := NumGet(info, A_PtrSize = 8 ? 48 : 44, "ptr")
     if !editHwnd
         return
+    ; A native ComboBox can reset its closed-face height when Move/WM_SIZE
+    ; runs, even if the supplied height was for its popup. Size the face from
+    ; the actual edit font and DPI instead of squeezing the text to fit it.
+    scale := GetWindowDPI(hwnd) / 96
+    textH := 0, dc := DllCall("user32\GetDC", "ptr", editHwnd, "ptr")
+    if dc {
+        font := SendMessage(0x0031, 0, 0, editHwnd)
+        oldFont := font ? DllCall("gdi32\SelectObject", "ptr", dc, "ptr", font, "ptr") : 0
+        metrics := Buffer(60, 0) ; TEXTMETRICW
+        try {
+            if DllCall("gdi32\GetTextMetricsW", "ptr", dc, "ptr", metrics)
+                textH := NumGet(metrics, 0, "int")
+        } finally {
+            if oldFont
+                DllCall("gdi32\SelectObject", "ptr", dc, "ptr", oldFont)
+            DllCall("user32\ReleaseDC", "ptr", editHwnd, "ptr", dc)
+        }
+    }
+    targetHeight := Max(Round(30 * scale) - 6, textH + Round(8 * scale) - 6,
+        SendMessage(0x0154, 0, 0, hwnd))
+    ; Setting the height re-enters this helper. Only send when it differs so
+    ; the inner layout settles immediately, without a timer or repaint loop.
+    if SendMessage(0x0154, -1, 0, hwnd) != targetHeight
+        SendMessage(0x0153, -1, targetHeight, hwnd)
     rect := Buffer(16)
     DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", rect)
-    scale := GetWindowDPI(hwnd) / 96, w := NumGet(rect, 8, "int"), h := NumGet(rect, 12, "int")
+    w := NumGet(rect, 8, "int"), h := NumGet(rect, 12, "int")
     ; Leave room for the rounded outline and chevron. Preserve the real Edit
     ; child so IME, selection, typing and native history navigation still work.
-    editH := Min(h - Round(8 * scale), NumGet(info, 16, "int") - NumGet(info, 8, "int"))
+    editH := textH > 0 ? textH : Max(1, h - Round(8 * scale))
     ctrl.Opt("+0x02000000") ; WS_CLIPCHILDREN: don't paint over its text/caret.
     DllCall("user32\SetWindowPos", "ptr", editHwnd, "ptr", 0, "int", Round(11 * scale),
         "int", Max(1, Floor((h - editH) / 2)), "int", Max(1, w - Round(43 * scale)),
@@ -42477,14 +42713,16 @@ ExplainPromptFilePath() {
 }
 
 CPModernFileEditorOpen(path, title, subtitle, label, hint, text, toastText
-    , errorLabel, debugText := "") {
+    , errorLabel, debugText := "", warnUnsaved := false) {
     owner := CPDialogDefaultOwner()
     s := CPTextEditorDialogCreate(owner, title, subtitle, label, text, hint)
     if !IsObject(s)
         return 0
     s["path"] := path
-    s["controls"]["save"].OnEvent("Click",
-        CPTextEditorDialogSave.Bind(s, path, toastText, errorLabel, debugText))
+    saveAction := CPTextEditorDialogSave.Bind(s, path, toastText, errorLabel, debugText)
+    if warnUnsaved
+        CPPromptEditorTrack(s, saveAction)
+    s["controls"]["save"].OnEvent("Click", saveAction)
     CPTextEditorDialogShow(s)
     return s
 }
@@ -42497,24 +42735,16 @@ OpenExplainPromptEditor(*) {
     if IsObject(editorState := CPModernFileEditorOpen(path, "Edit explanation prompt",
         "Edit the instructions used for explanations.", "Prompt instructions",
         "Saving keeps a backup of the previous file. Changes apply to the next explanation request.",
-        txt, "Saved explanation prompt", "the explanation prompt", "Explanation prompt saved to: "))
+        txt, "Saved explanation prompt", "the explanation prompt", "Explanation prompt saved to: ", true))
         return editorState
 
     g := Gui("+Resize", "Edit Explanation Prompt")
     edt := g.Add("Edit", "xm ym w680 h420 WantTab WantReturn Wrap", txt)
     ; ^ WantReturn ensures Enter inserts a line break, like your other editor
     btnSave  := g.Add("Button", "xm y+8 w100", "Save")
-    btnSave.OnEvent("Click", (*) => (
-    (FileExist(path) ? (FileCopy(path, path ".bak", true)) : 0),
-    f := FileOpen(path, "w", "UTF-8"),
-    f.Write(edt.Value),
-    f.Close(),
-    Toast("Saved explanation prompt"),
-    DbgCP("Explanation prompt saved to: " path)
-))
     btnClose := g.Add("Button", "x+8 yp w100", "Close")
-
-    btnClose.OnEvent("Click", (*) => g.Destroy())
+    CPPromptEditorWireLegacy(g, edt, btnSave, btnClose, path,
+        "Saved explanation prompt", "the explanation prompt", "Explanation prompt saved to: ")
     g.OnEvent("Size", (gui, mm, w, h) => (
         edt.Move(, , Max(300, w-40), Max(180, h-90)),
         y := h - 52,
@@ -42606,21 +42836,15 @@ OpenExplainPromptEditor_Multi(*) {
     if IsObject(editorState := CPModernFileEditorOpen(path, "Edit explanation prompt - " name,
         "Edit the selected prompt without changing the active model.", "Prompt instructions",
         "Saving creates a backup of the previous prompt. Changes apply to the next explanation request.",
-        txt, "Saved EXPLAIN prompt: " name, "the explanation prompt"))
+        txt, "Saved EXPLAIN prompt: " name, "the explanation prompt", "", true))
         return editorState
 
     g := Gui("+Resize", "Edit Explanation Prompt - " name)
     edt := g.Add("Edit", "xm ym w680 h420 WantTab WantReturn Wrap", txt)
     btnSave  := g.Add("Button", "xm y+8 w100", "Save")
-    btnSave.OnEvent("Click", (*) => (
-        (FileExist(path) ? (FileCopy(path, path ".bak", true)) : 0),
-        f := FileOpen(path, "w", "UTF-8"),
-        f.Write(edt.Value),
-        f.Close(),
-        Toast("Saved EXPLAIN prompt: " name)
-    ))
     btnClose := g.Add("Button", "x+8 yp w100", "Close")
-    btnClose.OnEvent("Click", (*) => g.Destroy())
+    CPPromptEditorWireLegacy(g, edt, btnSave, btnClose, path,
+        "Saved EXPLAIN prompt: " name, "the explanation prompt")
     g.OnEvent("Size", (gui, mm, w, h) => (
         edt.Move(, , Max(300, w-40), Max(180, h-90)),
         y := h - 52,
@@ -42648,8 +42872,9 @@ NewExplainPromptProfile(*) {
         CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "A prompt with that name already exists.", "New EXPLAIN prompt")
         return
     }
-    FileAppend("You are a friendly tutor for learners of Japanese." . "`r`n`r`nJapanese:" . "`r`n{jp}", path, "UTF-8")
+    FileAppend("", path, "UTF-8")
     RefreshExplainPromptProfilesList(name)
+    OpenExplainPromptEditor_Multi()
 }
 
 DeleteExplainPromptProfile(*) {
@@ -42663,7 +42888,15 @@ DeleteExplainPromptProfile(*) {
         return
     path := ExplainProfilePath(name)
     try FileDelete(path)
+    catch as ex {
+        DbgCP("Could not delete explanation prompt '" name "': " ex.Message)
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(),
+            "Could not delete explanation prompt '" name "'.`n`n" ex.Message,
+            "Delete EXPLAIN prompt", "ok", "error")
+        return
+    }
     RefreshExplainPromptProfilesList()
+    Toast("Explanation prompt deleted: " name)
 }
 
 RefreshPromptProfilesList(select := "") {
@@ -42693,24 +42926,16 @@ OpenPromptEditor(*) {
     if IsObject(editorState := CPModernFileEditorOpen(path, "Edit game text prompt - " name,
         "Edit the instructions used for capture translation.", "Prompt instructions",
         "Saving creates a backup of the previous prompt. Changes apply to the next capture request.",
-        txt, "Saved prompt: " name, "the game text prompt", "Prompt saved: "))
+        txt, "Saved prompt: " name, "the game text prompt", "Prompt saved: ", true))
         return editorState
 
     g := Gui("+Resize", "Edit Prompt - " name)
     edt := g.Add("Edit", "xm ym w680 h420 WantTab WantReturn Wrap", txt)
     ; ^^^^^^^^^^^^^^^ lets Enter insert a line break
     btnSave  := g.Add("Button", "xm y+8 w100", "Save")
-    btnSave.OnEvent("Click", (*) => (
-    (FileExist(path) ? (FileCopy(path, path ".bak", true)) : 0),
-    f := FileOpen(path, "w", "UTF-8"),
-    f.Write(edt.Value),
-    f.Close(),
-    Toast("Saved prompt: " name),
-    DbgCP("Prompt saved: " name)
-))
-
     btnClose := g.Add("Button", "x+8 yp w100", "Close")   ; yp = same Y as Save
-    btnClose.OnEvent("Click", (*) => g.Destroy())
+    CPPromptEditorWireLegacy(g, edt, btnSave, btnClose, path,
+        "Saved prompt: " name, "the game text prompt", "Prompt saved: ")
 
     g.OnEvent("Size", (gui, mm, w, h) => (
         edt.Move(, , Max(300, w-40), Max(180, h-90)),
@@ -42763,8 +42988,16 @@ DeletePromptProfile(*) {
         return
     path := PromptFilePath(name)
     try FileDelete(path)
+    catch as ex {
+        DbgCP("Could not delete translation prompt '" name "': " ex.Message)
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(),
+            "Could not delete translation prompt '" name "'.`n`n" ex.Message,
+            "Delete prompt", "ok", "error")
+        return
+    }
     RefreshPromptProfilesList()
     DbgCP("Prompt deleted: " name)
+    Toast("Translation prompt deleted: " name)
 }
 
 ; ---- GLOSSARY profile helpers ---------------------------------

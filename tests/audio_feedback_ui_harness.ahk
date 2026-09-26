@@ -7,9 +7,8 @@ TestAudioFeedbackBegin() {
     audioScript := A_ScriptDir "\audio_runtime_fixture.ahk"
     EnvSet("JRPG_TEST_AUDIO_RUNTIME_LOG", A_ScriptDir "\feedback-child.log")
     EnvSet("JRPG_TEST_AUDIO_RUNTIME_MODE", "wait")
-    TestFeedbackState := Map("step", 0, "footerPaints", 0, "toastPaints", 0)
+    TestFeedbackState := Map("step", 0, "footerPaints", 0)
     OnMessage(0x2B, TestAudioFeedbackDraw, -1)
-    OnMessage(0xF, TestAudioFeedbackPaint, -1)
     OnExit(AudioShutdown)
     OnExit(ToastDestroy)
     ui.Show("NA x0 y0 w1120 h760")
@@ -30,12 +29,6 @@ TestAudioFeedbackDraw(wParam, lParam, *) {
     }
 }
 
-TestAudioFeedbackPaint(wParam, lParam, msg, hwnd) {
-    global CPToastText, TestFeedbackState
-    if IsObject(CPToastText) && hwnd = CPToastText.Hwnd
-        TestFeedbackState["toastPaints"] += 1
-}
-
 TestAudioFeedbackStep(*) {
     global TestFeedbackState, TestAssertions, CPToastGui, CPToastText, CPDesktop, ui, controlDarkMode
     try {
@@ -51,7 +44,6 @@ TestAudioFeedbackStep(*) {
             if step = 18
                 ui.Hide()
             TestFeedbackState["footerPaints"] := 0
-            TestFeedbackState["toastPaints"] := 0
             FileAppend("before toggle`n", A_ScriptDir "\feedback-events.txt")
             if Mod(step // 3, 2) = 0
                 SafeCall(StartStopAudio) ; Production keyboard/JoyToKey wrapper.
@@ -69,8 +61,8 @@ TestAudioFeedbackStep(*) {
         } else if Mod(step, 3) = 1 {
             expected := Mod(step // 3, 2) = 0 ? "On" : "Off"
             DesktopAssert(IsObject(CPToastText) && CPToastText.Text = "Audio Translation " expected, "Toast text is assigned")
-            DesktopAssert(TestFeedbackState["toastPaints"] > 0, "Toast text actually paints without mouse movement")
-            TestAudioFeedbackPixels(CPToastText, controlDarkMode)
+            DesktopAssert(!CPToastText.Visible, "Native label never enters transparent paint ordering")
+            TestToastFeedbackPixels(controlDarkMode)
             if step < 18 {
                 DesktopAssert(TestFeedbackState["footerPaints"] > 0 && TestFeedbackState.Get("paintedFooter", "") = "Audio: " expected,
                     "Footer actually paints the new audio state without mouse movement")
@@ -88,7 +80,6 @@ TestAudioFeedbackStep(*) {
                 ; receive its own dismissal, including other users of Toast.
                 Toast("Generating explanation…")
                 previousToast := CPToastGui.Hwnd
-                TestFeedbackState["toastPaints"] := 0
                 Toast("Audio Translation Off")
                 DesktopAssert(!DllCall("user32\IsWindow", "ptr", previousToast), "New toast removes the preceding notification")
                 TestFeedbackState["toastHwnd"] := CPToastGui.Hwnd
@@ -103,9 +94,62 @@ TestAudioFeedbackStep(*) {
 
 TestAudioFeedbackRapidCheck(*) {
     global TestFeedbackState, CPToastText, controlDarkMode
-    DesktopAssert(TestFeedbackState["toastPaints"] > 0 && CPToastText.Text = "Audio Translation Off", "Replacement toast paints its own text")
-    TestAudioFeedbackPixels(CPToastText, controlDarkMode)
+    DesktopAssert(CPToastText.Text = "Audio Translation Off", "Replacement toast has its own text")
+    TestToastFeedbackPixels(controlDarkMode)
     SetTimer(TestAudioFeedbackFinish, -1800)
+}
+
+TestToastFeedbackPixels(dark) {
+    global CPToastGui, CPToastText
+    ; UpdateLayeredWindow's submitted image is not a redirected client DC.
+    ; Inspect the existing screen pixels without asking any window to repaint.
+    rect := Buffer(16, 0)
+    DllCall("user32\GetWindowRect", "ptr", CPToastGui.Hwnd, "ptr", rect)
+    x := NumGet(rect, 0, "int"), y := NumGet(rect, 4, "int")
+    width := NumGet(rect, 8, "int") - x, height := NumGet(rect, 12, "int") - y
+    DesktopAssert(x = 20 && y = 20 && width > 24 && height > 16, "Toast retains its top-left position and measured size")
+    dc := DllCall("user32\GetDC", "ptr", 0, "ptr")
+    pixels := DllCall("gdi32\CreateCompatibleDC", "ptr", dc, "ptr")
+    bitmap := DllCall("gdi32\CreateCompatibleBitmap", "ptr", dc, "int", width, "int", height, "ptr")
+    oldBitmap := DllCall("gdi32\SelectObject", "ptr", pixels, "ptr", bitmap, "ptr")
+    found := 0
+    try {
+        DesktopAssert(DllCall("gdi32\BitBlt", "ptr", pixels, "int", 0, "int", 0, "int", width, "int", height,
+            "ptr", dc, "int", x, "int", y, "uint", 0x40CC0020), "Capture existing layered pixels without requesting a repaint")
+        expectedBackground := CPColorRef(dark ? "101825" : "FFFFFF")
+        actualBackground := DllCall("gdi32\GetPixel", "ptr", pixels, "int", 2, "int", 2, "uint")
+        DesktopAssert(actualBackground = expectedBackground,
+            "Composited notification has the expected opaque background: " Format("{:06X}", actualBackground) " expected " Format("{:06X}", expectedBackground))
+        Loop Max(0, height - 12) {
+            py := A_Index + 5
+            Loop Max(0, width - 20) {
+                rgb := DllCall("gdi32\GetPixel", "ptr", pixels, "int", A_Index + 9, "int", py, "uint")
+                r := rgb & 255, g := (rgb >> 8) & 255, b := (rgb >> 16) & 255
+                if rgb != 0xFFFFFFFF && (dark ? Min(r, g, b) > 180 : Max(r, g, b) < 100)
+                    found += 1
+                if found > 12
+                    break
+            }
+            if found > 12
+                break
+        }
+        ; Save this already-captured bitmap for visual review (no WM_PRINT).
+        static captureNumber := 0
+        captureNumber += 1
+        image := 0, encoder := Buffer(16, 0)
+        DllCall("gdiplus\GdipCreateBitmapFromHBITMAP", "ptr", bitmap, "ptr", 0, "ptr*", &image)
+        if image {
+            DllCall("ole32\CLSIDFromString", "wstr", "{557CF406-1A04-11D3-9A73-0000F81EF32E}", "ptr", encoder)
+            DllCall("gdiplus\GdipSaveImageToFile", "ptr", image, "wstr", A_ScriptDir "\toast-" captureNumber ".png", "ptr", encoder, "ptr", 0)
+            DllCall("gdiplus\GdipDisposeImage", "ptr", image)
+        }
+    } finally {
+        DllCall("gdi32\SelectObject", "ptr", pixels, "ptr", oldBitmap)
+        DllCall("gdi32\DeleteObject", "ptr", bitmap)
+        DllCall("gdi32\DeleteDC", "ptr", pixels)
+        DllCall("user32\ReleaseDC", "ptr", 0, "ptr", dc)
+    }
+    DesktopAssert(found > 12, "Composited text pixels are present in " CPToastText.Text)
 }
 
 TestAudioFeedbackFinish(*) {
