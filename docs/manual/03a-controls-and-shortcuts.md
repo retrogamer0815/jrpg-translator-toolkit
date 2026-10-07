@@ -53,9 +53,9 @@ JoyToKey is optional. It converts controller input into keyboard input, so it ca
 
 Start in **Settings → Controls → Keyboard**. The two highlighted actions below are a useful pair: generate an explanation with a short press, then show or hide the Explainer overlay with a long press of the same button.
 
-![JRPG Translator keyboard controls with Explain last translation set to Ctrl+Q, Show/Hide Explainer set to Ctrl+F12, and the active Profile highlighted](images/joytokey-shortcuts.png)
+![JRPG Translator keyboard controls with Explain last translation set to Ctrl+Q and Show/Hide Explainer set to Ctrl+F12 highlighted](images/joytokey-shortcuts.png)
 
-*Figure S06c. Start with the highlighted keyboard shortcuts in JRPG Translator. The header also identifies the active JRPG Translator Profile.*
+*Figure S06c. Start with the two highlighted keyboard shortcuts in JRPG Translator. These shortcuts are shared across Profiles.*
 
 | Press on the same button | Shortcut in this example | Action |
 | --- | --- | --- |
@@ -74,7 +74,7 @@ In JoyToKey, select the profile you want to use for the game, then select the bu
 
 *Figure S06d. Select the game's JoyToKey profile and the button that will handle both actions.*
 
-The highlighted profile names belong to **two separate applications**. JRPG Translator [profiles](09-profiles.md) can save the D-pad navigation preference alongside capture and overlay settings; keyboard shortcuts and native direct-action assignments remain shared. JoyToKey profiles store the per-game button mappings. The [plugin](10-launchbox-and-big-box.md#configure-a-game) can load the chosen JRPG Translator Profile and JoyToKey profile when a game starts. Their names do not have to match.
+The highlighted profile in JoyToKey stores its per-game button mappings. It is separate from JRPG Translator [profiles](09-profiles.md), which can save the D-pad navigation preference alongside capture and overlay settings; keyboard shortcuts and native direct-action assignments remain shared. The [plugin](10-launchbox-and-big-box.md#configure-a-game) can load the chosen JRPG Translator Profile and JoyToKey profile when a game starts. Their names do not have to match.
 
 ### 3. Assign a short press and a long press
 
@@ -84,9 +84,9 @@ The highlighted profile names belong to **two separate applications**. JRPG Tran
 4. Select **Switch depending on how long the button is pressed** and set the threshold to **300 msec**, as shown. You can adjust this threshold to suit your timing.
 5. Choose **OK**, then test a short press and a long press while the game is active. Confirm that each press invokes only its intended action.
 
-![JoyToKey Keyboard Multi settings with Input1 Ctrl+Q, Input2 Ctrl+F12, and press-duration switching at a 300 millisecond threshold highlighted](images/joytokey-short-long-press.png)
+![JoyToKey with the Keyboard (Multi) tab, Input1 Ctrl+Q, Input2 Ctrl+F12, and press-duration switching at a 300 millisecond threshold highlighted](images/joytokey-short-long-press.png)
 
-*Figure S06e. One LB button, two actions: shorter presses use Input1 to request an explanation; longer presses use Input2 to show or hide the Explainer.*
+*Figure S06e. Use the highlighted Keyboard (Multi) tab to assign two actions to LB: shorter presses use Input1 to request an explanation; longer presses use Input2 to show or hide the Explainer.*
 
 You can use the same approach for other pairs of JRPG Translator shortcuts. The mappings shown here are an example, not a supplied JoyToKey configuration.
 
