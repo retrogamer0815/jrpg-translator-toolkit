@@ -1,6 +1,6 @@
-# 3. The interface, keyboard shortcuts, and controllers
+# 3. The interface and controller navigation
 
-[← Setup](02-setup.md) · [Contents](README.md) · [Next: Game Text Translation →](04-game-text-translation.md)
+[← Setup](02-setup.md) · [Contents](README.md) · [Next: Controls and keyboard shortcuts →](03a-controls-and-shortcuts.md)
 
 ## Find your way around the desktop
 
@@ -53,57 +53,15 @@ There are two separate controller features:
 - **Navigation** operates the app's visible controls.
 - **Direct action bindings** invoke an assigned action, such as Capture & Translate, without navigating to its button.
 
-The Controls page exposes separate switches for direct actions and D-pad navigation. Disable the feature that conflicts with your mapping setup rather than assuming one switch controls everything.
-
-A native controller binding does not consume the button for the game. The game can still receive the same press. Pick combinations/buttons that will not accidentally advance dialogue, open a menu, or trigger another unwanted game action.
-
-To assign a direct action, open the controller binding list, select the action, choose its assignment command, and press the intended controller button or trigger. Use **Disable** to clear an action you do not want. Test the result in a safe game scene.
-
-![Controls page with the Controller binding list, Capture + Translate on Right trigger, and Explain last translation on Left trigger](images/controls-and-bindings.png)
-
-*Figure S06a. Direct controller-action assignments. The bindings shown are an example; use Assign or Disable to customize your setup.*
-
-![Lower Controls page showing a detected XInput controller and separate switches for direct controller actions and D-pad navigation](images/controller-options-and-detection.png)
-
-*Figure S06b. Controller detection and navigation options. Direct action bindings and D-pad navigation can be enabled separately; the game still receives action-binding button presses.*
+The Controls page exposes separate switches for direct actions and D-pad navigation. The dedicated [Controls and keyboard shortcuts](03a-controls-and-shortcuts.md) page explains how to assign actions and avoid conflicts with game controls or keyboard-mapping tools.
 
 ## Default keyboard shortcuts
 
-These are the shipped defaults. Your saved settings may differ; **Settings → Controls** is the authoritative list for your installation.
-
-| Action | Default |
-| --- | --- |
-| Capture + Translate | Ctrl+Shift+T |
-| Explain last translation | Ctrl+Shift+E |
-| Show/Hide Translator | Ctrl+Shift+H |
-| Show/Hide Explainer | Ctrl+Shift+X |
-| Show/Hide Control Panel | Ctrl+Shift+C |
-| Make Capture | Ctrl+Shift+S |
-| Translate Captures | Ctrl+Shift+D |
-| Launch Explainer + request | Ctrl+Shift+A |
-| Recapture Region | Ctrl+Shift+R |
-| Audio Translation On/Off | Ctrl+Shift+L |
-
-The keyboard-shortcut list offers change, disable, and default/reset actions. Keyboard shortcuts are shared settings, not per-game Profile contents.
-
-Avoid shortcuts already reserved by the game, emulator, streaming software, or Windows tools. If an action happens twice, check for duplicate native and keyboard-mapped assignments.
+See the [default shortcuts and customization instructions](03a-controls-and-shortcuts.md#default-keyboard-shortcuts). **Settings → Controls** is the authoritative list for your installation; screenshot examples may use customized shortcuts.
 
 ## Use JoyToKey for short and long presses
 
-JoyToKey is optional. It converts controller input into keyboard input, so it can invoke the same shortcuts as a physical keyboard. Its [advanced features](https://joytokey.net/en/advanced) include switching key assignments based on press duration.
-
-A useful design is a short press for **Capture & Translate** and a long press for **Explain last translation** on one chosen button. This is an example, not a supplied default configuration.
-
-1. Set and test the two keyboard shortcuts in JRPG Translator first.
-2. In a JoyToKey profile, assign those shortcuts using its press-duration functionality.
-3. Configure the duration behavior so a long press does not also send an unwanted short-press action.
-4. Remove or disable a conflicting native direct-action assignment.
-5. Test a short press, a long press, and holding the button while the game is active.
-6. If using the LaunchBox plugin, select that JoyToKey profile for the game.
-
-If JoyToKey sends arrow keys from the D-pad, consider turning off JRPG Translator's native D-pad navigation to avoid double movement. Likewise, avoid running two mapping tools that both translate the same controller input.
-
-Other controllers can be usable through compatible mapping software, but device/driver support varies. “Direct controller bindings” here does not mean that every DirectInput device is guaranteed to behave like an Xbox controller.
+The illustrated [JoyToKey walkthrough](03a-controls-and-shortcuts.md#use-joytokey-for-short-and-long-presses) maps **Explain last translation** and **Show/Hide Explainer** to the same controller button: a short press requests an explanation, and a long press shows or hides the overlay. It also explains how the two applications' profiles work with the plugin.
 
 ## Controller-friendly does not mean text-free
 

@@ -1,6 +1,6 @@
 # 4. Game Text Translation
 
-[← Interface and controllers](03-interface-and-controller.md) · [Contents](README.md) · [Next: Audio Translation →](05-audio-translation.md)
+[← Controls and keyboard shortcuts](03a-controls-and-shortcuts.md) · [Contents](README.md) · [Next: Audio Translation →](05-audio-translation.md)
 
 ## The basic loop
 

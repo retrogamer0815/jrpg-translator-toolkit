@@ -9,7 +9,7 @@ This manual describes the portable Windows application, its desktop and full-scr
 ## Start here
 
 - **First installation:** read [Setup and your first translation](02-setup.md).
-- **Playing with a controller:** continue with [Interface and controller navigation](03-interface-and-controller.md).
+- **Playing with a controller:** read [Interface and controller navigation](03-interface-and-controller.md), then [Controls, keyboard shortcuts, and JoyToKey](03a-controls-and-shortcuts.md).
 - **Setting up automatic game profiles:** see [Profiles](09-profiles.md), then [LaunchBox and Big Box](10-launchbox-and-big-box.md).
 - **Learning Japanese:** read [Explanation](06-explanation.md) and [Study Library](11-study-library.md).
 - **Something is not working:** use [Troubleshooting and advanced settings](12-troubleshooting-and-advanced.md).
@@ -20,7 +20,8 @@ You do not need to configure every feature before playing. One API key, a suitab
 
 1. [Introduction and key concepts](01-introduction.md)
 2. [Download, setup, and your first translation](02-setup.md)
-3. [The interface, keyboard shortcuts, and controllers](03-interface-and-controller.md)
+3. [The interface and controller navigation](03-interface-and-controller.md)
+    - [Controls, keyboard shortcuts, and JoyToKey](03a-controls-and-shortcuts.md)
 4. [Game Text Translation](04-game-text-translation.md)
 5. [Audio Translation](05-audio-translation.md)
 6. [Explanation](06-explanation.md)
@@ -43,7 +44,7 @@ Instructions that send content to an AI service are identified as AI operations.
 
 ## Screenshots
 
-All 28 screenshot topics now have published images, including the Explanation overview and companion views of controller options, advanced capture settings, and a successful audio-input check. Numbered callouts remain for missing companion views. The [screenshot checklist](SCREENSHOTS.md) tracks completed and partial topics, figure filenames, and privacy checks.
+All 28 screenshot topics have published images, including an illustrated JoyToKey short-/long-press setup and companion views of controller options, advanced capture settings, and a successful audio-input check. The [screenshot checklist](SCREENSHOTS.md) tracks the figures and privacy checks; no screenshot placeholders remain.
 
 ## Maintaining this manual
 
