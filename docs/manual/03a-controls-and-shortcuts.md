@@ -47,11 +47,11 @@ Keyboard shortcuts are shared settings, not per-game Profile contents. Avoid sho
 
 ## Use JoyToKey for short and long presses
 
-JoyToKey is optional but highly recommended if you plan to use multiple functions this tool offers. It converts controller input into keyboard input, so it can invoke JRPG Translator's keyboard shortcuts. For example its [press-duration feature](https://joytokey.net/en/advanced) lets **one controller button perform two different actions**, depending on how long you press it.
+JoyToKey is optional but highly recommended if you plan to use multiple functions this tool offers. It converts controller input into keyboard input, so it can invoke JRPG Translator's keyboard shortcuts. For example its [press-duration feature](https://joytokey.net/en/advanced) lets **one controller button perform two different actions**, depending on how long you press it. This is especially useful if you play a game that already uses many buttons and if you on top map functions like fast forward and rewind to your controller buttons there won't be enough buttons left to individually map all functions you might want to use from this tool to your controller.
 
 ### 1. Check the shortcuts in JRPG Translator
 
-Start in **Settings → Controls → Keyboard**. The two highlighted actions below are a useful pair: generate an explanation with a short press, then show or hide the Explainer overlay with a long press of the same button. The same could be done with the pair Capture + Translate and Show/Hide Translator.
+Start in **Settings → Controls → Keyboard**. The two highlighted actions below are one useful pair: generate an explanation with a short press, then show and hide again the Explainer overlay with a long press of the same button if you want to view the explanation while playing. The same could be done with Capture + Translate and Show/Hide Translator as another recommended pair.
 
 ![JRPG Translator keyboard controls with Explain last translation set to Ctrl+Q and Show/Hide Explainer set to Ctrl+F12 highlighted](images/joytokey-shortcuts.png)
 
@@ -74,7 +74,7 @@ In JoyToKey, select the profile you want to use for the game, then select the bu
 
 *Figure S06d. Select the game's JoyToKey profile and the button that will handle both actions.*
 
-The highlighted profile in JoyToKey stores its per-game button mappings. It is separate from JRPG Translator [profiles](09-profiles.md), which can save the D-pad navigation preference alongside capture and overlay settings; keyboard shortcuts and native direct-action assignments remain shared. The [plugin](10-launchbox-and-big-box.md#configure-a-game) can load the chosen JRPG Translator [profiles](09-profiles.md) and JoyToKey profile when a game starts. Their names do not have to match.
+The highlighted profile in JoyToKey stores its per-game button mappings. The [plugin](10-launchbox-and-big-box.md#configure-a-game) can load the chosen JRPG Translator [profiles](09-profiles.md) and JoyToKey profile when a game starts.
 
 ### 3. Assign a short press and a long press
 
