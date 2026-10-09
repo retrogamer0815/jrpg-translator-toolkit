@@ -29,6 +29,16 @@ A local “key present” or plugin “ready” indicator does not prove an API 
 
 Avoid sharing a complete environment file or unredacted error dump when asking for help.
 
+### Model timeouts while playing or studying
+
+Translation, explanation, Anki example-sentence generation, and recommendation failures show a non-blocking warning for 15 seconds and play the Windows warning sound. Translation errors also remain in the Translator overlay and the Game Text/Translation AI status; Study generation errors remain in the relevant window's status. An exclusive-fullscreen game can cover desktop notifications, so check the app's status if you hear the warning. System sound settings can mute the cue.
+
+Model calls normally use a 75-second provider timeout, with a separate two-minute helper watchdog. Automatic SDK retries are disabled. Recommendation reviews use a fresh watchdog for each batch of up to 36 candidates, so a healthy multi-batch review can run longer than two minutes overall.
+
+You can cancel example-sentence or new-version generation by closing its dialog, and cancel recommendation generation by returning from Review. The pending helper is stopped, controls are released, and already saved versions or recommendation batches are kept. Refresh or reopen Review to see completed batches, then generate the remaining unassessed items rather than forcing reassessment. An unsuccessful example does not replace your card text.
+
+Submitting a card to Anki is different: a lost response does not prove the card was rejected. The app retains its existing verification and duplicate-prevention safeguards; it does not automatically resend the card.
+
 ## Audio problems
 
 | Symptom | First checks |

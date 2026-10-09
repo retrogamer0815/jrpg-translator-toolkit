@@ -141,8 +141,14 @@ def request_completion_token() -> str:
     return (os.environ.get("JRPG_REQUEST_ID") or "").strip() or str(time.time_ns())
 
 
-def signal_ocr_completion() -> None:
-    atomic_write_text(OCR_DONE, request_completion_token())
+def signal_ocr_completion(error: str = "") -> None:
+    # Structured status, independent of translation text (which may itself
+    # legitimately contain words such as "failed" or "timeout").
+    token = request_completion_token()
+    try:
+        atomic_write_text(os.path.join(OVERLAY_DIR, "translation.status"), token + "\n" + error)
+    finally:
+        atomic_write_text(OCR_DONE, token)
 
 
 def friendly_provider_error(provider_name: str, exc: Exception, action: str = "translation") -> str:
@@ -199,7 +205,7 @@ if PROVIDER == "openai":
         from openai import OpenAI
     except Exception as e:
         atomic_write_text(OCR_TXT, friendly_provider_error("OpenAI", e))
-        signal_ocr_completion()
+        signal_ocr_completion(friendly_provider_error("OpenAI", e))
         print(f"OpenAI import failed: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -214,7 +220,7 @@ if PROVIDER == "openai":
             "Add it in the API Keys tab, or set OPENAI_API_KEY in Windows "
             "Environment Variables and restart JRPG Translator.",
         )
-        signal_ocr_completion()
+        signal_ocr_completion("OpenAI API key missing. Check Settings > API keys.")
         print("Missing OPENAI_API_KEY (or *_LOCAL / _FILE).", file=sys.stderr)
         sys.exit(1)
 
@@ -222,7 +228,7 @@ if PROVIDER == "openai":
     _openai_client = OpenAI(
         api_key=OPENAI_API_KEY,
         timeout=MODEL_TIMEOUT_SECONDS,
-        max_retries=2,
+        max_retries=0,
     )
 
 # ---- Gemini (optional) --------------------------------------------------------
@@ -233,7 +239,7 @@ if PROVIDER == "gemini":
         from google.genai import types
     except Exception as e:
         atomic_write_text(OCR_TXT, friendly_provider_error("Gemini", e))
-        signal_ocr_completion()
+        signal_ocr_completion(friendly_provider_error("Gemini", e))
         print("Missing google-genai package. Install with: python -m pip install -U google-genai", file=sys.stderr)
         print(f"Import error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -250,7 +256,7 @@ if PROVIDER == "gemini":
             "GOOGLE_API_KEY) in Windows Environment Variables and restart "
             "JRPG Translator.",
         )
-        signal_ocr_completion()
+        signal_ocr_completion("Gemini API key missing. Check Settings > API keys.")
         print("Missing GEMINI_API_KEY/GOOGLE_API_KEY (or *_LOCAL / _FILE).", file=sys.stderr)
         sys.exit(1)
 
@@ -258,7 +264,8 @@ if PROVIDER == "gemini":
     try:
         _gemini_client = genai.Client(
             api_key=GEMINI_API_KEY,
-            http_options=types.HttpOptions(timeout=int(MODEL_TIMEOUT_SECONDS * 1000)),
+            http_options=types.HttpOptions(timeout=int(MODEL_TIMEOUT_SECONDS * 1000),
+                                           retry_options=types.HttpRetryOptions(attempts=1)),
         )
     except TypeError:
         # Compatibility fallback for an older google-genai package. The AHK
@@ -1249,11 +1256,7 @@ def call_translation_provider(
 def translate_images(paths: List[str],
                      jp2en: List[Tuple[str, str]],
                      en2en: List[Tuple[str, str]]) -> str:
-    try:
-        raw = call_translation_provider(paths, jp2en)
-    except Exception as e:
-        provider_name = "Gemini" if PROVIDER == "gemini" else "OpenAI"
-        return friendly_provider_error(provider_name, e)
+    raw = call_translation_provider(paths, jp2en)
 
     out = strip_code_fences(raw)
     corrective_retry_used = False
@@ -1377,7 +1380,7 @@ def main() -> None:
         )
         try:
             atomic_write_text(OCR_TXT, message)
-            signal_ocr_completion()
+            signal_ocr_completion(message)
         except Exception:
             pass
         print("Usage: python screenshot_translator.py <image1> [<image2> ...]", file=sys.stderr)
@@ -1387,16 +1390,18 @@ def main() -> None:
     jp2en = load_glossary(JP2EN_GLOSSARY_PATH) if USE_TERMINOLOGY_OVERRIDES else []
     en2en = load_glossary(EN2EN_GLOSSARY_PATH) if USE_TERMINOLOGY_OVERRIDES else []
 
+    failure = ""
     try:
         result = translate_images(images, jp2en, en2en)
         atomic_write_text(OCR_TXT, result)
     except Exception as exc:
         provider_name = "Gemini" if PROVIDER == "gemini" else "OpenAI"
-        atomic_write_text(OCR_TXT, friendly_provider_error(provider_name, exc))
+        failure = friendly_provider_error(provider_name, exc)
+        atomic_write_text(OCR_TXT, failure)
         print(f"Translation process failed: {exc}", file=sys.stderr)
         raise
     finally:
-        signal_ocr_completion()
+        signal_ocr_completion(failure)
 
 
 if __name__ == "__main__":

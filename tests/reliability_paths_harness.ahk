@@ -10,6 +10,8 @@ global __TranslationPid := 0, __TranslationRequestId := "", __TranslationStarted
 global keysConfigured := true, tip := "", debugMode := false, explainsDir := A_ScriptDir, studyLibraryDir := A_ScriptDir, overlayDir := A_ScriptDir
 global explainProvider := "openai", explainOpenAIModel := "fixture", explainGeminiModel := "fixture", ddlEPr := {Text: "fixture"}
 global destroyOnTheme := false, explanationRuns := 0
+global toasts := [], terminalMessage := "", terminalToken := "", closedChild := false
+global warningCues := 0
 try {
     FileAppend("OLD SYNTHETIC FILE", envPath, "UTF-8")
     mode := "save-denied"
@@ -54,15 +56,38 @@ try {
     Check(ShotBuf.Length = 2 && ShotBuf[1] = "one.png", "Only accepted occurrence removed")
 
     EnvSet("EXPLAIN_ERROR_FILE", "prior synthetic value")
-    for scenario in ["launch-failed", "locked-error", "success", "success"] {
+    for scenario in ["launch-failed", "locked-error", "504", "404", "503", "429", "401", "no-result", "timeout", "success", "success"] {
         mode := scenario
         before := explanationRuns
+        beforeMessages := messages.Length
+        beforeCues := warningCues
         ExplainNow()
         if locked
             DllCall("CloseHandle", "ptr", locked), locked := 0
         Check(explanationRuns = before + 1, "Explanation can start: " scenario)
         Check(EnvGet("EXPLAIN_ERROR_FILE") = "prior synthetic value", "Explanation restores scoped environment: " scenario)
+        Check(messages.Length = beforeMessages, "No blocking failure dialog: " scenario)
+        if scenario != "success" {
+            Check(CPExplanationFailureStatus() != "", "Retained failure status: " scenario)
+            Check(toasts[-1][2] = 15000 && toasts[-1][3] = 2, "Long priority failure toast: " scenario)
+            Check(terminalToken = EnvGet("JRPG_REQUEST_ID") && terminalMessage != "", "Full details and completion retained: " scenario)
+            Check(warningCues = beforeCues + 1, "One nonblocking warning sound on failure")
+        } else {
+            Check(CPExplanationFailureStatus() = "", "Successful retry clears failure status")
+            Check(toasts[-1][1] = "Explanation updated", "Only confirmed success says updated")
+            Check(warningCues = beforeCues, "Success has no warning sound")
+        }
     }
+    Check(closedChild, "Hard timeout stops only its synthetic child")
+    Check(InStr(CPExplanationFailureSummary("Gemini explanation failed (error 504). DEADLINE_EXCEEDED"), "timed out"), "504 is a timeout, not an absent model")
+    Check(InStr(CPExplanationFailureSummary("Error 404 NOT_FOUND"), "unavailable"), "Unavailable model gets actionable summary")
+    Check(InStr(CPExplanationFailureSummary("Error 429 RESOURCE_EXHAUSTED"), "limit"), "Quota gets a distinct summary")
+    Check(InStr(CPExplanationFailureSummary("The model process ended without returning a result. Check the API key and connection."), "Check the Explainer"), "Generic failure is not misreported as authentication failure")
+    Check(InStr(CPExplanationFailureSummary("File not found: synthetic.py"), "Check the Explainer"), "Local missing file is not misreported as unavailable model")
+    mode := "signal-error"
+    beforeMessages := messages.Length
+    ExplainNow()
+    Check(CPExplanationFailureStatus() != "" && messages.Length = beforeMessages, "Unexpected failure uses nonmodal recovery")
     mode := "recursive-explain"
     before := explanationRuns
     ExplainNow()
@@ -126,13 +151,20 @@ TestExplainRun(cmd, directory, flags, &processId) {
         path := EnvGet("EXPLAIN_ERROR_FILE")
         FileAppend("Synthetic error", path, "UTF-8")
         locked := LockFile(path)
-    } else {
+    } else if mode != "no-result" && mode != "timeout" {
         done := FileOpen(overlayDir "\explainer.done", "w", "UTF-8")
         done.Write(EnvGet("JRPG_REQUEST_ID")), done.Close()
+        if RegExMatch(mode, "^\d{3}$")
+            FileAppend("Gemini explanation failed (error " mode ").`nDetails: synthetic provider failure", EnvGet("EXPLAIN_ERROR_FILE"), "UTF-8")
     }
     processId := 0
 }
-TestExplainAlive(*) => false
+TestExplainAlive(*) => mode = "timeout"
+TestExplainStartedAt() => mode = "timeout" ? A_TickCount - 120001 : A_TickCount
+TestExplainClose(*) {
+    global closedChild
+    closedChild := true
+}
 CPApplyOwnedDialogTheme(dialog) {
     global destroyOnTheme
     if destroyOnTheme
@@ -165,15 +197,28 @@ TestTip(value := "") {
 ShowOverlayStatus(*) => 0
 ExportGlossaryEnv(*) => 0
 WriteTranslationTerminalResult(*) => 0
-CPWriteExplainerTerminalResult(*) => 0
+CPWriteExplainerTerminalResult(message, token) {
+    global terminalMessage, terminalToken
+    terminalMessage := message, terminalToken := token
+}
+CPRefreshExplanationFailureStatus(*) => 0
+TestWarningCue(*) {
+    global warningCues
+    warningCues += 1
+}
 CPSyncExplanationSelectionFromControls(*) => "openai"
 ExplainProfilePath(*) => ""
 ReadIniInt(path, section, key, fallback) => fallback
 StudyLibraryCurrentChapter(*) => ""
 GameProfileSafeName(value) => value
-Toast(*) => 0
+Toast(args*) {
+    global toasts
+    toasts.Push(args)
+}
 SignalExplainerBusy(*) {
     global mode
     if mode = "recursive-explain"
         ExplainNow()
+    if mode = "signal-error"
+        throw Error("Synthetic signal failure")
 }

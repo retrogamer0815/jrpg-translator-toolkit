@@ -8,16 +8,18 @@ $main = [IO.File]::ReadAllText((Join-Path $repo 'JRPG Translator.ahk'))
 $overlay = [IO.File]::ReadAllText((Join-Path $repo 'bin/overlay.ahk'))
 $generated = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'reliability_paths_harness.ahk'))
 foreach ($entry in @(
-    @($main, @('SaveApiEnv', 'CPReplaceApiEnvFile', 'ExplainNow', 'ExplainNowCore', 'StudyWindowRevealFinished', 'StudyWindowRevealCore', 'StudyWindowHasHandle')),
+    @($main, @('SaveApiEnv', 'CPReplaceApiEnvFile', 'ExplainNow', 'ExplainNowCore', 'CPExplanationFailureSummary', 'CPExplanationFailureStatus', 'CPReportExplanationFailure', 'StudyWindowRevealFinished', 'StudyWindowRevealCore', 'StudyWindowHasHandle')),
     @($overlay, @('flushTranslate', 'FlushTranslateCore', 'RemoveAcceptedCaptures', 'FlushBufferedScreenshots'))
 )) {
     foreach ($name in $entry[1]) {
         $body = [regex]::Match($entry[0], '(?ms)^' + $name + '\([^\r\n]*\)\s*\{.*?^\}').Value
         if (!$body) { throw "Missing production function: $name" }
         if ($name -eq 'SaveApiEnv') { $body = $body.Replace('CPReplaceApiEnvFile(tmp, envPath)', 'TestReplaceApiEnvFile(tmp, envPath)') }
+        if ($name -eq 'CPReportExplanationFailure') { $body = $body.Replace('DllCall("user32\MessageBeep", "uint", 0x30)', 'TestWarningCue()') }
         if ($name -eq 'ExplainNowCore') {
             if (!$body.Contains('try Run(cmd, A_ScriptDir, "Hide", &pid)')) { throw 'Explanation launch boundary changed' }
             $body = $body.Replace('try Run(cmd, A_ScriptDir, "Hide", &pid)', 'try TestExplainRun(cmd, A_ScriptDir, "Hide", &pid)').Replace('while ProcessExist(pid)', 'while TestExplainAlive(pid)')
+            $body = $body.Replace('startedAt := A_TickCount', 'startedAt := TestExplainStartedAt()').Replace('ProcessClose(pid)', 'TestExplainClose(pid)')
         }
         if ($name -eq 'FlushTranslateCore') {
             if (!$body.Contains('try Run(cmd, A_ScriptDir, "Hide", &__TranslationPid)')) { throw 'Translation launch boundary changed' }

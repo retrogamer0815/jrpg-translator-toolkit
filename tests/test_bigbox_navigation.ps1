@@ -1,9 +1,14 @@
 param(
     [string]$AutoHotkey = 'C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe',
     [string]$OutputDirectory = (Join-Path ([IO.Path]::GetTempPath()) ('jrpg-bigbox-tests-' + [Guid]::NewGuid().ToString('N'))),
-    [switch]$StudyOnly
+    [switch]$StudyOnly,
+    [switch]$OpacityOnly,
+    [switch]$OverlaysOnly,
+    [switch]$NavigationOnly
 )
 $ErrorActionPreference = 'Stop'
+$overlayOnly = $OpacityOnly -or $OverlaysOnly
+if ($StudyOnly -and $overlayOnly) { throw 'Choose either StudyOnly or an overlay-only test run.' }
 $repo = Split-Path -Parent $PSScriptRoot
 $source = [IO.File]::ReadAllText((Join-Path $repo 'JRPG Translator.ahk'))
 $sourceNormalized = $source.Replace("`r`n", "`n")
@@ -106,12 +111,12 @@ $artPaths = foreach ($spec in @(@('box', 180, 300), @('logo', 400, 90))) {
 $dashboard = [regex]::Match($source, '(?ms)^CPBigBoxDashboardAlive\(\).*?(?=^CPApplyPresentationModeTransition\()').Value
 if (!$dashboard) { throw 'Dashboard source block was not found.' }
 $globals = [regex]::Matches($source, '(?m)^global CPBigBox[^\r\n]*') | ForEach-Object { $_.Value }
-$functions = @('CPPalette', 'CPSetWindowCloaked', 'StudyLibraryImageDimensions',
+$functions = @('CPPalette', 'CPSetWindowCloaked', 'StudyLibraryImageDimensions', 'CPExplanationFailureStatus', 'CPTranslationFailureStatus',
     'CPShowDialogFocusCues', 'CPControllerNavigationState', 'CPControllerResetNavigation',
     'CPControllerBeginSurfaceTransition', 'CPControllerFinishSurfaceTransition',
     'CPControllerSurfaceTransitionBlocks',
     'CPControllerPanelHwnd', 'CPControllerDispatchNavigation',
-    'CPControllerHandleNavigation',
+    'CPControllerHandleNavigation', 'CPControllerAcceleratedSliderRepeatActive',
     'AutoPersist', 'UpdateVars', 'SaveAll', 'ApplyShotSettings', 'ExplainPromptChanged',
     'ToggleModelControls', 'ToggleExplanationControls', 'ToggleAudioControls',
     'CPExplanationPreference', 'CPSetExplanationPreference', 'CPExplanationPreferenceChanged',
@@ -163,6 +168,7 @@ $generated = $generated.Replace('; @BIGBOX_SOURCE@', ($dashboard + "`r`n" + ($ex
 $generatedPath = Join-Path $output.FullName 'bigbox-navigation-generated.ahk'
 [IO.File]::WriteAllText($generatedPath, $generated, [Text.UTF8Encoding]::new($true))
 
+if (!$overlayOnly) {
 $studyFunctions = @(
     'StudyDesktopRegistry', 'StudyDesktopContext',
     'StudyLibraryFocusOnOpen', 'StudyLibraryImageCounterText', 'StudyLibraryApplyBigBoxFonts',
@@ -340,6 +346,7 @@ $candidateTabs = $candidateTabs.Replace('scTabs', 'candidateTabs').Replace('scGu
 $studyGenerated = $studyGenerated.Replace('; @CANDIDATE_TAB_SETUP@', $candidateTabs)
 $studyGeneratedPath = Join-Path $output.FullName 'study-controller-generated.ahk'
 [IO.File]::WriteAllText($studyGeneratedPath, $studyGenerated, [Text.UTF8Encoding]::new($true))
+}
 
 function Invoke-AhkTest([string]$Script, [string]$Name, [string[]]$ExtraArguments = @()) {
     $stdout = Join-Path $output.FullName ($Name + '.stdout.txt')
@@ -366,7 +373,9 @@ function Invoke-AhkTest([string]$Script, [string]$Name, [string[]]$ExtraArgument
 Invoke-AhkTest (Join-Path $PSScriptRoot 'bigbox_syntax_check.ahk') 'syntax'
 Invoke-AhkTest (Join-Path $PSScriptRoot 'overlay_syntax_check.ahk') 'overlay-syntax'
 if (!$StudyOnly) {
-    Invoke-AhkTest $generatedPath 'navigation' @(('"' + $artPaths[0] + '"'), ('"' + $artPaths[1] + '"'))
+    $navigationArguments = @(('"' + $artPaths[0] + '"'), ('"' + $artPaths[1] + '"'))
+    if ($overlayOnly) { $navigationArguments += '--overlays-only' }
+    Invoke-AhkTest $generatedPath 'navigation' $navigationArguments
 }
-Invoke-AhkTest $studyGeneratedPath 'study-controller'
+if (!$overlayOnly -and !$NavigationOnly) { Invoke-AhkTest $studyGeneratedPath 'study-controller' }
 Write-Output "Test artifacts: $($output.FullName)"

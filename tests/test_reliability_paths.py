@@ -127,9 +127,11 @@ class ReliabilityPaths(unittest.TestCase):
         with closing(sqlite3.connect(prefs)) as db:
             self.assertEqual(db.execute("SELECT count(*) FROM " + candidates.RECOMMENDATION_TABLE).fetchone()[0], 36)
         self.assertIn("36 completed assessments were saved", (self.root / "candidate_recommendation_error.txt").read_text())
+        self.assertEqual((self.root / "candidate_recommendation_progress.txt").read_text(), "2")
         with patch.object(candidates, "call_model", return_value=self.response(ids[36:])) as model:
             self.assertEqual(candidates.generate_recommendations(self.root, prefs, "openai", "fixture"), 0)
         model.assert_called_once()
+        self.assertEqual((self.root / "candidate_recommendation_progress.txt").read_text(), "1")
         prompt = model.call_args.args[2]
         self.assertIn(ids[36], prompt)
         self.assertNotIn(ids[0], prompt)

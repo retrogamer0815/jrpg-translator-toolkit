@@ -21,7 +21,7 @@ if (!$toast.Contains('+AlwaysOnTop') -or !$toast.Contains('+E0x08080020') -or !$
 }
 $present = [regex]::Match($source, '(?ms)^ToastPresent\([^\r\n]*\)\s*\{.*?^\}').Value
 if (!$present.Contains('user32\UpdateLayeredWindow') -or !$present.Contains('ULW_OPAQUE') -or
-    !$present.Contains('"int", 20, "int", 20, position') -or
+    !$present.Contains('corner := ToastPosition(width, height)') -or
     $toast.Contains('.Show(') -or $toast.Contains('.Redraw(') -or $toast.Contains('WinSetTransparent(')) {
     throw 'Keep toast pixels compositor-owned; redirected transparent-window painting can stall the desktop.'
 }

@@ -35,6 +35,14 @@ Showing the Explainer window and requesting an explanation are different actions
 
 If you only want to reread the current explanation, show the overlay instead of sending another AI request. New requests can incur additional provider usage.
 
+## If an explanation fails
+
+A timeout, unavailable model, or other request failure shows a 15-second, non-blocking notice at the top left of the foreground application's monitor, even when the Explainer is hidden. Ordinary saved/toggled notices do not replace it. A Windows warning sound also plays if system sounds are enabled. No background popup needs to be dismissed before you can continue using the app.
+
+The failure summary remains on the desktop **Explanation** page and the Big Box **Explanation** / **Explanation AI** pages until you start another request. Show the Explainer overlay for full details. A **504 / DEADLINE_EXCEEDED** means the request timed out; it does not necessarily mean the model no longer exists. Try again later or choose another explanation model. Requests are not retried automatically.
+
+Exclusive fullscreen can cover ordinary desktop notifications. If you cannot see these notices over your game, use borderless/windowed mode and check the retained status when returning to the control center.
+
 ## Customize the explanation prompt
 
 Use the prompt **Manage...** menu to edit, create, or delete an explanation prompt. These prompts are separate from Game Text prompts.

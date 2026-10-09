@@ -48,6 +48,7 @@ global btnIMG_GM_Add := ui.AddButton(), btnIMG_GM_Del := ui.AddButton()
 global btnTR_Add := ui.AddButton(), btnTR_Del := ui.AddButton()
 global btnA_GM_Add := ui.AddButton(), btnA_GM_Del := ui.AddButton()
 global slTrans := ui.AddSlider("Range0-255", 255), ddlFont := TestCombo(["Segoe UI"])
+global slControlOpacity := ui.AddSlider("Range50-100", 100)
 global edFSize := ui.AddEdit(, "14"), chkFontBold := ui.AddCheckbox()
 global udFSize := ui.AddUpDown("Range6-128", 14), lblTransPct := ui.AddText()
 global rectBg := ui.AddText(), rectTxt := ui.AddText(), rectName := ui.AddText()
@@ -58,6 +59,8 @@ global edFSize_EW := ui.AddEdit(, "14"), udFSize_EW := ui.AddUpDown("Range6-200"
 global CPFontSizeAdjustSyncing := false
 global TestOverlayThemes := [], TestOverlayThemeOK := true, TestOverlayGradientKeys := Map()
 global TestOverlayWindows := Map()
+global TestOverlayPowerGuis := [], TestOverlayPowerLaunches := [], TestOverlayPowerFailure := ""
+global TestOverlayPowerRefuseClose := false, TestExplainerWatcherStops := 0
 global CPControllerColorGradientSliders := TestOverlayGradientKeys, CPControllerColorGradientMessageRegistered := false
 global TestOverlayGui := Gui("-Caption +ToolWindow"), CPOverlayAdjustState := Map("active", false)
 global CP_PRESENTATION_MODE := "bigbox", TestOverlayReady := true, TestOverlayReturns := 0, TestOverlaySaves := 0
@@ -184,9 +187,20 @@ StudyLibraryStateAlive(studyState) {
 
 StudyControllerDispatchNavigation(*) => false
 StudyControllerSurfaceIsRoot(*) => false
+CPRefreshExplanationFailureStatus(*) => 0
 
 try {
     CPBigBoxDashboardCreate()
+    if A_Args.Length >= 3 && (A_Args[3] = "--opacity-only" || A_Args[3] = "--overlays-only") {
+        TestBigBoxOverlayPower()
+        TestBigBoxOpacityControllerSteps()
+        TestBigBoxOverlays()
+        TestBigBoxBackgroundOpacity()
+        CPBigBoxGui.Destroy()
+        TestAssert(TestExternalCalls = 0, "Opacity tests invoked no application action")
+        FileAppend("PASS: " TestCount " Big Box overlay assertions.`n", "*", "UTF-8")
+        ExitApp(0)
+    }
     TestAssert(CPBigBoxHomeTiles().Length = 8, "Eight Home tiles")
     TestAssert(CPBigBoxPageOrder().Length = 10, "Home plus nine normally visible desktop tabs")
     TestAssert(CPBigBoxNavigationControls.Length = 12, "Home has two arrows, eight tiles and two bottom actions")
@@ -259,15 +273,20 @@ try {
         CPBigBoxOpenHomeTile(testTile[3])
         TestAssert(CPBigBoxCurrentPage = testTile[3], "Tile opens " testTile[3])
         TestAssert(!CPBigBoxMainPageIndex(testTile[3]), "Home shortcut is not a full settings page")
-        TestAssert(!CPBigBoxControls["pageNext"].Enabled, "Quick view has no active page-switching arrow")
-        TestAssert(!TestControlShown(CPBigBoxControls["pageNext"]), "Quick view hides page arrows")
+        quickAI := CPBigBoxAIDomain() != ""
+        TestAssert(CPBigBoxControls["pageNext"].Enabled = quickAI, "AI quick view exposes page-switching arrows")
+        TestAssert(TestControlShown(CPBigBoxControls["pageNext"]) = quickAI, "AI quick view shows page arrows")
         TestAssert(CPBigBoxNavigationControls.Length = (CPBigBoxAIDomain() != "" || testTile[3] = "quickCapture"
-            || testTile[3] = "quickControls" ? 6 : testTile[3] = "quickOverlays" ? 6 : 3),
-            "Quick view focus excludes hidden page arrows")
+            || testTile[3] = "quickControls" ? (quickAI ? 8 : 6) : testTile[3] = "quickOverlays" ? 8 : 3),
+            "Quick view focus includes only shown page arrows")
         TestAssert(InStr(CPBigBoxControls["pageHint"].Text, "Home ›"), "Quick view shows Home breadcrumb")
-        CPBigBoxSwitchPage(1)
-        CPBigBoxSwitchPage(-1)
-        TestAssert(CPBigBoxCurrentPage = testTile[3], "Shoulders leave the separate quick view unchanged")
+        for testQuickDirection in [1, -1] {
+            testQuickIndex := CPBigBoxNavigationPageIndex(testTile[3])
+            CPBigBoxSwitchPage(testQuickDirection)
+            testQuickExpected := quickAI ? CPBigBoxPageOrder()[Mod(testQuickIndex - 1 + testQuickDirection + 10, 10) + 1] : testTile[3]
+            TestAssert(CPBigBoxCurrentPage = testQuickExpected, "Shoulders connect quick AI to full settings")
+            CPBigBoxSetPage(testTile[3], false)
+        }
         TestAssert(!CPBigBoxControls["translation"].Enabled, "Home actions inactive away from Home")
         TestAssert(CPBigBoxControls["backHome"].Enabled, "Preview has Back to Home")
         CPBigBoxBack()
@@ -275,6 +294,17 @@ try {
         TestAssert(CPBigBoxNavigationControls[CPBigBoxFocusIndex].Hwnd
             = CPBigBoxControls[testTile[1]].Hwnd, "Home restores tile focus for " testTile[3])
     }
+    CPExplanationFailureStatus("Explanation timed out. Try again or choose another model.")
+    for failurePage in ["explanation", "quickExplanation"] {
+        CPBigBoxSetPage(failurePage, false)
+        CPBigBoxDashboardUpdateContent()
+        statusControl := failurePage = "explanation" ? "modeBody" : "aiNote"
+        TestAssert(InStr(CPBigBoxControls[statusControl].Text, "timed out"), "Failure retained in " failurePage)
+        TestAssert(CPBigBoxModalDepth = 0 && DllCall("user32\IsWindowEnabled", "ptr", CPBigBoxGui.Hwnd), "Failure does not disable dashboard")
+        CPBigBoxSwitchPage(1)
+        TestAssert(CPBigBoxCurrentPage = "explanationWindow", "Shoulder navigation still works after failure")
+    }
+    CPExplanationFailureStatus("")
     CPBigBoxSetPage("screenshot")
     CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls["advanced"]))
     CPBigBoxSetPage("explanation")
@@ -388,7 +418,9 @@ try {
     TestBigBoxStage3D()
     TestBigBoxAudioFeedback()
     TestBigBoxAudioStartup()
+    TestBigBoxOverlayPower()
     TestBigBoxOverlays()
+    TestBigBoxOpacityControllerSteps()
     TestBigBoxBackgroundOpacity()
     TestBigBoxAlwaysOnTop()
     TestNativePickerOwnership()
@@ -1800,6 +1832,172 @@ TestBigBoxAudioStartup() {
     }
 }
 
+TestBigBoxOverlayPower() {
+    global
+    local originalIni := FileRead(iniPath), page, target, key, targets, dims, ctrl
+    local launches, oldHidden := A_DetectHiddenWindows, watcherStops, otherHwnd
+    local x, y, w, h, tileY, tileH, bottomY, snapshot, stateGui
+    local settingsTile, settingsLabel
+    for dims in [[1280, 720], [1920, 1080], [3840, 2160]] {
+        CPBigBoxGui.Show("Hide w" dims[1] " h" dims[2])
+        CPBigBoxDashboardResize(CPBigBoxGui, 0, dims[1], dims[2])
+        for page in ["quickOverlays", "quickTranslatorWindow", "quickExplainerWindow", "translationWindow", "explanationWindow"] {
+            CPBigBoxSetPage(page, false)
+            targets := page = "quickOverlays" ? ["Translator", "Explainer"] : [CPBigBoxOverlayTarget()]
+            for target in targets {
+                key := page = "quickOverlays" ? "ov_" StrLower(target) "_power" : "ov_power"
+                ctrl := CPBigBoxControls[key]
+                settingsTile := CPBigBoxControls["ov_" StrLower(target)]
+                settingsLabel := target " settings`nWindow color · Opacity · Size / position"
+                TestAssert(settingsTile.Text = settingsLabel, "Appearance tile names settings instead of repeating window status")
+                TestAssert(ctrl.Enabled && TestControlShown(ctrl) && CPBigBoxDashboardControlIndex(ctrl),
+                    "Overlay power is visible and navigable: " page " / " target " / " dims[1])
+                TestAssert(InStr(ctrl.Text, "Open " target) && InStr(ctrl.Text, "closed"), "Closed overlay offers Open")
+                TestAssert((DllCall("user32\GetWindowLongW", "ptr", ctrl.Hwnd, "int", -16, "uint") & 0xF) = 0xB,
+                    "Overlay power uses the themed owner-draw button")
+                ctrl.GetPos(&x, &y, &w, &h)
+                CPBigBoxControls["backHome"].GetPos(, &bottomY)
+                TestAssert(y + h <= bottomY && TestTextHeight(ctrl) + 8 <= h, "Power label fits above footer")
+                if page = "quickOverlays" {
+                    settingsTile.GetPos(, &tileY,, &tileH)
+                    TestAssert(TestTextHeight(settingsTile) + 8 <= tileH, "Settings label and control summary fit: " dims[1])
+                    TestAssert(y >= tileY + tileH, "Power button sits below its appearance tile")
+                    CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls["ov_" StrLower(target)]))
+                    CPBigBoxDashboardMoveFocus("Down")
+                    TestAssert(CPBigBoxFocusFrame["key"] = key, "Down reaches the matching overlay power button")
+                    CPBigBoxDashboardMoveFocus("Up")
+                    TestAssert(CPBigBoxFocusFrame["key"] = "ov_" StrLower(target), "Up returns to matching appearance tile")
+                } else if CPBigBoxOverlayQuick() {
+                    CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls["ov_bg"]))
+                    CPBigBoxDashboardMoveFocus("Down")
+                    TestAssert(CPBigBoxFocusFrame["key"] = key, "Quick settings reach power with Down")
+                } else {
+                    CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls["ov_position"]))
+                    CPBigBoxDashboardMoveFocus("Right")
+                    TestAssert(CPBigBoxFocusFrame["key"] = key, "Full settings reach power after Move / Resize")
+                }
+                CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(ctrl))
+                CPControllerResetNavigation()
+                CPControllerHandleNavigation(TestSnapshot(), CPBigBoxGui.Hwnd)
+                launches := TestOverlayPowerLaunches.Length
+                CPControllerHandleNavigation(TestSnapshot("X:A"), CPBigBoxGui.Hwnd)
+                Sleep(40)
+                TestAssert(TestOverlayPowerLaunches.Length = launches + 1
+                    && TestOverlayPowerLaunches[-1] = target && CPOverlayWindowHwnd(target),
+                    "Controller A opens only the chosen overlay")
+                Loop 8
+                    CPControllerHandleNavigation(TestSnapshot("X:A"), CPBigBoxGui.Hwnd)
+                TestAssert(CPOverlayWindowHwnd(target) && TestOverlayPowerLaunches.Length = launches + 1,
+                    "Held A neither launches twice nor closes the new overlay")
+                TestAssert(InStr(ctrl.Text, "Close " target) && InStr(ctrl.Text, "hidden")
+                    && CPBigBoxFocusFrame["key"] = key && CPBigBoxCurrentPage = page,
+                    "Open refreshes live state and keeps the same page and focus")
+                TestAssert(settingsTile.Text = settingsLabel, "Opening an overlay keeps its settings label unchanged")
+                TestAssert(InStr(CPBigBoxControls["modeBody"].Text, "opened"), "Open result is shown inline")
+                CPControllerHandleNavigation(TestSnapshot(), CPBigBoxGui.Hwnd)
+                CPControllerHandleNavigation(TestSnapshot("X:A"), CPBigBoxGui.Hwnd)
+                Sleep(40)
+                TestAssert(!CPOverlayWindowHwnd(target) && InStr(ctrl.Text, "Open " target)
+                    && InStr(CPBigBoxControls["modeBody"].Text, "closed"), "Controller closes even an actually hidden overlay")
+                TestAssert(settingsTile.Text = settingsLabel, "Closing an overlay keeps its settings label unchanged")
+                TestAssert(CPBigBoxFocusFrame["key"] = key && !CPBigBoxAICommitting
+                    && CPBigBoxOverlaySwitching = "" && A_DetectHiddenWindows = oldHidden,
+                    "Close restores focus, navigation and hidden-window detection")
+                CPControllerHandleNavigation(TestSnapshot(), CPBigBoxGui.Hwnd)
+            }
+            TestCapture("overlay-power-" page "-" dims[1] ".png", dims[1], dims[2])
+        }
+    }
+    CPBigBoxSetPage("quickOverlays", false)
+    CPBigBoxToggleOverlay("Translator")
+    otherHwnd := CPOverlayWindowHwnd("Translator")
+    CPBigBoxToggleOverlay("Explainer")
+    watcherStops := TestExplainerWatcherStops
+    TestOverlayPowerRefuseClose := true
+    CPBigBoxToggleOverlay("Explainer")
+    TestAssert(CPOverlayWindowHwnd("Explainer") && InStr(CPBigBoxOverlayNotice, "still running")
+        && TestExplainerWatcherStops = watcherStops, "Failed close keeps state truthful and does not stop the watcher")
+    TestOverlayPowerRefuseClose := false
+    CPBigBoxToggleOverlay("Explainer")
+    TestAssert(CPOverlayWindowHwnd("Translator") = otherHwnd && !CPOverlayWindowHwnd("Explainer")
+        && TestExplainerWatcherStops = watcherStops + 1, "Closing Explainer leaves Translator alone and stops only its watcher")
+    ; Out-of-band changes (shortcut/window close) refresh without changing focus.
+    stateGui := TestOverlayPowerGuis[-2]
+    stateGui.Show("NA x-32000 y-32000 w80 h40")
+    CPBigBoxUpdateOverlayPower()
+    TestAssert(InStr(CPBigBoxControls["ov_translator_power"].Text, "visible"), "Status refresh notices visible overlays")
+    TestAssert(CPBigBoxControls["ov_translator"].Text = "Translator settings`nWindow color · Opacity · Size / position",
+        "Visible overlay status stays on the power button, not the settings tile")
+    stateGui.Opt("-AlwaysOnTop")
+    CPBigBoxUpdateOverlayPower()
+    TestAssert(InStr(CPBigBoxControls["ov_translator_power"].Text, "hidden"), "Status refresh notices sent-behind overlays")
+    stateGui.Destroy()
+    CPBigBoxUpdateOverlayPower()
+    TestAssert(InStr(CPBigBoxControls["ov_translator_power"].Text, "Open Translator"), "External close updates the action label")
+    for TestOverlayPowerFailure in ["missing", "throw"] {
+        CPBigBoxToggleOverlay("Translator")
+        TestAssert(!CPOverlayWindowHwnd("Translator") && InStr(CPBigBoxOverlayNotice, "Could not")
+            && !CPBigBoxAICommitting && CPBigBoxOverlaySwitching = "" && CPBigBoxPageNavigationAllowed(),
+            "Launch failure is recoverable: " TestOverlayPowerFailure)
+    }
+    TestOverlayPowerFailure := ""
+    launches := TestOverlayPowerLaunches.Length
+    CPBigBoxModalDepth := 1
+    CPBigBoxToggleOverlay("Translator")
+    CPBigBoxModalDepth := 0
+    CPBigBoxSetPage("home", false)
+    CPBigBoxToggleOverlay("Translator")
+    CPBigBoxSetPage("quickMainWindow", false)
+    CPBigBoxOverlayAction("power")
+    TestAssert(TestOverlayPowerLaunches.Length = launches && !TestControlShown(CPBigBoxControls["ov_power"]),
+        "Modal, unrelated-page and main-window routes cannot toggle an overlay")
+    CPBigBoxSetPage("quickTranslatorWindow", false)
+    CPBigBoxOverlayAction("bg")
+    CPBigBoxToggleOverlay("Translator")
+    TestAssert(TestOverlayPowerLaunches.Length = launches && !TestControlShown(CPBigBoxControls["ov_power"]),
+        "An open appearance editor cannot toggle an overlay")
+    CPBigBoxCloseOverlayEditor()
+    TestAssert(FileRead(iniPath) = originalIni && TestExternalCalls = 0,
+        "Opening and closing overlays makes no AI request or settings write")
+    TestOverlayWindows.Clear()
+    TestOverlayPowerGuis := []
+    CPControllerSurfaceTransitionState := ""
+    CPControllerResetNavigation()
+    CPBigBoxSetPage("home", false)
+}
+
+TestOverlayPowerLaunch(title) {
+    global TestOverlayPowerLaunches, TestOverlayPowerFailure, TestOverlayPowerGuis, TestOverlayWindows
+    global CPBigBoxAICommitting, CPBigBoxOverlaySwitching, CPBigBoxCurrentPage
+    TestOverlayPowerLaunches.Push(title)
+    TestAssert(CPBigBoxAICommitting && CPBigBoxOverlaySwitching = title && !CPBigBoxPageNavigationAllowed(),
+        "In-flight overlay operation blocks re-entrant activation and navigation")
+    CPBigBoxToggleOverlay(title)
+    if TestOverlayPowerFailure = "throw"
+        throw Error("Synthetic launch failure")
+    if TestOverlayPowerFailure = "missing"
+        return
+    overlayGui := Gui("+ToolWindow +AlwaysOnTop", "Synthetic " title " overlay")
+    overlayGui.OnEvent("Close", TestOverlayPowerClose)
+    TestOverlayPowerGuis.Push(overlayGui)
+    TestOverlayWindows[title] := overlayGui.Hwnd
+}
+
+TestOverlayPowerClose(overlayGui, *) {
+    global TestOverlayPowerRefuseClose
+    if !TestOverlayPowerRefuseClose
+        overlayGui.Destroy()
+    return true
+}
+
+LaunchOverlay(*) => TestOverlayPowerLaunch("Translator")
+LaunchExplainerOverlay(*) => TestOverlayPowerLaunch("Explainer")
+CPDesktopRefreshStatus(*) => 0
+StopExplainerBoundsWatcher(*) {
+    global TestExplainerWatcherStops
+    TestExplainerWatcherStops += 1
+}
+
 TestBigBoxOverlays() {
     global
     local dims, page, target, fields, field, pref, before, sendsBefore, value, expected, oldProfile
@@ -1819,8 +2017,9 @@ TestBigBoxOverlays() {
             TestCapture(page "-" dims[1] ".png", dims[1], dims[2])
             if page = "quickOverlays" {
                 seenHelp := Map()
-                for helpKey in ["ov_translator", "ov_explainer", "ov_main",
+                for helpKey in ["ov_translator", "ov_explainer", "ov_main", "ov_translator_power", "ov_explainer_power",
                     "backHome", "advanced", "return"] {
+                    CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls[helpKey]))
                     CPBigBoxUpdateSettingsHint(helpKey)
                     helpText := CPBigBoxControls["modeBody"].Text
                     helpLines := StrSplit(helpText, "`n", "`r")
@@ -1839,6 +2038,10 @@ TestBigBoxOverlays() {
             if page = "translationWindow" || page = "explanationWindow" {
                 seenHelp := Map()
                 for helpKey in CPBigBoxSettingsKeys(page) {
+                    ; Focus events also refresh help. Keep the real focus on
+                    ; the tested tile so a queued event cannot restore another
+                    ; tile's help while this assertion reads it.
+                    CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls[helpKey]))
                     CPBigBoxUpdateSettingsHint(helpKey)
                     helpText := CPBigBoxControls["modeBody"].Text
                     helpLines := StrSplit(helpText, "`n", "`r")
@@ -2048,6 +2251,88 @@ TestBigBoxOverlays() {
     controlDarkMode := 1
 }
 
+TestBigBoxOpacityControllerSteps() {
+    global
+    local originalIni := FileRead(iniPath), hwnd := CPBigBoxGui.Hwnd
+    local direction, token, startValue, previous, stage, field
+    Loop 51
+        TestAssert(CPBigBoxClampBackgroundOpacity(49 + A_Index) = 49 + A_Index,
+            "Opacity normalization preserves every integer percentage: " (49 + A_Index))
+    TestAssert(CPBigBoxClampBackgroundOpacity(49) = 50 && CPBigBoxClampBackgroundOpacity(101) = 100,
+        "Opacity normalization retains its readability limits")
+    CPBigBoxGui.Show("Hide w1280 h720")
+    CPBigBoxDashboardResize(CPBigBoxGui, 0, 1280, 720)
+    CPBigBoxSetPage("quickMainWindow", false)
+    CPBigBoxOverlayAction("opacity")
+    TestAssert(CPControllerAcceleratedSliderRepeatActive(hwnd, "Left")
+        && CPControllerAcceleratedSliderRepeatActive(hwnd, "Right")
+        && !CPControllerAcceleratedSliderRepeatActive(hwnd, "Down"),
+        "Main opacity uses the shared horizontal slider acceleration")
+    for direction in ["Left", "Right"] {
+        token := "X:DPAD_" StrUpper(direction)
+        startValue := direction = "Left" ? 85 : 65
+        CPBigBoxControls["ov_slider1"].Value := startValue
+        CPBigBoxOverlaySliderChanged()
+        CPControllerResetNavigation()
+        CPControllerHandleNavigation(TestSnapshot(), hwnd)
+        CPControllerHandleNavigation(TestSnapshot(token), hwnd)
+        TestAssert(CPBigBoxBackgroundPreview = startValue + (direction = "Left" ? -1 : 1),
+            "A fresh D-pad press changes main opacity by exactly one percent: " direction
+                " (actual=" CPBigBoxBackgroundPreview ", allowed=" CPBigBoxPageNavigationAllowed()
+                ", slider=" CPBigBoxOverlaySliderFocused() ", held=" CPControllerNavHeldDirection ")")
+        previous := CPBigBoxBackgroundPreview
+        CPControllerNavNextRepeatAt := A_TickCount + 280
+        CPControllerHandleNavigation(TestSnapshot(token), hwnd)
+        TestAssert(CPBigBoxBackgroundPreview = previous,
+            "Holding waits for the initial repeat delay: " direction)
+        ; Exercise the real repeat engine without sleeping through its thresholds.
+        for stage in [[350, 1], [750, 2], [1250, 4]] {
+            CPControllerNavHeldSince := A_TickCount - stage[1]
+            CPControllerNavNextRepeatAt := 0
+            previous := CPBigBoxBackgroundPreview
+            CPControllerHandleNavigation(TestSnapshot(token), hwnd)
+            TestAssert(CPBigBoxBackgroundPreview = previous + (direction = "Left" ? -stage[2] : stage[2]),
+                "Held D-pad accelerates to " stage[2] " one-percent steps: " direction)
+        }
+        CPControllerHandleNavigation(TestSnapshot(), hwnd)
+        TestAssert(CPControllerNavHeldDirection = "" && CPControllerNavHeldSince = 0
+            && CPControllerNavNextRepeatAt = 0, "Release resets acceleration: " direction)
+        previous := CPBigBoxBackgroundPreview
+        CPControllerHandleNavigation(TestSnapshot(token), hwnd)
+        TestAssert(CPBigBoxBackgroundPreview = previous + (direction = "Left" ? -1 : 1),
+            "The next tap returns to one-percent precision: " direction)
+    }
+    TestAssert(FileRead(iniPath) = originalIni && CPBigBoxBackgroundOpacity = 100,
+        "Controller adjustments only preview; nothing is saved early")
+    TestAssert(InStr(CPBigBoxControls["footer"].Text, "1%")
+        && InStr(CPBigBoxControls["footer"].Text, "Hold"), "Footer explains fine adjustment and holding")
+    CPBigBoxControls["ov_slider1"].Value := 73
+    CPBigBoxOverlaySliderChanged()
+    CPBigBoxSaveOverlayEditor()
+    TestAssert(CPBigBoxBackgroundOpacity = 73
+        && IniRead(iniPath, "cfg_control", "bigBoxBackgroundOpacity") = 73,
+        "Save persists a fine-grained value, not a multiple of five")
+    CPBigBoxOverlayAction("opacity")
+    TestAssert(CPBigBoxControls["ov_slider1"].Value = 73, "Reopening preserves the exact saved value")
+    CPBigBoxOverlaySliderMove("Right")
+    CPBigBoxCloseOverlayEditor()
+    TestAssert(CPBigBoxBackgroundOpacity = 73 && CPBigBoxEffectiveBackgroundOpacity() = 73,
+        "Cancel restores the exact saved value")
+    CPSetOverlayPreference("Main window", "opacity", 100)
+    CPBigBoxDashboardApplyTheme()
+    IniDelete(iniPath, "cfg_control", "bigBoxBackgroundOpacity")
+    CPControllerResetNavigation()
+    ; Main-window fine tuning must keep the other slider eligibility unchanged.
+    CPBigBoxSetPage("quickTranslatorWindow", false)
+    for field in ["opacity", "bg", "size"] {
+        CPBigBoxOverlayAction(field)
+        TestAssert(CPControllerAcceleratedSliderRepeatActive(hwnd, "Right") = (field != "size"),
+            "Overlay opacity and color accelerate; font size remains single-step: " field)
+        CPBigBoxCloseOverlayEditor()
+    }
+    CPBigBoxSetPage("home", false)
+}
+
 TestBigBoxBackgroundOpacity() {
     global
     local before := FileRead(iniPath), sends := TestOverlayThemes.Length
@@ -2067,12 +2352,11 @@ TestBigBoxBackgroundOpacity() {
         && !CPBigBoxControls["ov_bg"].Enabled && !CPBigBoxControls["ov_position"].Enabled,
         "Main window exposes background opacity and Always on top with standard return actions")
     CPBigBoxOverlayAction("opacity")
-    CPBigBoxOverlaySliderMove("Left")
-    CPBigBoxOverlaySliderMove("Left")
-    CPBigBoxOverlaySliderMove("Left")
+    Loop 15
+        CPBigBoxOverlaySliderMove("Left")
     TestAssert(CPBigBoxBackgroundPreview = 85 && CPBigBoxBackgroundOpacity = 100
         && FileRead(iniPath) = before && TestOverlayThemes.Length = sends,
-        "Three controller steps preview 85 percent without writes or changing translation overlays")
+        "Fifteen fine steps preview 85 percent without writes or changing translation overlays")
     TestAssert(!CPBigBoxBackdrop.Get("failed", false) && CPBigBoxBackdrop.Has("gui"),
         "Native background-only composition succeeds")
     backdropHwnd := CPBigBoxBackdrop["gui"].Hwnd
@@ -2100,6 +2384,9 @@ TestBigBoxBackgroundOpacity() {
         CPBigBoxControls["modeBody"].GetPos(,,, &bh)
         TestAssert(TestTextHeight(CPBigBoxControls["modeBody"]) <= bh,
             "Live preview instructions fit at " dims[1])
+        CPBigBoxControls["footer"].GetPos(,,, &bh)
+        TestAssert(TestTextHeight(CPBigBoxControls["footer"]) <= bh,
+            "Fine adjustment and hold instructions fit at " dims[1])
         TestCapture("background-opacity-85-" dims[1] ".png", dims[1], dims[2])
     }
     CPBigBoxGui.Hide()
@@ -2125,10 +2412,10 @@ TestBigBoxBackgroundOpacity() {
     CPBigBoxBack()
     CPBigBoxSetPage("quickMainWindow", false)
     CPBigBoxOverlayAction("opacity")
-    Loop 15
+    Loop 60
         CPBigBoxOverlaySliderMove("Left")
     TestAssert(CPBigBoxBackgroundPreview = 50, "Opacity is clamped at a readable 50 percent minimum")
-    Loop 15
+    Loop 60
         CPBigBoxOverlaySliderMove("Right")
     TestAssert(CPBigBoxBackgroundPreview = 100 && !DllCall("user32\IsWindowVisible", "ptr", backdropHwnd),
         "100 percent preview returns to normal solid rendering")
@@ -3904,7 +4191,9 @@ CPSetPreferredAppDarkMode(*) => 0
 CPAllowDarkModeForWindow(*) => 0
 CPApplyThemeToControl(*) => 0
 CPControllerKeyboardMirrorActive(*) => false
-CPControllerAcceleratedSliderRepeatActive(*) => false
+CPFontSizeAdjustActive(*) => false
+CPMaxPngAdjustActive(*) => false
+CPControllerColorSliderRepeatActive(*) => false
 CPFocusedHwnd(*) => 0
 CPHwndIsTab(*) => false
 CPControllerColorDispatch(*) => false

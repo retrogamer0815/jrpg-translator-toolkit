@@ -12,7 +12,7 @@ if FileExist(envPath)
     FileDelete(envPath)
 FileAppend("OPENAI_API_KEY=synthetic-openai`nGEMINI_API_KEY=synthetic-gemini`n", envPath, "UTF-8")
 global APP_VERSION := "0.9.9.0", PROJECT_URL := "https://example.invalid/jrpg-translator"
-global BUG_REPORT_URL := PROJECT_URL "/issues/new", WRITTEN_GUIDE_URL := PROJECT_URL "#quick-start"
+global BUG_REPORT_URL := PROJECT_URL "/issues/new", WRITTEN_GUIDE_URL := PROJECT_URL "/blob/main/docs/manual/README.md"
 global BEGINNER_VIDEO_URL := "https://example.invalid/beginner"
 global gPidAudio := 0, gJustStoppedUntil := 0, gLastAction := ""
 global gAudioProcess := 0
@@ -308,9 +308,11 @@ try {
     DesktopTestOwnerDrawFocusCues()
     DesktopTestOwnerDrawNavigationStability()
     DesktopTestSectionNavigationOrder()
+    DesktopTestCaptureNavigation()
     DesktopTestControllerPageScrollNavigation()
     DesktopTestActionMenus()
     DesktopTestOverlayPages()
+    TestOverlayColors()
     DesktopTestOrganizePages()
     DesktopTestNativeWheelAndFocus()
     DesktopTestScrollTransitionClipping()
@@ -482,6 +484,24 @@ TestDesktopResizing() {
     DesktopAssert(ddlProv.Text = selection[1] && ddlPrompt.Text = selection[2]
         && chkGuess.Value = selection[3] && chkName.Value = selection[4],
         "Resizing preserves provider, prompt and checkbox values")
+    CPDesktopNavigate(4)
+    CPExplanationFailureStatus("Explanation model unavailable. Try later or choose another model.")
+    Sleep(50)
+    for size in [[820, 540], [1120, 760], [1400, 900]] {
+        ui.Show("NA x-9000 y-9000 w" size[1] " h" size[2])
+        CPDesktopRelayout()
+        status := CPDesktop["explanationPage"]["actionHelp"]
+        status.GetPos(,, &statusW, &statusH)
+        scale := GetWindowDPI(ui.Hwnd) / 96
+        DesktopAssert(InStr(status.Text, "model unavailable"), "Desktop retains actionable explanation failure")
+        DesktopAssert(statusH * scale >= CPMeasureWrappedTextHeight(status, statusW * scale), "Failure status wraps without clipping")
+        DesktopAssert(tab.Value = 4 && DllCall("user32\IsWindowEnabled", "ptr", ui.Hwnd), "Failure refresh neither navigates nor disables desktop")
+        ui.GetClientPos(,, &w, &h)
+        TestCapture("desktop-explanation-failure-" size[1] ".png", Round(w * scale), Round(h * scale))
+    }
+    CPExplanationFailureStatus("")
+    Sleep(50)
+    DesktopAssert(!InStr(CPDesktop["explanationPage"]["actionHelp"].Text, "unavailable"), "New request clears retained desktop failure")
     CPDesktopNavigate(1)
     ui.GetClientPos(,, &w, &h)
     scale := DllCall("user32\GetDpiForWindow", "ptr", ui.Hwnd, "uint") / 96
@@ -747,6 +767,70 @@ DesktopTestSectionNavigationOrder() {
         "Controller L returns from Study Library to the already displayed Explanation Window page")
 
     CPDesktopNavigate(1)
+}
+
+DesktopTestCaptureNavigation() {
+    global ui, tab, CPDesktop, btnCapPick, btnST, btnTS, btnSTO, CPControllerLastNativeNavigationAt
+    shot := CPDesktop["shot"]
+    for dimensions in [[1400, 900], [1120, 760], [900, 640], [820, 560]] {
+        navWidth := dimensions[1], navHeight := dimensions[2]
+        ui.Show("NA x-9000 y-9000 w" navWidth " h" navHeight)
+        CPDesktopNavigate(1)
+        CPDesktopLayout(ui, 0, navWidth, navHeight)
+        for mode in ["arrows", "dpad"] {
+            ; The arrow handlers and native D-pad share CPNavMove. The D-pad
+            ; branch also exercises its real dispatcher, without sending input
+            ; to the foreground app or triggering a capture/model request.
+            for navCase in [[shot["prompts"], "Down", btnCapPick],
+                [btnCapPick, "Down", btnSTO], [btnSTO, "Up", btnCapPick],
+                [btnSTO, "Right", btnCapPick],
+                [btnCapPick, "Up", shot["prompts"]],
+                [btnST, "Right", btnTS], [btnTS, "Right", btnSTO],
+                [btnSTO, "Left", btnTS], [btnTS, "Left", btnST]] {
+                CPCanvasScrollTo(0, 0)
+                CPSetFocusHwnd(navCase[1].Hwnd)
+                if mode = "dpad"
+                    CPControllerDispatchNavigation(navCase[2], ui.Hwnd)
+                else
+                    CPNavMove(navCase[2])
+                Sleep(30)
+                DesktopAssert(CPFocusedHwnd() = navCase[3].Hwnd,
+                    mode " " navCase[2] " from " navCase[1].Text " reaches " navCase[3].Text " at width " navWidth)
+                navCase[3].GetPos(, &navY,, &navH)
+                DesktopAssert(navY >= CPDesktop["headerH"] + 88 && navY + navH <= navHeight - 58,
+                    "Navigation reveals the capture target above the footer")
+            }
+        }
+        DesktopAssert(DllCall("user32\GetNextDlgTabItem", "ptr", ui.Hwnd,
+            "ptr", shot["prompts"].Hwnd, "int", 0, "ptr") = btnCapPick.Hwnd,
+            "Tab order from Manage to Change capture remains unchanged")
+        for state in ["disabled", "hidden"] {
+            if state = "disabled"
+                btnCapPick.Enabled := false
+            else
+                btnCapPick.Visible := false
+            try {
+                CPSetFocusHwnd(shot["prompts"].Hwnd)
+                CPNavMove("Down")
+                DesktopAssert(CPFocusedHwnd() != btnCapPick.Hwnd, "Skip " state " Change capture target")
+                CPSetFocusHwnd(btnSTO.Hwnd)
+                CPNavMove("Right")
+                DesktopAssert(CPFocusedHwnd() != btnCapPick.Hwnd, "Right skips " state " Change capture target")
+            } finally {
+                btnCapPick.Enabled := true
+                btnCapPick.Visible := true
+            }
+        }
+    }
+    CPDesktopNavigate(2)
+    CPSetFocusHwnd(CPDesktop["audioPage"]["models"].Hwnd)
+    CPNavMove("Down")
+    DesktopAssert(tab.Value = 2 && CPFocusedHwnd() != btnCapPick.Hwnd,
+        "Capture navigation does not leak into other pages")
+    CPControllerLastNativeNavigationAt.Clear()
+    CPDesktopNavigate(1)
+    ui.Show("NA x-9000 y-9000 w1400 h820")
+    CPDesktopLayout(ui, 0, 1400, 820)
 }
 
 DesktopTestControllerPageScrollNavigation() {
@@ -3623,7 +3707,7 @@ TestHelpDialogs(reader) {
     PROJECT_URL := "https://example.invalid/jrpg-translator"
     BUG_REPORT_URL := PROJECT_URL "/issues/new"
     BEGINNER_VIDEO_URL := "https://example.invalid/beginner"
-    WRITTEN_GUIDE_URL := PROJECT_URL "#quick-start"
+    WRITTEN_GUIDE_URL := PROJECT_URL "/blob/main/docs/manual/README.md"
 
     for dark in [1, 0] {
         controlDarkMode := dark
@@ -3633,7 +3717,7 @@ TestHelpDialogs(reader) {
             "Welcome guide uses the modern desktop dialog shell")
         wc := welcome["controls"]
         DesktopAssert(InStr(wc["steps"].Text, "1. Add at least one API key.")
-            && InStr(wc["steps"].Text, "5. Save the finished setup")
+            && InStr(wc["steps"].Text, "5. Save the finished setup as a Profile for the LaunchBox plugin (optional).")
             && wc["dontShow"].Value = 1,
             "Welcome guide preserves the complete setup checklist and default preference")
         for size in [[780, 700], [880, 720], [1200, 860]] {

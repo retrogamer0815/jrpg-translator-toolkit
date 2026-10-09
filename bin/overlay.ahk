@@ -33,15 +33,11 @@ APP_ROOT := ExpandEnv(APP_ROOT)
 ; ===================== Helpers =====================
 IsWindowTopmost(hwnd) {
     ; WS_EX_TOPMOST = 0x00000008
-    if !hwnd
+    if !hwnd || !DllCall("user32\IsWindow", "ptr", hwnd, "int")
         return false
-    oldDHW := A_DetectHiddenWindows
-    DetectHiddenWindows true
-    ok := WinExist("ahk_id " hwnd)
-    DetectHiddenWindows oldDHW
-    if !ok
-        return false
-    return (WinGetExStyle("ahk_id " hwnd) & 0x00000008) != 0
+    ; Native lookup also works for hidden windows and safely returns zero if
+    ; the HWND disappears. AHK's active/visible-window lookup can throw here.
+    return (DllCall("user32\GetWindowLongW", "ptr", hwnd, "int", -20, "uint") & 0x8) != 0
 }
 
 HexToBGR(hex) {
@@ -935,10 +931,30 @@ global __GDI_Ready := false
 global __Sel_Active := false
 global __Sel_Gui := 0
 global __Sel_Kind := ""        ; "region" | "window"
+global __Sel_sx := 0, __Sel_sy := 0, __Sel_ex := 0, __Sel_ey := 0
+global __SelDragging := false, __SelTimerRunning := false, __SelBand := 0
+global __CapPickBusy := false
 global __CapPickState := Map("active", false)
 global __CapPickHotkeysBound := false
 global __CapPickFlagPath := A_Temp "\JRPG_Overlay\controller_adjust.active"
 global __WindowHighlightGui := 0
+
+; Every picker entry point uses the same error boundary. In particular, do not
+; leave the topmost input canvas up behind an AutoHotkey error dialog.
+CapPickRun(action, args*) {
+    previousCritical := A_IsCritical
+    Critical "On"
+    try return action(args*)
+    catch as err {
+        CapPickEndSession("failed")
+        OutputDebug("Capture picker failed: " err.Message " (" err.What ")")
+        ToolTip("Capture selection failed. Please try again; check that the settings folder is writable.")
+        SetTimer(() => ToolTip(""), -5000)
+        return false
+    } finally {
+        Critical previousCritical
+    }
+}
 
 CapPickFlag(enable) {
     global __CapPickFlagPath
@@ -1008,6 +1024,10 @@ CapPickResizeModifierHeld() {
 }
 
 CapPickArrow(deltaX, deltaY, *) {
+    return CapPickRun(CapPickArrowCore, deltaX, deltaY)
+}
+
+CapPickArrowCore(deltaX, deltaY) {
     global __CapPickState
     state := __CapPickState
     if !(state.Has("active") && state["active"])
@@ -1025,6 +1045,10 @@ CapPickArrow(deltaX, deltaY, *) {
 }
 
 CapPickConfirm(*) {
+    return CapPickRun(CapPickConfirmCore)
+}
+
+CapPickConfirmCore() {
     global __CapPickState
     state := __CapPickState
     if !(state.Has("active") && state["active"])
@@ -1249,6 +1273,7 @@ CapPickCreateHud() {
     global __CapPickState
     state := __CapPickState
     hud := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale +E0x20 +E0x08000000")
+    state["hud"] := hud ; own it before any operation which can fail
     hud.BackColor := "111820"
     hud.SetFont("s11 cFFFFFF", "Segoe UI")
     MonitorGetWorkArea(MonitorGetPrimary(), &workLeft, &workTop, &workRight, &workBottom)
@@ -1345,7 +1370,7 @@ CapPickStartState(kind) {
     global __CapPickState, ControlIni
     state := __CapPickState
     state.Clear()
-    state["active"] := true
+    state["active"] := false ; publish only after the entire picker is ready
     state["kind"] := kind
     state["controllers"] := CapPickScanControllers()
     CapPickInitializeButtonStates()
@@ -1362,18 +1387,24 @@ CapPickStartState(kind) {
     CapPickFlag(true)
     CapPickRegisterHotkeys()
     CapPickCreateHud()
-    SetTimer(CapPickTick, 20)
 }
 
 CapPickEndSession(signalStatus := "") {
-    global __CapPickState
-    SetTimer(CapPickTick, 0)
-    try SetTimer(CapPickFailSafe, 0)
-    CancelAnyPick()
-    CapPickFlag(false)
-    if (signalStatus != "")
-        CapPickSignalCompletion(signalStatus)
-    EndPickHide()
+    global __CapPickBusy
+    ; Restoration must not depend on being able to write the completion INI.
+    try CancelAnyPick()
+    finally {
+        try CapPickFlag(false)
+        finally {
+            try EndPickHide()
+            finally __CapPickBusy := false
+        }
+    }
+    if (signalStatus != "") {
+        try CapPickSignalCompletion(signalStatus)
+        catch as err
+            OutputDebug("Capture picker completion could not be saved: " err.Message)
+    }
 }
 
 CancelCapturePick() {
@@ -1455,6 +1486,10 @@ CapPickHandlePendingControllerButtons() {
 }
 
 CapPickTick(*) {
+    return CapPickRun(CapPickTickCore)
+}
+
+CapPickTickCore() {
     global __CapPickState
     state := __CapPickState
     if !(state.Has("active") && state["active"])
@@ -1707,7 +1742,7 @@ SaveBitmapPngUnderKB(hbmp, fullW, fullH, outPath, targetKB, &failureReason) {
 
 ; --- Selection UIs ------------------------------------------------------------
 
-; --- Cancel any in-flight region/window pick: unhook, stop timers, hide visuals ---
+; --- Cancel any in-flight region/window pick: stop timers, destroy visuals ---
 CancelAnyPick() {
     global __Sel_Active, __SelDragging, __SelTimerRunning
     global __Sel_Gui, __SelBand, __HoverBorderHwnd, __WindowHighlightGui
@@ -1725,9 +1760,8 @@ CancelAnyPick() {
     try SetTimer(CapPickFailSafe, 0)
     __SelTimerRunning := false
 
-    try OnMessage(0x0201, Region_LButtonDown, 0)
-    try OnMessage(0x0202, Region_LButtonUp, 0)
-    try OnMessage(0x0201, PickWindowClick, 0)
+    ; Mouse monitors are registered once, not removed/re-added while their
+    ; callbacks are running. Inactive/foreign-window messages pass through.
 
     hoverBorderHwnd := IsSet(__HoverBorderHwnd) ? __HoverBorderHwnd : 0
     __HoverBorderHwnd := 0
@@ -1768,7 +1802,8 @@ BeginPickHide() {
     global Overlay, __EXPLAIN_MODE, __HidSelf, __HidOther
     __HidSelf := false, __HidOther := false
     ; hide this overlay window
-    try (Overlay.Hide(), __HidSelf := true)
+    if DllCall("user32\IsWindowVisible", "ptr", Overlay.Hwnd, "int")
+        try (Overlay.Hide(), __HidSelf := true)
 
     ; hide the other overlay (Explainer if we're Translator, Translator if we're Explainer)
     other := __EXPLAIN_MODE ? "Translator" : "Explainer"
@@ -1785,8 +1820,8 @@ BeginPickHide() {
 }
 
 CapPickFailSafe(*) {
-    global __CapPickState
-    if (__CapPickState.Has("active") && __CapPickState["active"])
+    global __CapPickBusy
+    if __CapPickBusy
         CancelCapturePick()
     else
         EndPickHide()
@@ -1879,18 +1914,23 @@ CapPickInitialRegionRect(&x, &y, &w, &h) {
 ; activation displays the saved rectangle immediately; a mouse activation
 ; starts with a clean canvas and reveals the rectangle only while dragging.
 StartPickRegion(maxKB := "", showSavedRegion := true, *) {
+    return CapPickRun(StartPickRegionCore, maxKB, showSavedRegion)
+}
+
+StartPickRegionCore(maxKB, showSavedRegion) {
     global __Sel_Active, __Sel_Gui, __Sel_Kind, Cap_MaxKB
     global __SelBand, __SelTimerRunning
     global __Sel_sx, __Sel_sy, __Sel_ex, __Sel_ey, __SelDragging
-    global __CapPickState
+    global __CapPickState, __CapPickBusy
 
+    ; Repeated hotkeys/commands must not replace an in-flight session and lose
+    ; the record of which overlays need restoring.
+    if __CapPickBusy
+        return
+    __CapPickBusy := true
     CancelAnyPick()
-
-    __Sel_Kind := "region", __Sel_Active := true
-
-    OnMessage(0x0201, PickWindowClick, 0)
-    OnMessage(0x0201, Region_LButtonDown)
-    OnMessage(0x0202, Region_LButtonUp)
+    __Sel_Kind := "region"
+    __Sel_sx := __Sel_sy := __Sel_ex := __Sel_ey := 0
 
     BeginPickHide()
     if (IsNumber(maxKB))
@@ -1900,21 +1940,18 @@ StartPickRegion(maxKB := "", showSavedRegion := true, *) {
     CapPickVirtualBounds(&vsx, &vsy, &vsw, &vsh)
 
     g := Gui("-Caption +AlwaysOnTop +ToolWindow -DPIScale")
+    __Sel_Gui := g ; cleanup owns it even if Show/initialization fails
+    g.OnEvent("Close", CapPickCancel)
+    g.OnEvent("Escape", CapPickCancel)
     g.BackColor := "000000"
     g.Opt("+LastFound")
     WinSetTransparent 8
     g.Show("x" vsx " y" vsy " w" vsw " h" vsh)
-    __Sel_Gui := g
 
     __SelBand := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale +E0x20 +E0x08000000")
     __SelBand.BackColor := "00FF88"
     WinSetTransparent 54, __SelBand.Hwnd
 
-    __SelDragging := false
-    __Sel_sx := __Sel_sy := __Sel_ex := __Sel_ey := 0
-
-    __SelTimerRunning := true
-    SetTimer(DrawBand, 15)
     CapPickInitialRegionRect(&initialX, &initialY, &initialW, &initialH)
     CapPickStartState("region")
     if showSavedRegion {
@@ -1926,31 +1963,68 @@ StartPickRegion(maxKB := "", showSavedRegion := true, *) {
         __CapPickState["w"] := initialW, __CapPickState["h"] := initialH
         CapPickUpdateHud(true)
     }
+    __CapPickState["active"] := true
+    __Sel_Active := true
+    __SelTimerRunning := true
+    CapPickUpdateHud(true)
+    SetTimer(DrawBand, 15)
+    SetTimer(CapPickTick, 20)
+}
+
+RegionMessageIsCurrent(hwnd) {
+    global __Sel_Active, __Sel_Gui, __CapPickState
+    return __Sel_Active && __CapPickState["active"]
+        && __CapPickState["kind"] = "region" && IsObject(__Sel_Gui)
+        && hwnd = __Sel_Gui.Hwnd
+}
+
+RegionMessagePoint(lParam, hwnd, &x, &y) {
+    ; Use the event's coordinates, not the cursor's later position. Signed
+    ; client coordinates also support monitors to the left/above the primary.
+    packed := Buffer(4)
+    NumPut("uint", lParam & 0xFFFFFFFF, packed)
+    point := Buffer(8)
+    NumPut("int", NumGet(packed, 0, "short"), "int", NumGet(packed, 2, "short"), point)
+    if !DllCall("user32\ClientToScreen", "ptr", hwnd, "ptr", point, "int")
+        throw Error("The selection window is no longer available.")
+    x := NumGet(point, 0, "int"), y := NumGet(point, 4, "int")
 }
 
 Region_LButtonDown(wParam := 0, lParam := 0, msg := 0, hwnd := 0) {
-    global __Sel_Active, __SelDragging, __Sel_sx, __Sel_sy, __CapPickState
-    if (!__Sel_Active)
-        return 0
-    CoordMode "Mouse", "Screen"
-    __SelDragging := true
-    __CapPickState["inputMode"] := "mouse"
-    MouseGetPos &__Sel_sx, &__Sel_sy
+    if !RegionMessageIsCurrent(hwnd)
+        return
+    CapPickRun(RegionBeginDrag, lParam, hwnd)
     return 0
 }
 
+RegionBeginDrag(lParam, hwnd) {
+    global __Sel_Active, __SelDragging, __Sel_sx, __Sel_sy, __CapPickState
+    RegionMessagePoint(lParam, hwnd, &__Sel_sx, &__Sel_sy)
+    __CapPickState["inputMode"] := "mouse"
+    __SelDragging := true ; publish only after both start coordinates exist
+}
+
 Region_LButtonUp(wParam := 0, lParam := 0, msg := 0, hwnd := 0) {
+    global __SelDragging
+    if !RegionMessageIsCurrent(hwnd) || !__SelDragging
+        return
+    CapPickRun(RegionEndDrag, lParam, hwnd)
+    return 0
+}
+
+RegionEndDrag(lParam, hwnd) {
     global __Sel_Active, __SelDragging, __Sel_sx, __Sel_sy, __Sel_ex, __Sel_ey
-    if (!__Sel_Active)
-        return 0
-    CoordMode "Mouse", "Screen"
     __SelDragging := false
-    MouseGetPos &__Sel_ex, &__Sel_ey
+    RegionMessagePoint(lParam, hwnd, &__Sel_ex, &__Sel_ey)
     FinishRegionPick(__Sel_sx, __Sel_sy, __Sel_ex, __Sel_ey)
     return 0
 }
 
 DrawBand(*) {
+    return CapPickRun(DrawBandCore)
+}
+
+DrawBandCore() {
     global __Sel_Active, __SelDragging, __SelBand, __Sel_sx, __Sel_sy
     if (!__Sel_Active || !__SelDragging)
         return
@@ -1962,25 +2036,7 @@ DrawBand(*) {
 }
 
 DestroySelOverlay() {
-    global __Sel_Gui, __SelBand, __Sel_Active, __SelTimerRunning
-    ; stop the draw timer
-    if (__SelTimerRunning) {
-        SetTimer(DrawBand, 0)
-        __SelTimerRunning := false
-    }
-    ; don’t unregister OnMessage in v2 – just mark inactive
-    __Sel_Active := false
-
-    ; destroy band + screen GUIs
-    try {
-        if (IsObject(__SelBand))
-            __SelBand.Destroy()
-    }
-    try {
-        if (IsObject(__Sel_Gui))
-            __Sel_Gui.Destroy()
-    }
-    __SelBand := 0, __Sel_Gui := 0
+    CapPickEndSession("canceled")
 }
 
 FinishRegionPick(sx, sy, ex, ey) {
@@ -1993,13 +2049,18 @@ FinishRegionPick(sx, sy, ex, ey) {
 }
 
 FinishRegionPickRect(x, y, w, h) {
-    global Cap_Mode, Cap_Rect, Cap_RectStr, ControlIni
+    global Cap_Mode, Cap_Rect, Cap_RectStr, ControlIni, __Sel_Active, __CapPickState
+    if !__CapPickState["active"]
+        return
+    __Sel_Active := false
+    __CapPickState["active"] := false ; commit at most once
     CapPickClampRegionRect(&x, &y, &w, &h)
+    rectText := x "," y "," w "," h
+    IniWrite(rectText, ControlIni, "capture", "rect")
+    IniWrite("region", ControlIni, "capture", "mode")
     Cap_Mode := "region"
     Cap_Rect["x"] := x, Cap_Rect["y"] := y, Cap_Rect["w"] := w, Cap_Rect["h"] := h
-    Cap_RectStr := x "," y "," w "," h
-    IniWrite(Cap_Mode,    ControlIni, "capture", "mode")
-    IniWrite(Cap_RectStr, ControlIni, "capture", "rect")
+    Cap_RectStr := rectText
     CapPickEndSession("selected")
     ToolTip("Region selected"), SetTimer(() => ToolTip(""), -700)
 }
@@ -2162,8 +2223,15 @@ CapPickCycleWindow(direction) {
 
 ; Window hover/click and controller/keyboard cycling share one candidate list.
 StartPickWindow(maxKB := "", *) {
-    global Cap_MaxKB, __CapPickState, Cap_WinTit
+    return CapPickRun(StartPickWindowCore, maxKB)
+}
 
+StartPickWindowCore(maxKB) {
+    global Cap_MaxKB, __CapPickState, Cap_WinTit, __CapPickBusy
+
+    if __CapPickBusy
+        return
+    __CapPickBusy := true
     CancelAnyPick()
     BeginPickHide()
     if (IsNumber(maxKB))
@@ -2187,10 +2255,12 @@ StartPickWindow(maxKB := "", *) {
     }
     if !preferredIndex
         preferredIndex := state["candidates"].Length ? 1 : 0
+    state["active"] := true
     if preferredIndex
         CapPickSetWindowCandidate(state["candidates"][preferredIndex], preferredIndex)
 
     SetTimer(PulseHover, 30)
+    SetTimer(CapPickTick, 20)
     PulseHover()
 }
 
@@ -2206,6 +2276,10 @@ PickWindowUnderMouse() {
 }
 
 PulseHover() {
+    return CapPickRun(PulseHoverCore)
+}
+
+PulseHoverCore() {
     global __CapPickState
     state := __CapPickState
     if !(state.Has("active") && state["active"] && state["kind"] = "window")
@@ -2221,9 +2295,15 @@ PulseHover() {
 }
 
 PickWindowClick(*) {
+    return CapPickRun(PickWindowClickCore)
+}
+
+PickWindowClickCore() {
     global __CapPickState
     state := __CapPickState
     if !(state.Has("active") && state["active"] && state["kind"] = "window")
+        return
+    if (A_TickCount < state["acceptAfter"])
         return
     CoordMode("Mouse", "Screen")
     MouseGetPos(&mouseX, &mouseY, &hwnd)
@@ -2246,20 +2326,22 @@ FinishWindowCandidate() {
         return
     }
     candidate := state["currentCandidate"]
+    state["active"] := false
     if (candidate["kind"] = "region") {
+        rectText := candidate["x"] "," candidate["y"] "," candidate["w"] "," candidate["h"]
+        IniWrite(rectText, ControlIni, "capture", "rect")
+        IniWrite("region", ControlIni, "capture", "mode")
         Cap_Mode := "region"
         Cap_Rect["x"] := candidate["x"], Cap_Rect["y"] := candidate["y"]
         Cap_Rect["w"] := candidate["w"], Cap_Rect["h"] := candidate["h"]
-        Cap_RectStr := candidate["x"] "," candidate["y"] "," candidate["w"] "," candidate["h"]
-        IniWrite(Cap_Mode, ControlIni, "capture", "mode")
-        IniWrite(Cap_RectStr, ControlIni, "capture", "rect")
+        Cap_RectStr := rectText
         selectedText := candidate["label"]
     } else {
-        Cap_Mode := "window", Cap_WinTit := candidate["title"]
-        IniWrite(Cap_Mode, ControlIni, "capture", "mode")
-        IniWrite(Cap_WinTit, ControlIni, "capture", "winTitle")
+        IniWrite(candidate["title"], ControlIni, "capture", "winTitle")
         IniWrite(candidate["exe"], ControlIni, "capture", "winExe")
         IniWrite(candidate["class"], ControlIni, "capture", "winClass")
+        IniWrite("window", ControlIni, "capture", "mode")
+        Cap_Mode := "window", Cap_WinTit := candidate["title"]
         selectedText := candidate["title"]
     }
     CapPickEndSession("selected")
@@ -2500,6 +2582,8 @@ Overlay.OnEvent("Escape", (*) => ExitApp())
 Overlay.OnEvent("Size",   OnResize)
 
 OnMessage(0x4A,  WM_COPYDATA)     ; WM_COPYDATA
+OnMessage(0x0201, Region_LButtonDown)
+OnMessage(0x0202, Region_LButtonUp)
 OnMessage(0x0201, WM_LBUTTONDOWN) ; left down for dragging
 OnMessage(0x0133, PaintEdit)  ; WM_CTLCOLOREDIT
 OnMessage(0x0138, PaintStatic) ; WM_CTLCOLORSTATIC for RectOuter/RectInner/RectPanel
@@ -3343,59 +3427,37 @@ global __LastActiveHwnd := 0
 
 ToggleTop(*) {
     global Overlay, __LastActiveHwnd
-    ; Make sure nothing here clashes with globals:
-    local hwnd, isTopNow
-
-    ; Resolve hwnd safely (Overlay may not be ready yet)
-    ; --- resolve hwnd safely (Overlay may not exist yet or be hidden) ---
-hwnd := 0
-try hwnd := Overlay.Hwnd  ; Overlay might not be set yet
-
-oldDHW := A_DetectHiddenWindows
-DetectHiddenWindows true
-
-if (!hwnd || !WinExist("ahk_id " hwnd)) {
-    ; fallback: find by exact title
-    prevTM := A_TitleMatchMode
-    SetTitleMatchMode(3)  ; exact
-    hwnd := WinExist("Explainer")
-    SetTitleMatchMode(prevTM)
-
-    if !hwnd {
-        DetectHiddenWindows(oldDHW)
-        return
-    }
-}
-
-DetectHiddenWindows oldDHW
-; --- end safe hwnd resolution ---
-
-isTopNow := IsWindowTopmost(hwnd)
-
-
-if (!isTopNow) {
-        ; About to turn ON: remember who was active, but do not activate the overlay.
-        __LastActiveHwnd := WinGetID("A")
-
-        if (hwnd && WinExist("ahk_id " hwnd)) {
-            DllCall("SetWindowPos", "ptr", hwnd, "ptr", -1    ; HWND_TOPMOST
-                , "int", 0, "int", 0, "int", 0, "int", 0
-                , "uint", 0x0013)                              ; NOMOVE|NOSIZE|NOACTIVATE
-        } else {
-            return
+    hwnd := 0
+    try hwnd := Overlay.Hwnd
+    if !hwnd || !DllCall("user32\IsWindow", "ptr", hwnd, "int") {
+        oldDHW := A_DetectHiddenWindows, oldTM := A_TitleMatchMode
+        try {
+            DetectHiddenWindows(true)
+            SetTitleMatchMode(3)
+            hwnd := WinExist("Explainer")
+        } finally {
+            DetectHiddenWindows(oldDHW)
+            SetTitleMatchMode(oldTM)
         }
+    }
+    if !hwnd || !DllCall("user32\IsWindow", "ptr", hwnd, "int")
+        return
+    if !IsWindowTopmost(hwnd) {
+        ; About to turn ON: remember who was active, but do not activate the overlay.
+        ; Full-screen transitions can temporarily have no foreground window.
+        ; Zero is valid here; never raise a modal AHK error from the hotkey.
+        __LastActiveHwnd := DllCall("user32\GetForegroundWindow", "ptr")
+        DllCall("SetWindowPos", "ptr", hwnd, "ptr", -1    ; HWND_TOPMOST
+            , "int", 0, "int", 0, "int", 0, "int", 0
+            , "uint", 0x0013)                              ; NOMOVE|NOSIZE|NOACTIVATE
     } else {
         ; turn OFF: drop NOTOPMOST, then shove to bottom of normal band
-        if (hwnd && WinExist("ahk_id " hwnd)) {
-            DllCall("SetWindowPos", "ptr", hwnd, "ptr", -2     ; HWND_NOTOPMOST
-                , "int", 0, "int", 0, "int", 0, "int", 0
-                , "uint", 0x0013)
-            DllCall("SetWindowPos", "ptr", hwnd, "ptr", 1      ; HWND_BOTTOM
-                , "int", 0, "int", 0, "int", 0, "int", 0
-                , "uint", 0x0013)
-        } else {
-            return
-        }
+        DllCall("SetWindowPos", "ptr", hwnd, "ptr", -2     ; HWND_NOTOPMOST
+            , "int", 0, "int", 0, "int", 0, "int", 0
+            , "uint", 0x0013)
+        DllCall("SetWindowPos", "ptr", hwnd, "ptr", 1      ; HWND_BOTTOM
+            , "int", 0, "int", 0, "int", 0, "int", 0
+            , "uint", 0x0013)
     }
 }
 
@@ -4277,7 +4339,8 @@ CheckCmdSignals() {
 
 WriteTranslationTerminalResult(message, requestId) {
     global OcrTxt, OcrDoneTxt
-    for pair in [[OcrTxt, message], [OcrDoneTxt, requestId]] {
+    SplitPath(OcrDoneTxt,, &statusDir)
+    for pair in [[OcrTxt, message], [statusDir "\translation.status", requestId "`n" message], [OcrDoneTxt, requestId]] {
         path := pair[1], text := pair[2], tmp := path ".tmp"
         try {
             if FileExist(tmp)
@@ -4503,7 +4566,9 @@ CtxClear(*) {
 ; ====================== Cleanup ======================
 OnExit(Cleanup)
 Cleanup(*) {
-    global hBrushEdit
+    global hBrushEdit, __CapPickBusy
+    if __CapPickBusy
+        try CapPickEndSession("canceled")
     StopOutputCaretSuppression()
     SaveOverlayBounds()
     UnloadOverlayPrivateFonts()

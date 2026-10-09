@@ -11,7 +11,7 @@ TestGenerationActivity() {
     DirCreate(A_ScriptDir "\scripts")
     FileAppend("# fixture only", A_ScriptDir "\scripts\example_sentence.py")
     for kind in ["example", "version"] {
-        for outcome in ["success", "failure", "exception", "closed", "ownerClosed"] {
+        for outcome in ["success", "failure", "timeout", "exception", "closed", "ownerClosed"] {
             if outcome = "ownerClosed" && kind = "example"
                 continue
             s := kind = "example" ? TestDesktopAnkiControls(reader) : TestDesktopNewVersionControls(reader)
@@ -49,7 +49,7 @@ TestGenerationActivity() {
                 } else
                     StudyReaderCloseNewVersionDialog(s)
             }
-            DesktopAssert(GenerationFixture["notices"] = (outcome = "failure" || outcome = "exception" ? 1 : 0),
+            DesktopAssert(GenerationFixture["notices"] = (outcome = "failure" || outcome = "timeout" || outcome = "exception" ? 1 : 0),
                 kind " reports errors only for failed requests: " outcome)
             StudySetActivity(s, false)
             StudySetActivity(s, true)
@@ -113,7 +113,11 @@ TestGenerationWait(*) {
     f["calls"] += 1
     DesktopAssert(s["modelActivity"] && DesktopShown(s["progressBar"]), "Animation starts before waiting")
     button := kind = "example" ? s["exampleButton"] : s["generateButton"]
-    DesktopAssert(!button.Enabled && !s["addButton"].Enabled, "Request actions disabled while waiting")
+    DesktopAssert(!button.Enabled, "Generation action disabled while waiting")
+    if kind = "example"
+        DesktopAssert(!s["addButton"].Enabled, "Card submission disabled while generating")
+    else
+        DesktopAssert(s["cancelButton"].Enabled, "New-version Cancel stays available while generating")
     ; Recursive attempts cannot start another helper while the first is busy.
     if kind = "example"
         TestStudyReaderGenerateVocabularyExample(s)
@@ -139,6 +143,10 @@ TestGenerationWait(*) {
     }
     if f["outcome"] = "exception"
         throw Error("Synthetic launch failure")
+    if f["outcome"] = "timeout" {
+        s["modelOutcome"] := "timeout"
+        return -3
+    }
     if f["outcome"] = "closed" {
         if kind = "example"
             StudyReaderCloseAnkiAddDialog(s)

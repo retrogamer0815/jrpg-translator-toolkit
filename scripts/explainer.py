@@ -897,7 +897,8 @@ try:
         try:
             client = genai.Client(
                 api_key=api_key,
-                http_options=types.HttpOptions(timeout=int(MODEL_TIMEOUT_SECONDS * 1000)),
+                http_options=types.HttpOptions(timeout=int(MODEL_TIMEOUT_SECONDS * 1000),
+                                               retry_options=types.HttpRetryOptions(attempts=1)),
             )
         except TypeError:
             client = genai.Client(api_key=api_key)
@@ -1000,7 +1001,7 @@ try:
         client = OpenAI(
             api_key=api_key,
             timeout=MODEL_TIMEOUT_SECONDS,
-            max_retries=2,
+            max_retries=0,
         )
         if source_paths:
             input_content = [{"type": "input_text", "text": prompt}]

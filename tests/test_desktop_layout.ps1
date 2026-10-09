@@ -8,15 +8,23 @@ param(
     [switch]$ChapterOnly,
     [switch]$PromptUnsavedOnly,
     [switch]$GenerationActivityOnly,
+    [switch]$MessageNavigationOnly,
+    [switch]$ProfileSelectionOnly,
+    [switch]$ProfileSwitchOnly,
+    [switch]$OverlayColorsOnly,
+    [switch]$CaptureNavigationOnly,
+    [switch]$WelcomeOnly,
+    [string]$SourcePath,
     [string]$AutoHotkey = 'C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe',
     [string]$OutputDirectory = (Join-Path ([IO.Path]::GetTempPath()) ('jrpg-desktop-tests-' + [Guid]::NewGuid().ToString('N')))
 )
 $ErrorActionPreference = 'Stop'
-if (@($StudyOnly, $DialogsOnly, $ShutdownOnly, $ResizeOnly, $AudioFeedbackOnly, $ProfileFeedbackOnly, $ChapterOnly, $PromptUnsavedOnly, $GenerationActivityOnly).Where({ [bool]$_ }).Count -gt 1) {
+if (@($StudyOnly, $DialogsOnly, $ShutdownOnly, $ResizeOnly, $AudioFeedbackOnly, $ProfileFeedbackOnly, $ChapterOnly, $PromptUnsavedOnly, $GenerationActivityOnly, $MessageNavigationOnly, $ProfileSelectionOnly, $ProfileSwitchOnly, $OverlayColorsOnly, $CaptureNavigationOnly, $WelcomeOnly).Where({ [bool]$_ }).Count -gt 1) {
     throw 'Choose only one focused test mode.'
 }
 $repo = Split-Path -Parent $PSScriptRoot
-$source = [IO.File]::ReadAllText((Join-Path $repo 'JRPG Translator.ahk'))
+if (!$SourcePath) { $SourcePath = Join-Path $repo 'JRPG Translator.ahk' }
+$source = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $SourcePath))
 $pickerRequirements = [ordered]@{
     'shared picker ownership' = 'GuiFromHwnd(ownerHwnd).Opt("+OwnDialogs")'
     'fullscreen modal suspension' = 'CPBigBoxModalDepth += 1'
@@ -106,7 +114,8 @@ foreach ($requirement in $pageRegistryRequirements.GetEnumerator()) {
 }
 $profileHeaderRequirements = [ordered]@{
     'header profile dropdown' = 'chrome["profile"] := ui.AddDropDownList'
-    'header profile selection wiring' = 'chrome["profile"].OnEvent("Change", CPDesktopProfileSelectionChanged)'
+    'header profile confirmation wiring' = 'chrome["profile"].OnCommand(9, CPDesktopProfileSelectionConfirm)'
+    'header profile browsing is preview-only' = 'chrome["profile"].OnEvent("Change", CPDesktopProfileSelectionPreview)'
     'header profile list synchronization' = 'CPDesktopRefreshProfileSelector(force := false)'
     'header Manage profiles action' = 'if choice = "Manage profiles…"'
     'profile switch dirty-state comparison' = 'GameProfileHasUnsavedChanges(name)'
@@ -244,7 +253,8 @@ $profilesMigrationRequirements = [ordered]@{
     'profile selector alias registration' = 'CPDesktopPageRegisterControl(7, "profileChoice"'
     'startup selector alias registration' = 'CPDesktopPageRegisterControl(7, "startupChoice"'
     'profile state alias registration' = 'CPDesktopPageRegisterControl(7, "profileState"'
-    'profile selection wiring' = 'ddlGameProfile.OnEvent("Change", GameProfileUpdateSummary)'
+    'profile browsing is preview-only' = 'ddlGameProfile.OnEvent("Change", CPDesktopProfileSelectionPreview)'
+    'profile selection confirmation wiring' = 'ddlGameProfile.OnCommand(9, CPDesktopProfileSelectionConfirm)'
     'startup selection wiring' = 'ddlStartupOverlays.OnEvent("Change", CPStartupOverlaysChanged)'
     'profile creation wiring' = 'btnGameProfileAdd.OnEvent("Click", CreateGameProfile)'
     'profile save wiring' = 'btnGameProfileSave.OnEvent("Click", SaveSelectedGameProfile)'
@@ -509,11 +519,14 @@ foreach ($functionName in @('Hotkeys_OnApply', 'Hotkeys_OnRevert')) {
     }
 }
 $output = New-Item -ItemType Directory -Path $OutputDirectory -Force
+if ([regex]::IsMatch($source, '\brect(?:Bg|Txt|Name)(?:_EW)?\.Opt\([^\r\n]*Background')) {
+    throw 'Overlay color previews are owner-drawn buttons; legacy Background options must not reset their native type.'
+}
 New-Item -ItemType Directory -Path (Join-Path $output.FullName 'assets') -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $repo 'assets/bigbox-logo.png') -Destination (Join-Path $output.FullName 'assets')
 Copy-Item -LiteralPath (Join-Path $repo 'assets/bigbox-game-placeholder.png') -Destination (Join-Path $output.FullName 'assets')
 Copy-Item -LiteralPath (Join-Path $repo 'assets/desktop-logo.png') -Destination (Join-Path $output.FullName 'assets')
-Copy-Item -LiteralPath (Join-Path $repo 'JRPG Translator.ahk') -Destination $output.FullName
+Copy-Item -LiteralPath $SourcePath -Destination (Join-Path $output.FullName 'JRPG Translator.ahk')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'audio_runtime_fixture.ahk') -Destination $output.FullName
 # Opaque, differently shaped captures exercise replacing the native Picture
 # bitmap. These are synthetic test assets, not screenshots from a real library.
@@ -577,6 +590,25 @@ foreach ($kind in @('CHOICE', 'CONTEXT')) {
     if ($start -lt 0 -or $end -le $start) { throw "Shared $kind popup markers not found" }
     $generated = $generated.Replace('; @SHARED_' + $kind + '_POPUP_CONTROLS@', $source.Substring($start, $end - $start))
 }
+# Exercise the real color-accept/cancel/apply paths. Only the native picker,
+# persistence and overlay IPC are substituted; painting stays production code.
+$generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'overlay_colors_harness.ahk'))
+$colorFunctions = @('CPDesktopPickOverlayColor', 'PickAndApply', 'PickAndApply_EW', 'ApplyColorValue', 'ApplyColorValue_EW')
+foreach ($name in $colorFunctions) {
+    $body = [regex]::Match($source, '(?ms)^' + $name + '\(.*?^}').Value
+    if (!$body) { throw "Missing overlay color function: $name" }
+    foreach ($callee in $colorFunctions) {
+        $body = [regex]::Replace($body, '\b' + $callee + '\(', 'Test' + $callee + '(')
+    }
+    $generated += "`r`n" + $body.Replace('PickColorDialog(', 'TestOverlayColorPicker(').
+        Replace('SaveAll()', 'TestOverlayColorPersist()').Replace('SendOverlayTheme()', 'TestOverlayColorSendTheme()')
+}
+if ($OverlayColorsOnly) {
+    $generated = $generated.Replace('; @STUDY_ONLY@', 'TestOverlayColors()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " overlay color assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
+}
+if ($CaptureNavigationOnly) {
+    $generated = $generated.Replace('; @STUDY_ONLY@', 'DesktopTestCaptureNavigation()' + "`r`n" + '    DesktopTestControllerPageScrollNavigation()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " capture and scrolling navigation assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
+}
 if ($StudyOnly) {
     $generated = $generated.Replace('; @STUDY_ONLY@', 'TestDesktopStudyWindows()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " desktop study assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
 }
@@ -596,14 +628,91 @@ if ($GenerationActivityOnly) {
         $body = [regex]::Match($source, '(?ms)^' + $name + '\(.*?^}').Value
         if (!$body) { throw "Missing generation function: $name" }
         $generated += "`r`n" + $body.Replace($name + '(', 'Test' + $name + '(').
-            Replace('RunWait(', 'TestGenerationWait(').
+            Replace('CPModelRequestRun(', 'TestGenerationWait(').
+            Replace('CPModelRequestFailure(', 'TestGenerationNotice(').
             Replace('StudyReaderAnkiMessage(', 'TestGenerationNotice(').
             Replace('CPThemedOwnedMessage(', 'TestGenerationNotice(').
             Replace('StudyLibraryLoadGroup(', 'TestGenerationLoadGroup(')
     }
 }
+if ($MessageNavigationOnly) {
+    $generated = $generated.Replace('; @STUDY_ONLY@', 'TestMessageNavigation()' + "`r`n" + '    SetTimer(CPDesktopRefreshStatus, 0)' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " message navigation assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
+    $generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'message_navigation_harness.ahk'))
+    # Keep controller routing real, but deliver its final key to this synthetic
+    # dialog's native message handler instead of sending input to the desktop.
+    $body = [regex]::Match($source, '(?ms)^CPControllerDispatchNavigation\(.*?^}').Value
+    if (!$body) { throw 'Missing controller dispatch function' }
+    $generated += "`r`n" + $body.Replace('CPControllerDispatchNavigation(', 'TestMessageControllerDispatch(').
+        Replace('CPControllerSendDialogKey(', 'TestMessageNativeKey(')
+}
+if ($ProfileSelectionOnly) {
+    $generated = $generated.Replace('; @STUDY_ONLY@', 'TestProfileSelection()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " profile selection assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
+    $generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'profile_selection_harness.ahk'))
+    # Keep native combo events, navigation and the dirty-profile decision logic
+    # real; isolate persistence, dialogs and overlay IPC from the user's app.
+    $body = [regex]::Match($source, '(?ms)^CPSwitchGameProfile\(.*?^}').Value
+    if (!$body) { throw 'Missing profile selection apply function' }
+    $isolatedBody = $body.Replace('GameProfileHasUnsavedChanges(', 'TestProfileDirty(').
+        Replace('GameProfileSave(', 'TestProfileSave(').Replace('GameProfileApply(', 'TestProfileApply(').
+        Replace('CPAdaptiveOwnedMessage(', 'TestProfileNotice(').
+        Replace('RefreshGameProfilesList(', 'TestProfileRefresh(').
+        Replace('CPDesktopNavigate(', 'TestProfileNavigate(').
+        Replace('CPBigBoxDashboardUpdateContent()', 'TestProfileNoop()').
+        Replace('CPDesktopRefreshStatus(true)', 'TestProfileNoop()').Replace('Toast(', 'TestProfileNoop(')
+    $isolatedSource = $source.Replace($body, $isolatedBody)
+    $headerBody = [regex]::Match($source, '(?ms)^CPDesktopProfileSelectionApply\(.*?^}').Value
+    $isolatedSource = $isolatedSource.Replace($headerBody, $headerBody.Replace('RefreshGameProfilesList(', 'TestProfileRefresh(').Replace('CPDesktopNavigate(', 'TestProfileNavigate('))
+    $applyBody = [regex]::Match($source, '(?ms)^ApplySelectedGameProfile\(.*?^}').Value
+    if (!$applyBody) { throw 'Missing separate Apply profile action' }
+    $isolatedSource = $isolatedSource.Replace($applyBody, $applyBody.Replace('GameProfileApply(', 'TestProfileApply(').Replace('CPAdaptiveOwnedMessage(', 'TestProfileNotice('))
+    $forwardBody = [regex]::Match($source, '(?ms)^CPForwardIfComboOpen\(.*?^}').Value
+    if (!$forwardBody) { throw 'Missing open-combo navigation forwarding' }
+    $isolatedSource = $isolatedSource.Replace($forwardBody, $forwardBody.Replace('SendEvent("{" keyName "}")', 'TestProfileNativeArrow(hwnd, keyName)'))
+    [IO.File]::WriteAllText((Join-Path $output.FullName 'JRPG Translator.ahk'), $isolatedSource, [Text.UTF8Encoding]::new($true))
+}
+if ($ProfileSwitchOnly) {
+    $generated = $generated.Replace('; @STUDY_ONLY@', 'TestProfileSwitch()' + "`r`n" + '    SetTimer(CPDesktopRefreshStatus, 0)' + "`r`n" + '    ToastDestroy()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " real profile-switch assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
+    $generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'message_navigation_harness.ahk'))
+    $generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'profile_switch_harness.ahk'))
+    $dispatch = [regex]::Match($source, '(?ms)^CPControllerDispatchNavigation\(.*?^}').Value
+    $generated += "`r`n" + $dispatch.Replace('CPControllerDispatchNavigation(', 'TestMessageControllerDispatch(').Replace('CPControllerSendDialogKey(', 'TestMessageNativeKey(')
+    # Keep real dropdown events, dirty detection, modal return, saving and
+    # applying. Only isolate external overlays and offscreen presentation.
+    $isolatedSource = $source.Replace('WinExist(title)', 'WinExist("Synthetic profile " title)').Replace('WinExist("Translator")', 'WinExist("Synthetic profile Translator")').Replace('WinExist("Explainer")', 'WinExist("Synthetic profile Explainer")')
+    $modal = [regex]::Match($source, '(?ms)^StudyDesktopMessage\(.*?^}').Value
+    $isolatedModal = $modal.Replace('StudyDesktopDialogShow(s, 760, 520, s["cancel"])', 'DesktopDialogFixtureShow(s, 760, 520)' + "`r`n" + '        s["cancel"].Focus()').Replace('try WinActivate("ahk_id " owner)', '; Offscreen fixture: do not activate the desktop.')
+    $isolatedSource = $isolatedSource.Replace($modal, $isolatedModal)
+    [IO.File]::WriteAllText((Join-Path $output.FullName 'JRPG Translator.ahk'), $isolatedSource, [Text.UTF8Encoding]::new($true))
+}
 if ($ShutdownOnly) {
     $generated = $generated.Replace('; @STUDY_ONLY@', 'DesktopTestExitWithLiveWindow()')
+}
+if ($WelcomeOnly) {
+    if (!$source.Contains('global WRITTEN_GUIDE_URL := PROJECT_URL "/blob/main/docs/manual/README.md"')) {
+        throw 'The written-guide link must open the manual landing page.'
+    }
+    if (!$source.Contains('global STUDY_WRITTEN_GUIDE_URL := PROJECT_URL "/blob/main/docs/manual/11-study-library.md"')) {
+        throw 'The Study written-guide link must open the Study Library chapter.'
+    }
+    $generated = $generated.Replace('; @STUDY_ONLY@', 'TestWelcomeGuide()' + "`r`n" + '    SetTimer(CPDesktopRefreshStatus, 0)' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " welcome-guide assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
+    $generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'welcome_guide_harness.ahk'))
+    # Exercise real welcome events and page selection in offscreen windows.
+    # Suppress only foreground activation and external browser launches.
+    $isolatedSource = $source
+    foreach ($name in @('ShowWelcomeDialog', 'ShowStudyLibraryWelcome', 'OpenWelcomeApiKeys', 'OpenAboutUrl')) {
+        $body = [regex]::Match($source, '(?ms)^' + $name + '\(.*?^}').Value
+        if (!$body) { throw "Missing welcome function: $name" }
+        if ($name -eq 'OpenAboutUrl') {
+            $replacement = "OpenAboutUrl(url, description, *) {`r`n    TestWelcomeOpenUrl(url, description)`r`n}"
+        } else {
+            $replacement = $body.Replace('WinActivate(', 'TestWelcomeActivate(').
+                Replace('StudyDesktopDialogShow(state, 880, 720, state["controls"]["apiKeys"])', 'DesktopDialogFixtureShow(state, 880, 720)').
+                Replace('dlg.Show("AutoSize Center")', 'dlg.Show("NA AutoSize x-12000 y-12000")').
+                Replace('existingGui.Show()', 'existingGui.Show("NA")')
+        }
+        $isolatedSource = $isolatedSource.Replace($body, $replacement)
+    }
+    [IO.File]::WriteAllText((Join-Path $output.FullName 'JRPG Translator.ahk'), $isolatedSource, [Text.UTF8Encoding]::new($true))
 }
 if ($DialogsOnly) {
     $generated = $generated.Replace('; @STUDY_ONLY@', 'TestDesktopStudyDialogs()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " desktop dialog assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
@@ -681,7 +790,7 @@ if (Test-Path -LiteralPath $namingBounds) {
     }
     Write-Output "PASS: $namingChecks naming-control visibility checks."
 }
-if ($StudyOnly -or $ShutdownOnly -or $DialogsOnly -or $ResizeOnly -or $AudioFeedbackOnly -or $ProfileFeedbackOnly -or $ChapterOnly -or $PromptUnsavedOnly -or $GenerationActivityOnly) {
+if ($StudyOnly -or $ShutdownOnly -or $DialogsOnly -or $ResizeOnly -or $AudioFeedbackOnly -or $ProfileFeedbackOnly -or $ChapterOnly -or $PromptUnsavedOnly -or $GenerationActivityOnly -or $MessageNavigationOnly -or $ProfileSelectionOnly -or $ProfileSwitchOnly -or $OverlayColorsOnly -or $CaptureNavigationOnly -or $WelcomeOnly) {
     Write-Output $result.Trim()
     Write-Output "Test artifacts: $output"
     return

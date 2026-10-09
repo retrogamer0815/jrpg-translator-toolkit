@@ -1037,6 +1037,12 @@ def generate_recommendations(
 
         batch_size = 36
         for start in range(0, len(pending), batch_size):
+            # Only a NEW batch resets the UI watchdog. A stuck request cannot
+            # keep extending its deadline with a repeating heartbeat.
+            progress = output_dir / "candidate_recommendation_progress.txt"
+            temporary = progress.with_suffix(".tmp")
+            temporary.write_text(str(start // batch_size + 1), encoding="ascii")
+            os.replace(temporary, progress)
             batch = pending[start : start + batch_size]
             valid_ids = {item["id"] for item in batch}
             batch_results: dict[str, tuple[bool, int, str]] = {}

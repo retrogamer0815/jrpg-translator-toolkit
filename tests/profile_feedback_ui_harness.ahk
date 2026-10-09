@@ -50,7 +50,7 @@ TestProfileFeedbackStep(*) {
                 DesktopAssert(!GameProfileHasUnsavedChanges(active), "Saved fixture has no pending edits")
                 TestProfileFeedback["message"] := "Profile saved: " active
                 CPDesktop["chrome"]["profile"].Choose(name)
-                CPDesktopProfileSelectionChanged(CPDesktop["chrome"]["profile"])
+                CPDesktopProfileSelectionApply(CPDesktop["chrome"]["profile"], name)
             } else {
                 if step = 18 {
                     Toast("Generating explanation…")

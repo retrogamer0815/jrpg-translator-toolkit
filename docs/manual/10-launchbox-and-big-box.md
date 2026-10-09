@@ -117,6 +117,10 @@ Home provides quick access to the Translation, Explanation, and Audio AI choices
 
 The three AI tiles configure their respective service/model/prompt or language choices. They are not all “start translation” buttons. Read the help text for the focused tile.
 
+The **Translation AI**, **Explanation AI**, and **Audio AI** quick views also show previous/next page arrows. **LB/RB**, **L1/R1**, and **Page Up/Page Down** continue through the full settings cycle from the corresponding service's position. **B/Esc** still returns directly to Home. Page switching remains suspended while you are choosing or editing a value.
+
+In **Overlay Windows**, use **Open Translator / Close Translator** or **Open Explainer / Close Explainer** beneath the appearance tiles. The same controls are available in each overlay's quick settings and on the full **Translation Window** and **Explanation Window** pages. Their labels show the current window state; closing also works when an overlay is hidden. These actions stay in the dashboard and do not request a translation or explanation.
+
 ### Return to the game or desktop
 
 - **Return to Game** leaves the dashboard so you can continue playing.

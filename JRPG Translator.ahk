@@ -68,6 +68,7 @@ global CPBigBoxCaptureLaunching := false
 global CPBigBoxOverlayEdit := Map("active", false)
 global CPBigBoxOverlayPosition := Map("active", false)
 global CPBigBoxOverlayNotice := ""
+global CPBigBoxOverlaySwitching := ""
 global CPBigBoxControlState := Map("active", false)
 global CPBigBoxControlCapture := Map("active", false)
 global CPBigBoxControlNotice := ""
@@ -82,7 +83,8 @@ global GameProfileLastError := ""
 global APP_VERSION := "0.9.9-testing.1"
 global PROJECT_URL := "https://github.com/retrogamer0815/jrpg-translator-toolkit"
 global BUG_REPORT_URL := PROJECT_URL "/issues/new"
-global WRITTEN_GUIDE_URL := PROJECT_URL "#quick-start"
+global WRITTEN_GUIDE_URL := PROJECT_URL "/blob/main/docs/manual/README.md"
+global STUDY_WRITTEN_GUIDE_URL := PROJECT_URL "/blob/main/docs/manual/11-study-library.md"
 global BEGINNER_VIDEO_URL := "https://youtu.be/pdZ0fBS8COc"
 global STUDY_VIDEO_URL := "https://youtu.be/kKdD3X8bjsU"
 for __cpIndex, __cpArg in A_Args {
@@ -3365,8 +3367,19 @@ CPBigBoxMainPageIndex(page) {
     return 0
 }
 
+CPBigBoxNavigationPageIndex(page) {
+    ; AI shortcuts retain their compact controls and Back-to-Home behavior,
+    ; but shoulders/arrows can continue through the corresponding settings ring.
+    switch page {
+        case "quickTranslation": page := "screenshot"
+        case "quickExplanation": page := "explanation"
+        case "quickAudio": page := "audio"
+    }
+    return CPBigBoxMainPageIndex(page)
+}
+
 CPBigBoxClampBackgroundOpacity(value) {
-    return Max(50, Min(100, Round(value / 5) * 5))
+    return Max(50, Min(100, Round(value)))
 }
 
 CPBigBoxEffectiveAlwaysOnTop() {
@@ -3533,7 +3546,7 @@ CPBigBoxOverlayQuick() {
 }
 
 CPBigBoxOverlayKeys() {
-    return ["ov_bg", "ov_txt", "ov_name", "ov_font", "ov_size", "ov_bold", "ov_opacity", "ov_position", "ov_topmost"]
+    return ["ov_bg", "ov_txt", "ov_name", "ov_font", "ov_size", "ov_bold", "ov_opacity", "ov_position", "ov_topmost", "ov_power"]
 }
 
 CPBigBoxOverlaySliderKeys() => ["ov_slider1", "ov_slider2", "ov_slider3"]
@@ -3548,11 +3561,13 @@ CPBigBoxHelpWithNotice(helpText, notice := "") {
 CPBigBoxQuickOverlayHelp(key := "") {
     switch key {
         case "ov_translator":
-            return "Open the Translator overlay's appearance controls."
-                . "`nAdjust its colors, font, text size, opacity, and position."
+            return "Open the Translator overlay's basic settings."
+                . "`nAdjust its window color, opacity, size, and position."
         case "ov_explainer":
-            return "Open the Explainer overlay's appearance controls."
-                . "`nAdjust its colors, font, text size, opacity, and position."
+            return "Open the Explainer overlay's basic settings."
+                . "`nAdjust its window color, opacity, size, and position."
+        case "ov_translator_power": return CPBigBoxOverlayPowerHelp("Translator")
+        case "ov_explainer_power": return CPBigBoxOverlayPowerHelp("Explainer")
         case "ov_main":
             return "Adjust the fullscreen interface rather than either text overlay."
                 . "`nBackground opacity and Always on top do not alter Translator or Explainer."
@@ -3573,6 +3588,7 @@ CPBigBoxQuickOverlayHelp(key := "") {
 CPBigBoxOverlayHelp(title, key := "") {
     overlayName := title = "Main window" ? "fullscreen interface" : title " overlay"
     switch key {
+        case "ov_power": return CPBigBoxOverlayPowerHelp(title)
         case "ov_bg":
             return "Choose the background color behind text in the " overlayName "."
                 . "`nUse Text color to maintain comfortable contrast over long play sessions."
@@ -3750,10 +3766,106 @@ CPSetOverlayPreference(title, field, value) {
     return SendOverlayTheme(title, 2500)
 }
 
+CPBigBoxOverlayPowerHelp(title) {
+    return "Open or close the " title " overlay without leaving this menu."
+        . "`nNo AI request is made. Closing also works when the overlay is hidden."
+}
+
+CPBigBoxUpdateOverlayPower(*) {
+    global CPBigBoxControls, CPBigBoxOverlaySwitching
+    if !CPBigBoxDashboardAlive() || !CPBigBoxControls.Has("ov_power")
+        return
+    target := CPBigBoxOverlayTarget()
+    for title in ["Translator", "Explainer"] {
+        state := CPBigBoxOverlayState(title)
+        text := CPBigBoxOverlaySwitching = title ? title "`nPlease wait…"
+            : (state = "Closed" ? "Open " : "Close ") title "`nCurrently " StrLower(state)
+        keys := ["ov_" StrLower(title) "_power"]
+        if target = title
+            keys.Push("ov_power")
+        for key in keys
+            if CPBigBoxControls.Has(key) && CPBigBoxControls[key].Text != text
+                CPBigBoxControls[key].Text := text
+    }
+}
+
+CPBigBoxToggleOverlay(title := "", *) {
+    global CPBigBoxCurrentPage, CPBigBoxAICommitting, CPBigBoxOverlayNotice
+    global CPBigBoxOverlaySwitching, CPBigBoxGui, CPBigBoxPageFocus
+    if !CPBigBoxPageNavigationAllowed() || CPBigBoxAIChoiceActive()
+        return
+    target := CPBigBoxOverlayTarget()
+    if title = ""
+        title := target
+    if (title != "Translator" && title != "Explainer")
+        || (CPBigBoxCurrentPage != "quickOverlays" && target != title)
+        return
+    page := CPBigBoxCurrentPage
+    key := page = "quickOverlays" ? "ov_" StrLower(title) "_power" : "ov_power"
+    dashboardWasActive := WinActive("ahk_id " CPBigBoxGui.Hwnd)
+    overlayHwnd := CPOverlayWindowHwnd(title)
+    closing := !!overlayHwnd
+    CPBigBoxAICommitting := true
+    CPBigBoxOverlaySwitching := title
+    CPControllerBeginSurfaceTransition()
+    try {
+        CPBigBoxOverlayNotice := (closing ? "Closing " : "Opening ") title "…"
+        CPBigBoxUpdateOverlayContent(key)
+        if closing {
+            ; Address this exact window, including truly hidden overlays. Never
+            ; kill the shared overlay process or stop the other overlay/audio.
+            oldHidden := A_DetectHiddenWindows
+            try {
+                DetectHiddenWindows(true)
+                WinClose("ahk_id " overlayHwnd)
+                WinWaitClose("ahk_id " overlayHwnd,, 1)
+            } finally {
+                DetectHiddenWindows(oldHidden)
+            }
+        } else if title = "Translator"
+            LaunchOverlay()
+        else
+            LaunchExplainerOverlay()
+        overlayHwnd := CPOverlayWindowHwnd(title)
+        if closing && !overlayHwnd {
+            if title = "Explainer"
+                StopExplainerBoundsWatcher()
+            CPBigBoxOverlayNotice := title " overlay closed."
+        } else if !closing && overlayHwnd
+            CPBigBoxOverlayNotice := title " overlay opened. No AI request was made."
+        else
+            CPBigBoxOverlayNotice := closing ? title " is still running. Try closing it again."
+                : "Could not open " title ". Check its executable path in Settings\control.ini."
+    } catch as ex {
+        CPBigBoxOverlayNotice := "Could not " (closing ? "close " : "open ") title ". Please try again."
+        DbgCP("Big Box overlay action: " ex.Message)
+    } finally {
+        CPBigBoxOverlaySwitching := ""
+        CPBigBoxAICommitting := false
+        CPControllerFinishSurfaceTransition()
+        if CPBigBoxDashboardAlive() {
+            CPBigBoxUpdateOverlayContent(key)
+            if CPBigBoxCurrentPage = page {
+                CPBigBoxPageFocus[page] := key
+                CPBigBoxRestorePageFocus()
+                ; Restore focus only from the overlay we just opened. Do not
+                ; pull the user back if they switched to another application.
+                if dashboardWasActive && overlayHwnd && WinActive("ahk_id " overlayHwnd)
+                    try WinActivate("ahk_id " CPBigBoxGui.Hwnd)
+            }
+        }
+        CPDesktopRefreshStatus()
+    }
+}
+
 CPBigBoxOverlayAction(field, *) {
     global CPBigBoxCurrentPage, CPBigBoxAICommitting, CPBigBoxOverlayNotice
     if !CPBigBoxPageNavigationAllowed() || CPBigBoxAIChoiceActive() || CPBigBoxOverlayTarget() = ""
         return
+    if field = "power" {
+        CPBigBoxToggleOverlay()
+        return
+    }
     if CPBigBoxOverlayTarget() = "Main window" {
         if field != "opacity" && field != "topmost"
             return
@@ -3902,8 +4014,9 @@ CPBigBoxOverlaySliderMove(direction) {
     pref := CPOverlayPreference(CPBigBoxOverlayEdit["target"], CPBigBoxOverlayEdit["field"])
     minimum := CPBigBoxOverlayEdit["kind"] = "color" ? 0 : pref["min"]
     maximum := CPBigBoxOverlayEdit["kind"] = "color" ? (key = "ov_slider1" ? 359 : 100) : pref["max"]
-    step := CPBigBoxOverlayEdit["target"] = "Main window" ? 5 : 1
-    CPBigBoxControls[key].Value := Max(minimum, Min(maximum, CPBigBoxControls[key].Value + (direction = "Right" ? step : -step)))
+    ; Fine taps use one unit on every slider; the shared controller repeat
+    ; handler accelerates held directions without sacrificing tap precision.
+    CPBigBoxControls[key].Value := Max(minimum, Min(maximum, CPBigBoxControls[key].Value + (direction = "Right" ? 1 : -1)))
     CPBigBoxOverlaySliderChanged()
     return true
 }
@@ -4020,17 +4133,18 @@ CPBigBoxUpdateOverlayContent(key := "") {
     global CPBigBoxAIChoice, CPBigBoxPageFocus, controlDarkMode
     if !CPBigBoxDashboardAlive() || !CPBigBoxControls.Has("ov_bg")
         return
+    CPBigBoxUpdateOverlayPower()
     if CPBigBoxCurrentPage = "quickOverlays" {
         if key = ""
             key := CPBigBoxPageFocus.Get("quickOverlays", "ov_translator")
-        CPBigBoxControls["modeBody"].Text := CPBigBoxQuickOverlayHelp(key)
-        CPBigBoxControls["ov_translator"].Text := "Translator`n" CPBigBoxOverlayState("Translator")
-        CPBigBoxControls["ov_explainer"].Text := "Explainer`n" CPBigBoxOverlayState("Explainer")
+        CPBigBoxControls["modeBody"].Text := CPBigBoxHelpWithNotice(CPBigBoxQuickOverlayHelp(key), CPBigBoxOverlayNotice)
         CPBigBoxControls["ov_main"].Text := "Main window`nBackground " CPBigBoxBackgroundOpacity "%"
     }
     title := CPBigBoxOverlayTarget()
     if title != "" && !CPBigBoxAIChoiceActive() {
         for key in CPBigBoxOverlayKeys() {
+            if key = "ov_power"
+                continue
             if (title = "Main window" && key != "ov_opacity" && key != "ov_topmost")
                 || (title != "Main window" && key = "ov_topmost")
                 continue
@@ -4097,7 +4211,7 @@ CPBigBoxUpdateOverlayContent(key := "") {
             CPBigBoxControls["modeBody"].Text := CPBigBoxBackdrop.Get("failed", false)
                 ? "Transparency is unavailable on this display. The menu is using a solid background."
                 : "Live preview — only the background fades. 100% is solid; try 85% for a subtle view of the game.`nSave keeps this value. B / Cancel restores your previous setting."
-            CPBigBoxControls["footer"].Text := "D-pad Up / Down  Navigate     Left / Right  Adjust by 5%     A / Enter  Select     B / Esc  Cancel"
+            CPBigBoxControls["footer"].Text := "D-pad Up / Down  Navigate     Left / Right  Adjust by 1%     A / Enter  Select     B / Esc  Cancel`nHold the D-pad Left/Right to adjust faster. Save keeps this value; Cancel restores the previous setting."
         }
     }
 }
@@ -6097,7 +6211,7 @@ CPBigBoxSettingsGroups(page := "") {
                 ["COLORS", (page = "explanationWindow" || (page = "" && CPBigBoxCurrentPage = "explanationWindow"))
                     ? ["ov_bg", "ov_txt"] : ["ov_bg", "ov_txt", "ov_name"]],
                 ["TEXT", ["ov_font", "ov_size", "ov_bold"]],
-                ["WINDOW", ["ov_opacity", "ov_position"]]
+                ["WINDOW", ["ov_opacity", "ov_position", "ov_power"]]
             ]
         case "controls":
             return [
@@ -6323,6 +6437,10 @@ CPBigBoxUpdateSettingsHint(key := "") {
             : CPBigBoxCurrentPage = "audio"
                 ? CPBigBoxAudioHintDetail(key)
             : CPBigBoxScreenshotHintDetail(key))
+    if CPBigBoxCurrentPage = "explanation" && CPExplanationFailureStatus() != ""
+        text := CPExplanationFailureStatus() "`nFull error details are in the Explainer overlay."
+    if CPBigBoxCurrentPage = "screenshot" && CPTranslationFailureStatus() != ""
+        text := CPTranslationFailureStatus() "`nFull error details are in the Translator overlay."
     ; Queued native Focus events can repeat the synchronous navigation update.
     ; Do not repaint even the help label when its contents have not changed.
     if CPBigBoxControls["modeBody"].Text != text
@@ -6639,6 +6757,7 @@ CPBigBoxWatchCapture(*) {
         if seq != "" && seq != state["seq"] {
             status := IniRead(state["path"], "capture", "pickStatus", "")
             CPBigBoxFinishCapture(status = "canceled" ? "Selection cancelled. Your previous capture target was kept."
+                : status = "failed" ? "Capture selection failed. Check your settings folder and try again."
                 : "Capture selection updated. No capture was made.")
         } else if DllCall("kernel32\GetTickCount64", "uint64") - state["started"] >= 125000 {
             ; The existing overlay selector cancels itself after 120 seconds.
@@ -7386,6 +7505,12 @@ CPBigBoxUpdateAIContent() {
         . "`n" (domain = "audio"
             ? "New audio settings take effect on the next audio start; a running session is not interrupted."
             : "Models and prompts can also be maintained from their selection screens.")
+    if domain = "explanation" && CPExplanationFailureStatus() != ""
+        CPBigBoxControls["aiNote"].Text := CPExplanationFailureStatus()
+            . "`nFull error details are in the Explainer overlay."
+    if domain = "translation" && CPTranslationFailureStatus() != ""
+        CPBigBoxControls["aiNote"].Text := CPTranslationFailureStatus()
+            . "`nFull error details are in the Translator overlay."
     }
     if !CPBigBoxAIChoiceActive()
         return
@@ -7532,7 +7657,7 @@ CPBigBoxBuildPageNavigation() {
     global CPBigBoxCurrentPage, CPBigBoxSetupState
     CPBigBoxNavigationRows := []
     choosing := CPBigBoxAIChoiceActive()
-    if CPBigBoxMainPageIndex(CPBigBoxCurrentPage) && !choosing
+    if CPBigBoxNavigationPageIndex(CPBigBoxCurrentPage) && !choosing
         CPBigBoxNavigationRows.Push(
             [CPBigBoxControls["pagePrevious"], CPBigBoxControls["pageNext"]])
     if CPBigBoxAIListActive() {
@@ -7581,10 +7706,12 @@ CPBigBoxBuildPageNavigation() {
             [CPBigBoxControls["cap_save"], CPBigBoxControls["cap_cancel"]])
     } else if CPBigBoxCurrentPage = "quickOverlays" {
         CPBigBoxNavigationRows.Push([CPBigBoxControls["ov_translator"], CPBigBoxControls["ov_explainer"], CPBigBoxControls["ov_main"]])
+        CPBigBoxNavigationRows.Push([CPBigBoxControls["ov_translator_power"], CPBigBoxControls["ov_explainer_power"]])
     } else if CPBigBoxCurrentPage = "quickMainWindow" {
         CPBigBoxNavigationRows.Push([CPBigBoxControls["ov_opacity"], CPBigBoxControls["ov_topmost"]])
     } else if CPBigBoxOverlayQuick() {
         CPBigBoxNavigationRows.Push([CPBigBoxControls["ov_bg"], CPBigBoxControls["ov_opacity"], CPBigBoxControls["ov_position"]])
+        CPBigBoxNavigationRows.Push([CPBigBoxControls["ov_power"]])
     } else if CPBigBoxCurrentPage = "overlayEdit" {
         for key in CPBigBoxOverlaySliderKeys()
             if CPBigBoxControls[key].Enabled
@@ -7705,14 +7832,14 @@ CPBigBoxApplyPageVisibility() {
         CPBigBoxControls[key].Enabled := isLimit
     }
     CPBigBoxControls["cap_value"].Visible := isLimit
-    for key in ["ov_translator", "ov_explainer", "ov_main"] {
+    for key in ["ov_translator", "ov_explainer", "ov_main", "ov_translator_power", "ov_explainer_power"] {
         CPBigBoxControls[key].Visible := CPBigBoxCurrentPage = "quickOverlays"
         CPBigBoxControls[key].Enabled := CPBigBoxCurrentPage = "quickOverlays"
     }
     for key in CPBigBoxOverlayKeys() {
         active := overlayTarget != "" && !choosing && !(key = "ov_name" && overlayTarget = "Explainer")
             && (overlayTarget = "Main window" ? (key = "ov_opacity" || key = "ov_topmost")
-                : (key != "ov_topmost" && (!CPBigBoxOverlayQuick() || key = "ov_bg" || key = "ov_opacity" || key = "ov_position")))
+                : (key != "ov_topmost" && (!CPBigBoxOverlayQuick() || key = "ov_bg" || key = "ov_opacity" || key = "ov_position" || key = "ov_power")))
         CPBigBoxControls[key].Visible := active
         CPBigBoxControls[key].Enabled := active
     }
@@ -7868,7 +7995,7 @@ CPBigBoxApplyPageVisibility() {
         CPBigBoxControls[key].Visible := active
         CPBigBoxControls[key].Enabled := active
     }
-    inPageRing := CPBigBoxMainPageIndex(CPBigBoxCurrentPage) != 0 && !choosing
+    inPageRing := CPBigBoxNavigationPageIndex(CPBigBoxCurrentPage) != 0 && !choosing
     for key in ["pagePrevious", "pageNext"] {
         CPBigBoxControls[key].Enabled := inPageRing
         CPBigBoxControls[key].Visible := inPageRing
@@ -7998,9 +8125,9 @@ CPBigBoxSwitchPage(direction, keepArrowFocus := false, *) {
     if !CPBigBoxPageNavigationAllowed()
         return
     pages := CPBigBoxPageOrder()
-    index := CPBigBoxMainPageIndex(CPBigBoxCurrentPage)
+    index := CPBigBoxNavigationPageIndex(CPBigBoxCurrentPage)
     if !index
-        return ; Home quick views use Back; shoulders are for full settings pages.
+        return ; Pending editors keep their explicit Save/Cancel/Back paths.
     nextIndex := Mod(index - 1 + direction + pages.Length, pages.Length) + 1
     if CPBigBoxSetPage(pages[nextIndex]) && keepArrowFocus {
         key := direction < 0 ? "pagePrevious" : "pageNext"
@@ -8046,7 +8173,7 @@ CPBigBoxPositionPageIndicator(animate := false) {
     global CPBigBoxControls, CPBigBoxCurrentPage, CPBigBoxPageIndicator
     global CPBigBoxPageAnimation
     CPBigBoxStopPageAnimation()
-    index := CPBigBoxMainPageIndex(CPBigBoxCurrentPage)
+    index := CPBigBoxNavigationPageIndex(CPBigBoxCurrentPage)
     if !CPBigBoxDashboardAlive() || !CPBigBoxPageIndicator.Has("width") || !index
         return
     area := CPBigBoxPageIndicator
@@ -8600,6 +8727,9 @@ CPBigBoxDashboardResize(bigBoxGui, minMax, width, height) {
         CPBigBoxControls[key].Move(cpPanelInnerX + (index - 1) * (cpBottomW + cpTileGapX), cpBottomY, cpBottomW, cpBottomButtonH)
     for index, key in ["ov_translator", "ov_explainer", "ov_main"]
         CPBigBoxControls[key].Move(cpPanelInnerX + (index - 1) * (cpAIWidth + cpTileGapX), cpActionTop, cpAIWidth, cpTileH)
+    for index, key in ["ov_translator_power", "ov_explainer_power"]
+        CPBigBoxControls[key].Move(cpPanelInnerX + (index - 1) * (cpAIWidth + cpTileGapX),
+            cpActionTop + cpTileH + cpTileGapY, cpAIWidth, cpTileH)
     if CPBigBoxOverlayQuick() {
         for index, key in ["ov_bg", "ov_opacity", "ov_position"]
             CPBigBoxControls[key].Move(cpPanelInnerX + (index - 1) * (cpAIWidth + cpTileGapX), cpActionTop, cpAIWidth, cpTileH)
@@ -8610,6 +8740,11 @@ CPBigBoxDashboardResize(bigBoxGui, minMax, width, height) {
     }
     CPBigBoxControls["ov_note"].Move(cpPanelInnerX, cpActionTop + cpTileH + cpTileGapY,
         cpPanelInnerW, Max(40, cpGridBottom - cpActionTop - cpTileH - cpTileGapY))
+    if CPBigBoxOverlayQuick() && CPBigBoxCurrentPage != "quickMainWindow" {
+        CPBigBoxControls["ov_power"].Move(cpPanelInnerX, cpActionTop + cpTileH + cpTileGapY, cpAIWidth, cpTileH)
+        CPBigBoxControls["ov_note"].Move(cpPanelInnerX + cpAIWidth + cpTileGapX,
+            cpActionTop + cpTileH + cpTileGapY, 2 * cpAIWidth + cpTileGapX, cpTileH)
+    }
     cpSampleW := Floor(cpPanelInnerW * 0.28)
     CPBigBoxControls["ov_preview"].Move(cpPanelInnerX, cpActionTop, cpSampleW, cpGridBottom - cpActionTop)
     cpSliderX := cpPanelInnerX + cpSampleW + cpSectionGap
@@ -9007,7 +9142,7 @@ CPBigBoxDashboardUpdateContent(*) {
         : (CPBigBoxAIDomain() != "" && CPBigBoxMainPageIndex(CPBigBoxCurrentPage)
             ? "AI selections · More controls from this tab will follow in the next stages."
             : cpPage[2]) "`n" cpSummaries[CPBigBoxCurrentPage]
-    cpPageIndex := CPBigBoxMainPageIndex(CPBigBoxCurrentPage)
+    cpPageIndex := CPBigBoxNavigationPageIndex(CPBigBoxCurrentPage)
     cpPages := CPBigBoxPageOrder()
     if cpPageIndex {
         cpPrev := cpPages[cpPageIndex > 1 ? cpPageIndex - 1 : cpPages.Length]
@@ -9015,6 +9150,8 @@ CPBigBoxDashboardUpdateContent(*) {
         CPBigBoxControls["pageHint"].Text := "‹  " CPBigBoxPageDefinitions()[cpPrev][1]
             . "     ·     " cpPageIndex " / " cpPages.Length "     ·     "
             . CPBigBoxPageDefinitions()[cpNext][1] "  ›"
+        if !CPBigBoxMainPageIndex(CPBigBoxCurrentPage)
+            CPBigBoxControls["pageHint"].Text := "Home › Quick controls     ·     " CPBigBoxControls["pageHint"].Text
     } else {
         CPBigBoxControls["pageHint"].Text := "Home › "
             . (CPBigBoxCurrentPage = "study" ? "Study Library" : "Quick controls")
@@ -9123,7 +9260,7 @@ CPBigBoxButtonKeys() {
         keys.Push(key)
     for key in CPBigBoxOverlayKeys()
         keys.Push(key)
-    for key in ["ov_translator", "ov_explainer", "ov_main", "ov_save", "ov_cancel"]
+    for key in ["ov_translator", "ov_explainer", "ov_main", "ov_translator_power", "ov_explainer_power", "ov_save", "ov_cancel"]
         keys.Push(key)
     for key in ["ctrl_keyboard", "ctrl_controller", "ctrl_enabled", "ctrl_dpad",
         "ctrl_primary", "ctrl_disable", "ctrl_default", "ctrl_back",
@@ -9672,12 +9809,19 @@ CPBigBoxDashboardCreate() {
         CPBigBoxControls[key] := cpGui.Add("Button", "x80 y350 w310 h70 Hidden", "")
         CPBigBoxControls[key].OnEvent("Click", CPBigBoxOverlayAction.Bind(SubStr(key, 4)))
     }
-    CPBigBoxControls["ov_translator"] := cpGui.Add("Button", "x80 y350 w510 h80 Hidden", "Translator")
-    CPBigBoxControls["ov_explainer"] := cpGui.Add("Button", "x600 y350 w510 h80 Hidden", "Explainer")
+    CPBigBoxControls["ov_translator"] := cpGui.Add("Button", "x80 y350 w510 h80 Hidden",
+        "Translator settings`nWindow color · Opacity · Size / position")
+    CPBigBoxControls["ov_explainer"] := cpGui.Add("Button", "x600 y350 w510 h80 Hidden",
+        "Explainer settings`nWindow color · Opacity · Size / position")
     CPBigBoxControls["ov_main"] := cpGui.Add("Button", "x600 y350 w510 h80 Hidden", "Main window")
     CPBigBoxControls["ov_translator"].OnEvent("Click", CPBigBoxSetPage.Bind("quickTranslatorWindow", false))
     CPBigBoxControls["ov_explainer"].OnEvent("Click", CPBigBoxSetPage.Bind("quickExplainerWindow", false))
     CPBigBoxControls["ov_main"].OnEvent("Click", CPBigBoxSetPage.Bind("quickMainWindow", false))
+    for title in ["Translator", "Explainer"] {
+        key := "ov_" StrLower(title) "_power"
+        CPBigBoxControls[key] := cpGui.Add("Button", "x80 y440 w350 h80 Hidden", "")
+        CPBigBoxControls[key].OnEvent("Click", CPBigBoxToggleOverlay.Bind(title))
+    }
     CPBigBoxControls["ov_note"] := cpGui.Add("Text", "x80 y450 w1000 h70 Hidden Center", "")
     CPBigBoxControls["ov_preview"] := CPRegisterColorSwatch(cpGui.Add("Text", "x80 y350 w300 h170 Hidden Center +0x200", ""), "", false)
     Loop 3 {
@@ -11147,8 +11291,33 @@ CPHwndArrayIndex(hwnd, hwnds) {
     return 0
 }
 
+CPDesktopNavigateCaptureRow(curHwnd, dir) {
+    global CPDesktop, tab, btnCapPick, btnSTO
+    if !CPDesktopActive() || tab.Value != 1 || (dir != "Up" && dir != "Down" && dir != "Right")
+        return false
+    ; Change capture sits on its own row, to the right of the capture actions.
+    ; Prefer the semantic vertical path over horizontal overlap so both arrows
+    ; and the D-pad reach it naturally in wide and stacked AI-settings layouts.
+    promptManage := CPDesktop["shot"]["prompts"].Hwnd
+    target := 0
+    ; Right from the last capture action also stays in this card rather than
+    ; jumping to the distant Profile selector in the header.
+    if (curHwnd = promptManage && dir = "Down") || (curHwnd = btnSTO.Hwnd && (dir = "Up" || dir = "Right"))
+        target := btnCapPick.Hwnd
+    else if curHwnd = btnCapPick.Hwnd && (dir = "Up" || dir = "Down")
+        target := dir = "Up" ? promptManage : btnSTO.Hwnd
+    if !target || !CPHwndIsFocusable(curHwnd) || !CPHwndIsFocusable(target)
+        return false
+    CPSetFocusHwnd(target)
+    return true
+}
+
 CPDesktopPrioritizePageNavigation(curHwnd, dir) {
-    if !CPDesktopActive() || (dir != "Up" && dir != "Down")
+    if !CPDesktopActive()
+        return false
+    if CPDesktopNavigateCaptureRow(curHwnd, dir)
+        return true
+    if dir != "Up" && dir != "Down"
         return false
 
     pageHwnds := CPDesktopPageNavigationHwnds()
@@ -11886,6 +12055,16 @@ CPNavActivate(keyName := "Enter", *) {
         SetTimer(CPAdjustColorSwatchWithController.Bind(hwnd), -1)
         return
     }
+    if CPDesktopIsProfileSelector(hwnd) {
+        selection := CPDesktopProfileSelectionFor(GuiCtrlFromHwnd(hwnd))
+        if IsObject(selection) && selection["confirmed"]
+            return ; Do not reopen the list while its confirmed switch is queued.
+        if CPComboDropped(hwnd)
+            CPDesktopProfileSelectionConfirm(GuiCtrlFromHwnd(hwnd))
+        else
+            CPShowCombo(hwnd, true)
+        return
+    }
     if (hwnd && CPHwndIsCombo(hwnd) && !CPComboDropped(hwnd)) {
         CPShowCombo(hwnd, true)
         return
@@ -11921,6 +12100,10 @@ CPNavCancelCurrent() {
     cpNavFocusedHwnd := CPFocusedHwnd()
     if (cpNavFocusedHwnd && CPHwndIsCombo(cpNavFocusedHwnd)
      && CPComboDropped(cpNavFocusedHwnd)) {
+        if CPDesktopIsProfileSelector(cpNavFocusedHwnd) {
+            CPDesktopProfileSelectionCancel(GuiCtrlFromHwnd(cpNavFocusedHwnd))
+            return true
+        }
         CPShowCombo(cpNavFocusedHwnd, false)
         return true
     }
@@ -13122,10 +13305,12 @@ UpdateStatus(allowRecoveryScan := false){
         btnAudio.Text := running ? "Audio Translation On" : "Audio Translation Off"
     CPBigBoxUpdateAudioPower()
     CPDesktopRefreshAudio()
+    CPBigBoxUpdateOverlayPower()
     CPDesktopRefreshStatus()
 }
 
 _UpdateStatus(){
+    CPPollTranslationStatus()
     UpdateStatus()
 }
 
@@ -13708,12 +13893,10 @@ ExplainNow(*) {
     }
     explainRunning := true
     previousErrorFile := EnvGet("EXPLAIN_ERROR_FILE")
+    CPExplanationFailureStatus("")
     try ExplainNowCore()
     catch as ex {
-        Toast("Explanation failed")
-        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(),
-            "Explanation could not finish. You can try again.`n`n" ex.Message,
-            "Explain failed", "ok", "error", 720)
+        CPReportExplanationFailure("Explanation could not finish. You can try again.`n`n" ex.Message)
     } finally {
         ; Even a locked result file or a closed dialog must release the guard.
         explainRunning := false
@@ -13721,16 +13904,231 @@ ExplainNow(*) {
     }
 }
 
+CPModelRequestRead(path, fallback := "") {
+    ; Result/log files can be briefly locked by Windows or antivirus software.
+    try return FileExist(path) ? Trim(FileRead(path, "UTF-8")) : fallback
+    catch
+        return fallback
+}
+
+CPModelFailureSummary(action, message) {
+    if RegExMatch(message, "i)\b(408|504)\b|DEADLINE_EXCEEDED|timed? out|timeout")
+        return action " timed out. Try again or choose another model."
+    if RegExMatch(message, "i)\b(404|500|502|503)\b|not found|unavailable|overloaded")
+        return action " unavailable. Try later or choose another model."
+    if RegExMatch(message, "i)\b429\b|quota|rate.limit|RESOURCE_EXHAUSTED")
+        return action " limit reached. Check quota or try later."
+    if RegExMatch(message, "i)\b(401|403)\b|API.key|authentication|PERMISSION_DENIED")
+        return action " access failed. Check the provider and API key."
+    return action " failed. Check the connection and model, then try again."
+}
+
+CPModelRequestFailure(state, action, message) {
+    summary := CPModelFailureSummary(action, message)
+    state["modelFailureDetails"] := message
+    state["modelFailureSummary"] := summary
+    if StudyLibraryStateAlive(state)
+        try state["status"].Value := summary
+    ; Never disable an owner or steal game focus to report a model failure.
+    Toast(summary, 15000, 2)
+    try DllCall("user32\MessageBeep", "uint", 0x30)
+    return summary
+}
+
+CPTranslationFailureStatus(message := unset) {
+    static failure := ""
+    if IsSet(message)
+        failure := message
+    return failure
+}
+
+CPPollTranslationStatus() {
+    global overlayDir
+    static previous := ""
+    status := CPModelRequestRead(overlayDir "\translation.status")
+    if status = "" || status = previous
+        return
+    previous := status
+    lines := StrSplit(status, "`n", "`r", 2)
+    message := lines.Length > 1 ? Trim(lines[2]) : ""
+    if message = "" {
+        CPTranslationFailureStatus("")
+        return
+    }
+    summary := CPModelFailureSummary("Translation", message)
+    CPTranslationFailureStatus(summary)
+    Toast(summary "`nDetails are in the Translator overlay.", 15000, 2)
+    try DllCall("user32\MessageBeep", "uint", 0x30)
+    try CPBigBoxUpdateAIContent()
+    try CPBigBoxUpdateSettingsHint()
+}
+
+CPModelRequestCommand(python, script, stdout, stderr) {
+    return Format('"{1}" "{2}" --stdout "{3}" --stderr "{4}" "{5}"',
+        python, A_ScriptDir "\scripts\model_job.py", stdout, stderr, script)
+}
+
+CPModelRequestJobs() {
+    static jobs := Map(), registered := false
+    if !registered {
+        OnExit(CPModelRequestExit)
+        registered := true
+    }
+    return jobs
+}
+
+CPModelRequestExit(*) {
+    for handle, job in CPModelRequestJobs()
+        CPModelRequestStop(job)
+}
+
+CPModelRequestStop(job) {
+    if job.Get("handle", 0) && DllCall("kernel32\WaitForSingleObject",
+        "ptr", job["handle"], "uint", 0, "uint") = 0x102 {
+        ; Only terminate our retained process handle, never a reused PID or a
+        ; shell/process tree. SQLite rolls back any uncommitted batch safely.
+        DllCall("kernel32\TerminateProcess", "ptr", job["handle"], "uint", 1)
+        DllCall("kernel32\WaitForSingleObject", "ptr", job["handle"], "uint", 1000)
+    }
+}
+
+CPModelRequestCancel(state) {
+    job := state.Get("modelJob", 0)
+    if IsObject(job) {
+        job["cancel"] := true
+        CPModelRequestStop(job)
+    }
+}
+
+CPModelRequestLaunch(command) {
+    ; CreateProcess returns the original process handle atomically, including
+    ; for helpers that exit before the next AHK instruction can run.
+    startup := Buffer(A_PtrSize = 8 ? 104 : 68, 0)
+    NumPut("uint", startup.Size, startup)
+    info := Buffer(A_PtrSize = 8 ? 24 : 16, 0)
+    cmd := Buffer(StrPut(command, "UTF-16") * 2)
+    StrPut(command, cmd, "UTF-16")
+    if !DllCall("kernel32\CreateProcessW", "ptr", 0, "ptr", cmd,
+        "ptr", 0, "ptr", 0, "int", false, "uint", 0x08000000,
+        "ptr", 0, "str", A_ScriptDir, "ptr", startup, "ptr", info)
+        throw OSError(A_LastError, "CreateProcess", "Could not start the model helper.")
+    DllCall("kernel32\CloseHandle", "ptr", NumGet(info, A_PtrSize, "ptr"))
+    return NumGet(info, 0, "ptr")
+}
+
+CPModelRequestRun(command, state, progressPath := "", timeoutMs := 120000) {
+    ; This function is for generation ONLY, not Add to Anki or other external
+    ; writes whose outcome may be uncertain after termination.
+    job := Map("handle", 0, "cancel", false)
+    state["modelJob"] := job
+    state["modelOutcome"] := "running"
+    state["modelFailureSummary"] := ""
+    state["modelFailureDetails"] := ""
+    started := A_TickCount, batch := 0
+    try {
+        if progressPath != "" && FileExist(progressPath)
+            FileDelete(progressPath) ; Do not accept an old batch marker on retry.
+        handle := CPModelRequestLaunch(command)
+        job["handle"] := handle
+        CPModelRequestJobs()[handle] := job
+        loop {
+            if job["cancel"] || state.Get("closed", false) || state.Get("closeRequested", false)
+                || (state.Has("readerState") && !StudyLibraryStateAlive(state["readerState"])) {
+                state["modelOutcome"] := "canceled"
+                return -2
+            }
+            wait := DllCall("kernel32\WaitForSingleObject", "ptr", handle, "uint", 0, "uint")
+            if wait = 0 {
+                if !DllCall("kernel32\GetExitCodeProcess", "ptr", handle, "uint*", &code := 0)
+                    throw Error("Could not read the model helper result.")
+                state["modelOutcome"] := code = 0 ? "success" : "failed"
+                return code
+            }
+            if wait != 0x102
+                throw Error("Could not monitor the model helper.")
+            progress := progressPath != "" ? CPModelRequestRead(progressPath) : ""
+            if RegExMatch(progress, "^\d+$") && Integer(progress) > batch {
+                batch := Integer(progress)
+                started := A_TickCount
+            }
+            if A_TickCount - started >= timeoutMs {
+                state["modelOutcome"] := "timeout"
+                return -3
+            }
+            Sleep(50)
+        }
+    } finally {
+        CPModelRequestStop(job)
+        if job["handle"] {
+            CPModelRequestJobs().Delete(job["handle"])
+            DllCall("kernel32\CloseHandle", "ptr", job["handle"])
+            job["handle"] := 0
+        }
+        state.Delete("modelJob")
+    }
+}
+
+CPModelRequestError(state, path, fallback := "The model helper did not return a usable result.") {
+    if state.Get("modelOutcome", "") = "timeout"
+        return "The model request timed out after two minutes. Please try again or choose another model."
+    return CPModelRequestRead(path, fallback)
+}
+
+CPExplanationFailureSummary(message) {
+    if RegExMatch(message, "i)\b(408|504)\b|DEADLINE_EXCEEDED|timed? out|timeout")
+        return "Explanation timed out. Try again or choose another model."
+    if RegExMatch(message, "i)\b(404|500|502|503)\b|model[^\r\n]*(not found|not available)|unavailable|overloaded")
+        return "Explanation model unavailable. Try later or choose another model."
+    if RegExMatch(message, "i)\b429\b|quota|rate.limit|RESOURCE_EXHAUSTED")
+        return "Explanation request limit reached. Check quota or try later."
+    if RegExMatch(message, "i)\b(401|403)\b|API.key[^\r\n]{0,20}(missing|invalid|rejected)|authentication|UNAUTHENTICATED|PERMISSION_DENIED")
+        return "Explanation access failed. Check the provider and API key."
+    return "Explanation failed. Check the Explainer for details, then try again."
+}
+
+CPExplanationFailureStatus(message := unset) {
+    static lastFailure := ""
+    if IsSet(message) {
+        lastFailure := message
+        ; Refresh independently of request cleanup, without opening a dialog,
+        ; disabling an owner, changing pages, or activating a hidden window.
+        SetTimer(CPRefreshExplanationFailureStatus, -1)
+    }
+    return lastFailure
+}
+
+CPRefreshExplanationFailureStatus(*) {
+    global tab
+    try if CPDesktopActive() && tab.Value = 4
+        CPDesktopRelayout()
+    try if CPBigBoxDashboardAlive() {
+        CPBigBoxUpdateAIContent()
+        CPBigBoxUpdateSettingsHint()
+    }
+}
+
+CPReportExplanationFailure(message, requestId := "") {
+    summary := CPExplanationFailureSummary(message)
+    CPExplanationFailureStatus(summary)
+    ; Preserve full details even when Python failed to launch or crashed.
+    try CPWriteExplainerTerminalResult(message,
+        requestId != "" ? requestId : "failed-" A_NowUTC "-" A_TickCount)
+    Toast(summary "`nDetails are in the Explainer overlay.", 15000, 2)
+    ; Standard asynchronous Windows warning cue, respecting system sounds.
+    ; Useful when an exclusive-fullscreen game covers desktop notifications.
+    try DllCall("user32\MessageBeep", "uint", 0x30)
+    DbgCP("Explanation failed: " message)
+}
+
 ExplainNowCore() {
+    static requestSequence := 0
     global pythonExe, explainScript
     global explainProvider, explainOpenAIModel, explainGeminiModel
     global debugMode, explainsDir, studyLibraryDir, overlayDir
     px := ResolvePath(pythonExe)
     ex := ResolvePath(explainScript)
     if !(FileExist(px) && FileExist(ex)) {
-        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(),
-            "Set valid paths for python.exe and explainer script first.`n`npythonExe:`n" px "`n`nexplainer:`n" ex,
-            "Missing paths", "ok", "warning", 760)
+        CPReportExplanationFailure("Set valid paths for python.exe and explainer script first.`n`npythonExe:`n" px "`n`nexplainer:`n" ex)
         return
     }
 
@@ -13738,7 +14136,7 @@ ExplainNowCore() {
     ; defensive INI/UI refresh from leaving the internal provider stale.
     prov := CPSyncExplanationSelectionFromControls()
     if !CPApiKeyConfigured(prov) {
-        CPShowMissingApiKey(prov, "explainer")
+        CPReportExplanationFailure("The " prov " API key is missing. Open Settings > API keys to configure it.")
         DbgCP("ExplainNow blocked: " prov " API key is missing")
         return
     }
@@ -13798,7 +14196,8 @@ ExplainNowCore() {
     )
     EnvSet "EXPLAIN_PROMPT_PROFILE", Trim(ddlEPr.Text)
     
-    requestId := A_NowUTC "-" A_TickCount
+    requestSequence += 1
+    requestId := A_NowUTC "-" A_TickCount "-" requestSequence
     safeRequestId := RegExReplace(requestId, "[^0-9A-Za-z_-]", "_")
     errFile := A_Temp "\JRPG_Explain_" safeRequestId ".err"
     try FileDelete(errFile)
@@ -13807,16 +14206,13 @@ ExplainNowCore() {
     EnvSet("EXPLAIN_ERROR_FILE", errFile)
     cmd := Format('"{1}" "{2}"', px, ex)
     DbgCP("ExplainNow -> " cmd)
-    Toast("Generating explanation…")
+    Toast("Generating explanation…", 1600, 2)
     SignalExplainerBusy()
     pid := 0
     try Run(cmd, A_ScriptDir, "Hide", &pid)
     catch as launchError {
         msg := "Explanation could not start.`n`nThe bundled Python process could not be launched.`n`nDetails: " launchError.Message
-        CPWriteExplainerTerminalResult(msg, requestId)
-        Toast("Explanation failed")
-        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), msg,
-            "Explain failed", "ok", "error", 720)
+        CPReportExplanationFailure(msg, requestId)
         DbgCP("ExplainNow launch error: " msg)
         return
     }
@@ -13845,10 +14241,7 @@ ExplainNowCore() {
 
     if timedOut {
         msg := "Explanation timed out.`n`nThe selected model did not finish within two minutes. Please try again, check the internet connection, or select another model."
-        CPWriteExplainerTerminalResult(msg, requestId)
-        Toast("Explanation failed")
-        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), msg,
-            "Explain failed", "ok", "error", 720)
+        CPReportExplanationFailure(msg, requestId)
         DbgCP("ExplainNow timeout")
         return
     }
@@ -13860,12 +14253,11 @@ ExplainNowCore() {
     }
 
     if (exitCode = 0) {
-        Toast("Explanation updated")
+        Toast("Explanation updated", 1600, 2)
         DbgCP("ExplainNow OK")
     } else {
         msg := err
-        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), msg,
-            "Explain failed", "ok", "error", 760)
+        CPReportExplanationFailure(msg, requestId)
         DbgCP("ExplainNow ERR: " msg)
     }
 }
@@ -16353,8 +16745,9 @@ StudyReaderWriteAnkiReviewFile(saPath, saText, saOwnerState) {
 }
 
 StudyReaderCloseAnkiAddDialog(saAddState, *) {
-    if saAddState["closed"] || saAddState.Get("busy", false)
+    if saAddState["closed"] || (saAddState.Get("busy", false) && !saAddState.Has("modelJob"))
         return
+    CPModelRequestCancel(saAddState)
     StudySetActivity(saAddState, false)
     saAddState["closed"] := true
     if saAddState.Has("actionTimer") {
@@ -16570,12 +16963,9 @@ StudyReaderGenerateVocabularyExample(saAddState, *) {
         EnvSet("EXAMPLE_RESULT_FILE", saResultFile)
         EnvSet("SETTINGS_DIR", A_ScriptDir "\Settings")
         EnvSet("PYTHONIOENCODING", "utf-8")
-        saCommand := Format(
-            'cmd /c chcp 65001>nul & "{1}" "{2}" 1>"{3}" 2>"{4}"',
-            saPython, saExampleScript, saOutFile, saErrFile
-        )
+        saCommand := CPModelRequestCommand(saPython, saExampleScript, saOutFile, saErrFile)
         DbgCP("Vocabulary example -> " saCommand)
-        saExitCode := RunWait(saCommand, , "Hide")
+        saExitCode := CPModelRequestRun(saCommand, saAddState)
     } catch Error as saError {
         saRunError := saError.Message
     } finally {
@@ -16589,22 +16979,14 @@ StudyReaderGenerateVocabularyExample(saAddState, *) {
             EnvSet(saEnvironmentName, saEnvironmentValue)
     }
 
-    if !StudyLibraryStateAlive(saAddState)
+    if !StudyLibraryStateAlive(saAddState) || saAddState.Get("modelOutcome", "") = "canceled"
         return
     saRows := StudyLibraryReadRows(saResultFile)
     if (saExitCode != 0 || !saRows.Length || saRows[1].Length < 4
         || saRows[1][1] != "ok") {
-        saError := FileExist(saErrFile)
-            ? Trim(FileRead(saErrFile, "UTF-8")) : ""
-        saOutput := FileExist(saOutFile)
-            ? Trim(FileRead(saOutFile, "UTF-8")) : ""
-        saAddState["status"].Value := "Example generation failed."
-        StudyReaderAnkiMessage(
-            saAddState,
-            "The example sentence could not be generated.`n`n"
-                . (saRunError != "" ? saRunError : saError != "" ? saError : saOutput),
-            "Generate example sentence", "ok", "error", 650
-        )
+        saError := CPModelRequestError(saAddState, saErrFile)
+        CPModelRequestFailure(saAddState, "Example sentence",
+            saRunError != "" ? saRunError : saError)
         return
     }
 
@@ -19418,20 +19800,38 @@ StudyCandidatesReportBridgeUnavailable(scState, scInvocation) {
 }
 
 StudyCandidatesRunBridge(scState, scAction, scFront := "") {
+    modelWork := scAction = "generate-recommendations" || scState.Get("generatingRecommendations", false)
     scInvocation := StudyCandidatesBridgeCommand(scState, scAction, scFront)
     if !scInvocation["ok"] {
-        StudyCandidatesReportBridgeUnavailable(scState, scInvocation)
+        if modelWork
+            CPModelRequestFailure(scState, "Recommendations", "The Python helper was not found.")
+        else
+            StudyCandidatesReportBridgeUnavailable(scState, scInvocation)
         return false
     }
     scCommand := scInvocation["command"]
     if !StudyCandidatesBeginWork(scState)
         return false
     try {
-        try scExitCode := RunWait(scCommand, A_ScriptDir, "Hide")
+        try {
+            ; A helper that fails before Python initialization must not reuse
+            ; diagnostics from a previous request in this review workspace.
+            if modelWork {
+                scErrorPath := scState["outputDir"] "\candidate_recommendation_error.txt"
+                if FileExist(scErrorPath)
+                    FileDelete(scErrorPath)
+            }
+            scExitCode := modelWork
+                ? CPModelRequestRun(scCommand, scState, scAction = "generate-recommendations"
+                    ? scState["outputDir"] "\candidate_recommendation_progress.txt" : "")
+                : RunWait(scCommand, A_ScriptDir, "Hide")
+        }
         catch as scError {
             if (!scState.Has("closeRequested") || !scState["closeRequested"])
                 && StudyCandidatesGuiAlive(scState) {
-                CPThemedOwnedMessage(
+                if modelWork
+                    CPModelRequestFailure(scState, "Recommendations", scError.Message)
+                else CPThemedOwnedMessage(
                     scState["gui"].Hwnd,
                     "The Anki candidate list could not be updated.`n`n" scError.Message,
                     "Review for Anki", "ok", "warning"
@@ -19450,7 +19850,11 @@ StudyCandidatesRunBridge(scState, scAction, scFront := "") {
         }
         if (!scState.Has("closeRequested") || !scState["closeRequested"])
             && StudyCandidatesGuiAlive(scState) {
-            CPThemedOwnedMessage(
+            if modelWork {
+                scDetails := CPModelRequestError(scState,
+                    scState["outputDir"] "\candidate_recommendation_error.txt")
+                CPModelRequestFailure(scState, "Recommendations", scDetails)
+            } else CPThemedOwnedMessage(
                 scState["gui"].Hwnd,
                 "The Anki candidate list could not be updated (bridge exit "
                     . scExitCode ")." (scDetails != "" ? "`n`n" scDetails : ""),
@@ -20088,8 +20492,8 @@ StudyCandidatesGenerateRecommendations(scState, *) {
                 scState["baseStatus"] :=
                     "Recommendations are already up to date."
             else
-                scState["baseStatus"] :=
-                    "Recommendations could not be generated."
+                scState["baseStatus"] := scState.Get("modelFailureSummary", "Recommendations could not be generated.")
+                    . " Completed batches are saved; Refresh to see them."
             StudyCandidatesSetRecommendationActivity(scState, false)
         }
     }
@@ -20163,7 +20567,7 @@ StudyCandidatesGenerateSelectedRecommendation(scState, *) {
         if StudyCandidatesGuiAlive(scState) && !scState["closeRequested"] {
             scState["baseStatus"] := scOutcome = "success"
                 ? "The selected " scKind " recommendation was updated."
-                : "The selected recommendation could not be generated."
+                : scState.Get("modelFailureSummary", "The selected recommendation could not be generated.")
             StudyCandidatesSetRecommendationActivity(scState, false)
         }
     }
@@ -20996,6 +21400,7 @@ StudyCandidatesClose(scState, *) {
     if scState.Has("closeRequested") && scState["closeRequested"]
         return
     scState["closeRequested"] := true
+    CPModelRequestCancel(scState)
     if scState.Has("initialRefreshCallback")
         && IsObject(scState["initialRefreshCallback"])
         try SetTimer(scState["initialRefreshCallback"], 0)
@@ -22001,6 +22406,7 @@ StudyDesktopTheme(d) {
         }
     }
     for hwnd, paint in d["paint"] {
+        CPDesktopPrepareNativePaint(paint["ctrl"], "button")
         style := DllCall("user32\GetWindowLongPtr", "ptr", hwnd, "int", -16, "ptr")
         DllCall("user32\SetWindowLongPtr", "ptr", hwnd, "int", -16, "ptr", (style & ~0xF) | 0xB, "ptr")
     }
@@ -22964,18 +23370,21 @@ StudyDesktopMessageCreate(owner, message, title, buttons, subtitle, yesLabel, no
     s["body"].SetFont("s12")
     s["overflow"] := g.AddEdit("x0 y0 w600 h200 Hidden ReadOnly Multi VScroll -Border -E0x200", message)
     s["overflow"].SetFont("s12")
-    if buttons = "yesnocancel" {
-        s["cancel"] := g.AddButton("x0 y0 w170 h34 Default", cancelLabel)
-        s["cancel"].OnEvent("Click", CPThemedDialogFinish.Bind(s, g, "Cancel"))
-        s["noButton"] := g.AddButton("x0 y0 w170 h34", noLabel)
-        s["noButton"].OnEvent("Click", CPThemedDialogFinish.Bind(s, g, "No"))
-    } else {
-        s["cancel"] := g.AddButton("x0 y0 w170 h34 Default", buttons = "yesno" ? noLabel : "OK")
-        s["cancel"].OnEvent("Click", CPThemedDialogFinish.Bind(s, g, s["result"]))
-    }
+    ; Native dialog arrows (also sent by the D-pad) follow creation/tab order,
+    ; not the positions assigned by StudyDesktopLayoutMessage. Build the footer
+    ; left to right while keeping Cancel/No as the safe default and initial focus.
     if (buttons = "yesno" || buttons = "yesnocancel") {
         s["addButton"] := g.AddButton("x0 y0 w170 h34", yesLabel)
         s["addButton"].OnEvent("Click", CPThemedDialogFinish.Bind(s, g, "Yes"))
+    }
+    if buttons = "yesnocancel" {
+        s["noButton"] := g.AddButton("x0 y0 w170 h34", noLabel)
+        s["noButton"].OnEvent("Click", CPThemedDialogFinish.Bind(s, g, "No"))
+        s["cancel"] := g.AddButton("x0 y0 w170 h34 Default", cancelLabel)
+        s["cancel"].OnEvent("Click", CPThemedDialogFinish.Bind(s, g, "Cancel"))
+    } else {
+        s["cancel"] := g.AddButton("x0 y0 w170 h34 Default", buttons = "yesno" ? noLabel : "OK")
+        s["cancel"].OnEvent("Click", CPThemedDialogFinish.Bind(s, g, s["result"]))
     }
     g.OnEvent("Escape", CPThemedDialogFinish.Bind(s, g, s["result"]))
     g.OnEvent("Close", CPThemedDialogFinish.Bind(s, g, s["result"]))
@@ -24525,6 +24934,7 @@ StudyReaderNewVersionProviderChanged(srNewState, *) {
 StudyReaderCloseNewVersionDialog(srNewState, *) {
     if srNewState.Has("closed") && srNewState["closed"]
         return
+    CPModelRequestCancel(srNewState)
     StudySetActivity(srNewState, false)
     srNewState["closed"] := true
     try srNewState["readerState"]["newVersionDialog"] := 0
@@ -24635,7 +25045,7 @@ StudyReaderGenerateNewVersion(srNewState, *) {
     srOldVersionCount := srReaderState["versions"].Length
     srSectionKey := StudyReaderCurrentSectionKey(srReaderState)
     srNewState["generateButton"].Enabled := false
-    srNewState["cancelButton"].Enabled := false
+    srNewState["cancelButton"].Enabled := true
     srNewState["status"].Value := "Generating another explanation... This may take a moment."
     StudySetActivity(srNewState, true)
     Toast("Generating another explanation…")
@@ -24668,12 +25078,9 @@ StudyReaderGenerateNewVersion(srNewState, *) {
         EnvSet("SETTINGS_DIR", A_ScriptDir "\\Settings")
         EnvSet("JRPG_DEBUG", debugMode ? "1" : "0")
         EnvSet("PYTHONIOENCODING", "utf-8")
-        srCommand := Format(
-            'cmd /c chcp 65001>nul & "{1}" "{2}" 1>"{3}" 2>"{4}"',
-            srPython, srExplainer, srOutFile, srErrFile
-        )
+        srCommand := CPModelRequestCommand(srPython, srExplainer, srOutFile, srErrFile)
         DbgCP("Study Reader new version -> " srCommand)
-        srExitCode := RunWait(srCommand, , "Hide")
+        srExitCode := CPModelRequestRun(srCommand, srNewState)
     } catch Error as srError {
         srRunError := srError.Message
     } finally {
@@ -24687,20 +25094,15 @@ StudyReaderGenerateNewVersion(srNewState, *) {
     }
     if !StudyLibraryStateAlive(srNewState) || !StudyLibraryStateAlive(srReaderState)
         return
-    srOutput := FileExist(srOutFile)
-        ? Trim(FileRead(srOutFile, "UTF-8")) : ""
-    srError := FileExist(srErrFile)
-        ? Trim(FileRead(srErrFile, "UTF-8")) : ""
+    if srNewState.Get("modelOutcome", "") = "canceled"
+        return
+    srOutput := CPModelRequestRead(srOutFile)
+    srError := CPModelRequestError(srNewState, srErrFile)
     if (srExitCode != 0) {
         srNewState["generateButton"].Enabled := true
         srNewState["cancelButton"].Enabled := true
-        srNewState["status"].Value := "Generation failed."
-        CPThemedOwnedMessage(
-            srNewState["gui"].Hwnd,
-            "The new version could not be generated.`n`n"
-                . (srRunError != "" ? srRunError : srError != "" ? srError : srOutput),
-            "Generate new explanation version", "ok", "error", 650
-        )
+        CPModelRequestFailure(srNewState, "New explanation",
+            srRunError != "" ? srRunError : srError)
         return
     }
 
@@ -24710,13 +25112,8 @@ StudyReaderGenerateNewVersion(srNewState, *) {
     if (srReaderState["versions"].Length <= srOldVersionCount) {
         srNewState["generateButton"].Enabled := true
         srNewState["cancelButton"].Enabled := true
-        srNewState["status"].Value := "The Study Library was not updated."
-        CPThemedOwnedMessage(
-            srNewState["gui"].Hwnd,
-            "The model returned successfully, but no new Study Library version "
-                . "was found.`n`n" . (srError != "" ? srError : srOutput),
-            "Generate new explanation version", "ok", "error", 650
-        )
+        CPModelRequestFailure(srNewState, "New explanation",
+            "The Study Library was not updated. " srError)
         return
     }
     if (CPStudyLibraryState && CPStudyLibraryState.Has("gui")) {
@@ -29831,27 +30228,8 @@ OpenStudyLibraryWelcomeAnkiConnect(*) {
         )
 }
 
-OpenStudyLibraryWelcomeFolder(slState, *) {
-    slDirectory := ""
-    if (IsObject(slState) && slState.Has("database"))
-        SplitPath(slState["database"],, &slDirectory)
-    if (slDirectory = "")
-        slDirectory := StudyLibraryConfiguredDirectory()
-    try {
-        if !DirExist(slDirectory)
-            DirCreate(slDirectory)
-        Run('explorer.exe "' slDirectory '"')
-    } catch as ex {
-        CPAdaptiveOwnedMessage(
-            0,
-            "The Study Library folder could not be opened:`n`n" ex.Message,
-            "Study Library", "ok", "warning", 680
-        )
-    }
-}
-
 ShowStudyLibraryWelcome(slState, *) {
-    global iniPath, CPStudyLibraryWelcomeDialog, STUDY_VIDEO_URL
+    global iniPath, CPStudyLibraryWelcomeDialog, STUDY_VIDEO_URL, STUDY_WRITTEN_GUIDE_URL
 
     if !IsObject(slState) || !slState.Has("gui")
         return
@@ -29932,10 +30310,10 @@ ShowStudyLibraryWelcome(slState, *) {
     btnAnkiConnect := dlg.Add(
         "Button", "x+10 yp w165", "Open AnkiConnect Page"
     )
-    btnOpenFolder := dlg.Add(
-        "Button", "x+10 yp w180", "Open Study Library Folder"
+    btnWrittenGuide := dlg.Add(
+        "Button", "x+10 yp w180", "Open Written Guide"
     )
-    btnClose := dlg.Add("Button", "x+10 yp w110 Default", "Close")
+    btnContinue := dlg.Add("Button", "x+10 yp w110 Default", "Continue")
 
     CPStudyLibraryWelcomeDialog := Map(
         "gui", dlg,
@@ -29947,19 +30325,19 @@ ShowStudyLibraryWelcome(slState, *) {
     btnAnkiConnect.OnEvent(
         "Click", OpenStudyLibraryWelcomeAnkiConnect
     )
-    btnOpenFolder.OnEvent(
-        "Click", OpenStudyLibraryWelcomeFolder.Bind(slState)
+    btnWrittenGuide.OnEvent(
+        "Click", OpenAboutUrl.Bind(STUDY_WRITTEN_GUIDE_URL, "the written Study Library guide")
     )
     closeCallback := CloseStudyLibraryWelcome.Bind(
         dlg, dontShowAgain
     )
-    btnClose.OnEvent("Click", closeCallback)
+    btnContinue.OnEvent("Click", closeCallback)
     dlg.OnEvent("Escape", closeCallback)
     dlg.OnEvent("Close", closeCallback)
 
     dlg.Show("AutoSize Center")
     CPApplyOwnedDialogTheme(dlg)
-    try btnClose.Focus()
+    try btnContinue.Focus()
 }
 
 OpenStudyLibrary(*) {
@@ -30447,37 +30825,15 @@ OpenStudyLibraryWindow(slStandalone := false, slBigBoxPresentation := false) {
 
 ; Force the color swatches to repaint immediately (no warnings, no flicker)
 RefreshColorSwatches() {
-    global ui, rectBg, rectTxt, rectName
-    global boxBgHex, txtHex, nameHex
-
-    rectBg.Opt("Background" . boxBgHex)
-    rectTxt.Opt("Background" . txtHex)
-    if IsSet(rectName)
-        rectName.Opt("Background" . nameHex)
-
-    for swatch in [rectBg, rectTxt, rectName] {
-        if IsSet(swatch) {
-            try {
-                swatch.Redraw()
-            } catch as __swErr {      ; <-- use a unique local name to avoid #Warn
-                ; no-op: control may not exist yet during early draws
-            }
-        }
-    }
-
-    DllCall("user32\RedrawWindow", "ptr", ui.Hwnd, "ptr", 0, "ptr", 0, "uint", 0x0181)
+    ; These aliases now refer to owner-drawn buttons, not static rectangles.
+    ; Background options reset BS_OWNERDRAW and hide the color chips. Keep all
+    ; update paths (picker, profile, settings and fullscreen) on the renderer.
+    CPDesktopRefreshOverlayColors()
 }
 
 ; -- Explainer version (same idea, different controls/vars)
 RefreshColorSwatches_EW() {
-    global ui, rectBg_EW, rectTxt_EW
-    global boxBgHex_EW, txtHex_EW
-    rectBg_EW.Opt("Background" . boxBgHex_EW)
-    rectTxt_EW.Opt("Background" . txtHex_EW)
-    for swatch in [rectBg_EW, rectTxt_EW] {
-        try swatch.Redraw()
-    }
-    DllCall("user32\RedrawWindow", "ptr", ui.Hwnd, "ptr", 0, "ptr", 0, "uint", 0x0181)
+    CPDesktopRefreshOverlayColors()
 }
 
 ; --- Clear selection highlight in editable ComboBox (removes white-on-blue) ---
@@ -35500,8 +35856,16 @@ LaunchExplainerOverlay(*) {
     SendOverlayTheme("Explainer")
 }
 
+ToastState() {
+    static state := Map("priority", 0, "expires", 0)
+    return state
+}
+
 ToastDestroy(targetToastGui := 0, *) {
     global CPToastGui, CPToastText, CPToastTimer
+    ; A queued expiry from a replaced toast must not cancel the new timer.
+    if IsObject(targetToastGui) && targetToastGui != CPToastGui
+        return
     if IsObject(CPToastTimer)
         try SetTimer(CPToastTimer, 0)
     CPToastTimer := 0
@@ -35515,10 +35879,15 @@ ToastDestroy(targetToastGui := 0, *) {
         CPToastGui := 0
         CPToastText := 0
     }
+    ToastState()["priority"] := 0
+    ToastState()["expires"] := 0
 }
 
-Toast(msg){
+Toast(msg, durationMs := 1600, priority := 0){
     global CPToastGui, CPToastText, CPToastTimer, controlDarkMode
+    state := ToastState()
+    if IsObject(CPToastGui) && state["priority"] > priority && A_TickCount < state["expires"]
+        return ; Ordinary saved/toggled notices must not hide a request failure.
     ToastDestroy()
     message := Trim(String(msg))
     if message = ""
@@ -35536,11 +35905,28 @@ Toast(msg){
     try {
         ToastPresent(CPToastGui, CPToastText, background, foreground)
         CPToastTimer := ToastDestroy.Bind(CPToastGui)
-        SetTimer(CPToastTimer, -1600)
+        durationMs := Max(1, Round(durationMs))
+        state["priority"] := priority
+        state["expires"] := A_TickCount + durationMs
+        SetTimer(CPToastTimer, -durationMs)
     } catch as ex {
         ToastDestroy()
         DbgCP("Notification could not be displayed: " ex.Message)
     }
+}
+
+ToastPosition(width, height) {
+    ; Use the foreground game's monitor, not always the primary desktop.
+    ; GetForegroundWindow may legitimately be zero during full-screen switches.
+    hwnd := DllCall("user32\GetForegroundWindow", "ptr")
+    monitor := DllCall("user32\MonitorFromWindow", "ptr", hwnd, "uint", 1, "ptr")
+    info := Buffer(40, 0), NumPut("uint", 40, info)
+    if monitor && DllCall("user32\GetMonitorInfoW", "ptr", monitor, "ptr", info, "int") {
+        left := NumGet(info, 4, "int"), top := NumGet(info, 8, "int")
+        right := NumGet(info, 12, "int"), bottom := NumGet(info, 16, "int")
+        return [Max(left, Min(left + 20, right - width)), Max(top, Min(top + 20, bottom - height))]
+    }
+    return [20, 20]
 }
 
 ToastPresent(g, label, background, foreground) {
@@ -35577,7 +35963,8 @@ ToastPresent(g, label, background, foreground) {
         if !DllCall("user32\DrawTextW", "ptr", memoryDc, "wstr", label.Text, "int", -1, "ptr", rect, "uint", 0x800) ; NOPREFIX
             throw OSError()
         position := Buffer(8), size := Buffer(8), origin := Buffer(8, 0)
-        NumPut("int", 20, "int", 20, position)
+        corner := ToastPosition(width, height)
+        NumPut("int", corner[1], "int", corner[2], position)
         NumPut("int", width, "int", height, size)
         if !DllCall("user32\UpdateLayeredWindow", "ptr", g.Hwnd, "ptr", screenDc,
             "ptr", position, "ptr", size, "ptr", memoryDc, "ptr", origin,
@@ -36871,17 +37258,12 @@ GameProfileApply(name, announce := true) {
 
     slTrans.Value := overlayTrans
     lblTransPct.Value := Round(overlayTrans / 255 * 100) "%"
-    rectBg.Opt("Background" boxBgHex)
-    rectTxt.Opt("Background" txtHex)
-    rectName.Opt("Background" nameHex)
     try ddlFont.Text := fontName
     try edFSize.Value := fontSize, udFSize.Value := fontSize
     chkFontBold.Value := fontBold
 
     slTrans_EW.Value := overlayTrans_EW
     lblTransPct_EW.Value := Round(overlayTrans_EW / 255 * 100) "%"
-    rectBg_EW.Opt("Background" boxBgHex_EW)
-    rectTxt_EW.Opt("Background" txtHex_EW)
     try ddlFont_EW.Text := fontName_EW
     try edFSize_EW.Value := fontSize_EW, udFSize_EW.Value := fontSize_EW
     chkFontBold_EW.Value := fontBold_EW
@@ -37059,6 +37441,10 @@ CPDesktopRefreshProfileSelector(force := false) {
         signature .= profileName "|"
     if !force && CPDesktop.Get("profileSelectorSignature", "") = signature
         return
+    ; Only invalidate this dropdown's preview; the Profiles page has a
+    ; separate selection which must survive a header/status refresh.
+    if IsObject(CPDesktopProfileSelectionFor(ctrl))
+        CPDesktop["profileSelection"] := 0
 
     items := []
     if active = ""
@@ -37080,11 +37466,88 @@ CPDesktopRefreshProfileSelector(force := false) {
     ctrl.Redraw()
 }
 
-CPDesktopProfileSelectionChanged(ctrl, *) {
-    global CPDesktop, iniPath, ui, GameProfileLastError
+CPDesktopIsProfileSelector(hwnd, headerOnly := false) {
+    global CPDesktop, ddlGameProfile
+    return hwnd && ((IsSet(CPDesktop) && CPDesktop.Has("chrome")
+        && CPDesktop["chrome"].Has("profile") && CPDesktop["chrome"]["profile"].Hwnd = hwnd)
+        || (!headerOnly && IsSet(ddlGameProfile) && ddlGameProfile.Hwnd = hwnd))
+}
+
+CPDesktopProfileSelectionFor(ctrl) {
+    global CPDesktop
+    selection := IsSet(CPDesktop) ? CPDesktop.Get("profileSelection", 0) : 0
+    return IsObject(selection) && selection["hwnd"] = ctrl.Hwnd ? selection : 0
+}
+
+CPDesktopProfileSelectionBegin(ctrl, *) {
+    global CPDesktop
     if CPDesktop.Get("profileSelectorUpdating", false)
         return
+    CPDesktop["profileSelection"] := Map("hwnd", ctrl.Hwnd, "value", ctrl.Value, "confirmed", false)
+}
+
+CPDesktopProfileSelectionPreview(ctrl, *) {
+    global CPDesktop
+    if !CPDesktopIsProfileSelector(ctrl.Hwnd, true) {
+        ; Updating the summary also relayouts the page. Doing that for each
+        ; native highlight closes the dropdown midway through browsing.
+        if !IsObject(CPDesktopProfileSelectionFor(ctrl)) && !CPComboDropped(ctrl.Hwnd)
+            GameProfileUpdateSummary()
+        return
+    }
+    ; Native closed-combo type-ahead/wheel changes must not switch a profile,
+    ; or leave the header claiming that an unconfirmed profile is active.
+    if !CPDesktop.Get("profileSelectorUpdating", false)
+     && !IsObject(CPDesktopProfileSelectionFor(ctrl)) && !CPComboDropped(ctrl.Hwnd)
+        CPDesktopRefreshProfileSelector(true)
+}
+
+CPDesktopProfileSelectionConfirm(ctrl, *) {
+    selection := CPDesktopProfileSelectionFor(ctrl)
+    ; CBN_SELENDOK may also be sent by a closed combo. Only an open list is
+    ; a selection session; arrows/D-pad browsing itself never commits.
+    if !IsObject(selection) || selection["confirmed"]
+        return
+    selection["confirmed"] := true
     choice := Trim(ctrl.Text)
+    CPShowCombo(ctrl.Hwnd, false)
+    ; Unwind native combo/controller callbacks before an unsaved-changes
+    ; dialog is opened. A refresh/cancel invalidates this session meanwhile.
+    SetTimer(CPDesktopProfileSelectionFinish.Bind(ctrl, selection, choice), -1)
+}
+
+CPDesktopProfileSelectionCancel(ctrl, *) {
+    global CPDesktop
+    selection := CPDesktopProfileSelectionFor(ctrl)
+    if !IsObject(selection) || selection["confirmed"]
+        return
+    CPDesktop["profileSelection"] := 0
+    ctrl.Choose(selection["value"])
+    CPShowCombo(ctrl.Hwnd, false)
+    if !CPDesktopIsProfileSelector(ctrl.Hwnd, true)
+        SetTimer(GameProfileUpdateSummary, -1)
+}
+
+CPDesktopProfileSelectionFinish(ctrl, selection, choice) {
+    global CPDesktop
+    if CPDesktopProfileSelectionFor(ctrl) != selection
+        return
+    if !CPDesktopIsProfileSelector(ctrl.Hwnd, true) {
+        ; The Profiles page only chooses a saved profile. Apply profile remains
+        ; the explicit action that loads its settings.
+        CPDesktop["profileSelection"] := 0
+        ctrl.Choose(choice)
+        GameProfileUpdateSummary()
+        return
+    }
+    CPDesktopRefreshProfileSelector(true)
+    CPDesktopProfileSelectionApply(ctrl, choice)
+}
+
+CPDesktopProfileSelectionApply(ctrl, choice) {
+    global CPDesktop, iniPath
+    if CPDesktop.Get("profileSelectorUpdating", false)
+        return
     active := Trim(IniRead(iniPath, "game_profiles", "active", ""))
     if choice = "Manage profiles…" {
         CPDesktopRefreshProfileSelector(true)
@@ -37101,39 +37564,51 @@ CPDesktopProfileSelectionChanged(ctrl, *) {
         return
     }
 
-    if active != "" && GameProfileHasUnsavedChanges(active) {
+    CPSwitchGameProfile(choice, false)
+}
+
+CPSwitchGameProfile(choice, announce := true) {
+    global iniPath, ui, GameProfileLastError
+    ; Both explicit desktop switching entry points use the same guard. Save
+    ; the active profile, never the target highlighted in either dropdown.
+    active := Trim(IniRead(iniPath, "game_profiles", "active", ""))
+    if active != "" && choice != active && GameProfileHasUnsavedChanges(active) {
         answer := CPAdaptiveOwnedMessage(ui.Hwnd,
             "Current settings differ from the saved profile '" active "'.`n`n"
             . "Save those changes before switching to '" choice "'?",
             "Switch profile", "yesnocancel", "warning", 700,
             "Save and switch", "Switch without saving", "Cancel")
-        if answer = "Cancel" {
+        if answer != "Yes" && answer != "No" {
             CPDesktopRefreshProfileSelector(true)
-            return
+            return false
         }
         if answer = "Yes" && !GameProfileSave(active, false) {
             CPAdaptiveOwnedMessage(ui.Hwnd,
                 GameProfileLastError != "" ? GameProfileLastError : "The current profile could not be saved.",
                 "Switch profile", "ok", "error", 680)
             CPDesktopRefreshProfileSelector(true)
-            return
+            return false
         }
     }
 
-    if !GameProfileApply(choice, false) {
-        CPAdaptiveOwnedMessage(ui.Hwnd,
-            GameProfileLastError != "" ? GameProfileLastError : "The selected profile could not be applied.",
-            "Switch profile", "ok", "error", 680)
+    if !GameProfileApply(choice, announce) {
+        if !announce
+            CPAdaptiveOwnedMessage(ui.Hwnd,
+                GameProfileLastError != "" ? GameProfileLastError : "The selected profile could not be applied.",
+                "Switch profile", "ok", "error", 680)
         CPDesktopRefreshProfileSelector(true)
-        return
+        return false
     }
     RefreshGameProfilesList(choice)
     CPBigBoxDashboardUpdateContent()
     CPDesktopRefreshStatus(true)
+    return true
 }
 
 RefreshGameProfilesList(select := "") {
-    global ddlGameProfile, iniPath, CPStudyLibraryState
+    global ddlGameProfile, iniPath, CPStudyLibraryState, CPDesktop
+    if IsObject(CPDesktopProfileSelectionFor(ddlGameProfile))
+        CPDesktop["profileSelection"] := 0
     list := ListGameProfiles()
     ddlGameProfile.Delete()
     if list.Length {
@@ -37154,6 +37629,10 @@ RefreshGameProfilesList(select := "") {
 GameProfileUpdateSummary(*) {
     global ddlGameProfile, txtGameProfileState, iniPath
     if !(IsSet(ddlGameProfile) && IsSet(txtGameProfileState))
+        return
+    ; Keep the native popup intact until a selection is confirmed or cancelled,
+    ; including summary updates requested by other refresh paths.
+    if CPComboDropped(ddlGameProfile.Hwnd)
         return
     name := Trim(ddlGameProfile.Text)
     active := IniRead(iniPath, "game_profiles", "active", "")
@@ -37201,8 +37680,7 @@ ApplySelectedGameProfile(*) {
         CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Select a profile first.", "Profiles")
         return
     }
-    if GameProfileApply(name)
-        RefreshGameProfilesList(name)
+    CPSwitchGameProfile(name)
 }
 
 DeleteSelectedGameProfile(*) {
@@ -37522,15 +38000,14 @@ CloseWelcomeGuide(dlg, dontShowAgain, *) {
     CPWelcomeDialog := 0
 }
 
-OpenWelcomeApiKeys(dlg, dontShowAgain, *) {
-    global CPWelcomeDialog, ui, btnOpenEnvVars
-    SaveWelcomeGuidePreference(dontShowAgain)
-    try dlg.Destroy()
-    CPWelcomeDialog := 0
-    try ui.Show()
-    try WinActivate("ahk_id " ui.Hwnd)
+OpenWelcomeApiKeys(dlg, *) {
+    global ui
+    ; Keep this modeless guide available while preparing API Keys behind it.
+    ; Only dismissing the guide saves the "don't show again" preference.
+    try ui.Show("NA")
     CPSelectCustomTab(9)
-    try btnOpenEnvVars.Focus()
+    try dlg.Show("NA")
+    try WinActivate("ahk_id " dlg.Hwnd)
 }
 
 CPDesktopWelcomeDialogCreate(ownerHwnd, manual := false) {
@@ -37550,7 +38027,7 @@ CPDesktopWelcomeDialogCreate(ownerHwnd, manual := false) {
         . "2. Choose your translation and explanation models and prompts.`n"
         . "3. Select a capture region or game window.`n"
         . "4. Configure keyboard shortcuts or direct controller inputs.`n"
-        . "5. Save the finished setup as a Profile for the LaunchBox plugin.")
+        . "5. Save the finished setup as a Profile for the LaunchBox plugin (optional).")
     c["note"] := g.AddText("x40 y442 w700 h64 +0x80",
         "The LaunchBox plugin normally starts JRPG Translator with its control panel hidden. "
         . "Show it again at any time with your configured controller button or keyboard shortcut.")
@@ -37594,12 +38071,8 @@ CPDesktopWelcomeClose(s, savePreference := true, *) {
 }
 
 CPDesktopWelcomeOpenApiKeys(s, *) {
-    global ui, btnOpenEnvVars
-    CPDesktopWelcomeClose(s, true)
-    try ui.Show()
-    try WinActivate("ahk_id " ui.Hwnd)
-    CPSelectCustomTab(9)
-    try btnOpenEnvVars.Focus()
+    if !s["closed"]
+        OpenWelcomeApiKeys(s["gui"])
 }
 
 ShowWelcomeDialog(manual := false, *) {
@@ -37637,7 +38110,7 @@ ShowWelcomeDialog(manual := false, *) {
         . "2. Choose your translation and explanation models and prompts.`n"
         . "3. Select a capture region or game window.`n"
         . "4. Configure keyboard shortcuts or direct controller inputs.`n"
-        . "5. Save the finished setup as a Profile for the LaunchBox plugin.")
+        . "5. Save the finished setup as a Profile for the LaunchBox plugin (optional).")
 
     dlg.Add("Text", "xm y+14 w640 cGray",
         "The LaunchBox plugin normally starts JRPG Translator with its control panel hidden. "
@@ -37652,7 +38125,7 @@ ShowWelcomeDialog(manual := false, *) {
     btnWelcomeDocs := dlg.Add("Button", "x+10 yp w155", "Open Written Guide")
     btnWelcomeContinue := dlg.Add("Button", "x+10 yp w110 Default", "Continue")
 
-    btnWelcomeApiKeys.OnEvent("Click", OpenWelcomeApiKeys.Bind(dlg, dontShowAgain))
+    btnWelcomeApiKeys.OnEvent("Click", OpenWelcomeApiKeys.Bind(dlg))
     btnWelcomeVideo.OnEvent("Click", OpenAboutUrl.Bind(BEGINNER_VIDEO_URL, "the beginner guide"))
     btnWelcomeDocs.OnEvent("Click", OpenAboutUrl.Bind(WRITTEN_GUIDE_URL, "the written guide"))
     closeCallback := CloseWelcomeGuide.Bind(dlg, dontShowAgain)
@@ -38158,8 +38631,7 @@ Repaint(){
     slTrans.Value := overlayTrans
     lblTransPct.Value := Round(overlayTrans / 255 * 100) . "%"
 
-    rectBg.Opt("Background" . boxBgHex)
-    rectTxt.Opt("Background" . txtHex)
+    RefreshColorSwatches()
 
     try ddlFont.Text := fontName
     edFSize.Value := fontSize
@@ -38185,10 +38657,6 @@ Repaint(){
         ; Transparency + label
         slTrans_EW.Value := overlayTrans_EW
         try lblTransPct_EW.Value := Round(overlayTrans_EW / 255 * 100) . "%"
-
-        ; Color preview rectangles
-        try rectBg_EW.Opt("Background" . boxBgHex_EW)
-        try rectTxt_EW.Opt("Background" . txtHex_EW)
 
         ; Font and size
         try ddlFont_EW.Text := fontName_EW
@@ -38750,6 +39218,8 @@ CPDesktopPrepareNativePaint(ctrl, kind) {
     if !originalProc
         return false
     CPDesktopNativePaintHwnds[ctrl.Hwnd] := Map("proc", originalProc, "kind", kind)
+    if kind = "button"
+        CPDesktopNativePaintHwnds[ctrl.Hwnd]["defaultButton"] := (DllCall("user32\GetWindowLongPtr", "ptr", ctrl.Hwnd, "int", -16, "ptr") & 0xF) = 1
     DllCall("user32\InvalidateRect", "ptr", ctrl.Hwnd, "ptr", 0, "int", 1)
     return true
 }
@@ -38771,7 +39241,21 @@ CPDesktopNativePaintWindowProc(hwnd, msg, wParam, lParam) {
         ? CPDesktopNativePaintHwnds[hwnd] : 0
     originalProc := IsObject(info) ? info.Get("proc", 0) : 0
 
-    if IsObject(info) && msg = 0x000F { ; WM_PAINT
+    ownerDrawButton := IsObject(info) && info["kind"] = "button"
+    if ownerDrawButton && msg = 0x0087 { ; WM_GETDLGCODE
+        ; BS_OWNERDRAW loses the native pushbutton dialog code. Without it,
+        ; Enter (including controller A) invokes the dialog's default Cancel
+        ; instead of the focused action. Keep native dialog navigation intact.
+        return DllCall("user32\CallWindowProcW", "ptr", originalProc,
+            "ptr", hwnd, "uint", msg, "uptr", wParam, "ptr", lParam, "ptr")
+            | (info.Get("defaultButton", false) ? 0x10 : 0x20) ; DLGC_DEFPUSHBUTTON / DLGC_UNDEFPUSHBUTTON
+    }
+    if ownerDrawButton && msg = 0x00F4 { ; BM_SETSTYLE: preserve the custom face on focus changes
+        info["defaultButton"] := (wParam & 0xF) = 1
+        wParam := (wParam & ~0xF) | 0xB
+    }
+
+    if IsObject(info) && !ownerDrawButton && msg = 0x000F { ; WM_PAINT
         paint := Buffer(A_PtrSize = 8 ? 72 : 64, 0)
         dc := DllCall("user32\BeginPaint", "ptr", hwnd, "ptr", paint, "ptr")
         try {
@@ -38784,7 +39268,7 @@ CPDesktopNativePaintWindowProc(hwnd, msg, wParam, lParam) {
         }
         return 0
     }
-    if IsObject(info) && (msg = 0x0317 || msg = 0x0318) { ; WM_PRINT / WM_PRINTCLIENT
+    if IsObject(info) && !ownerDrawButton && (msg = 0x0317 || msg = 0x0318) { ; WM_PRINT / WM_PRINTCLIENT
         if wParam {
             if info["kind"] = "checkbox"
                 CPDesktopPaintCheckBox(hwnd, wParam)
@@ -38793,7 +39277,7 @@ CPDesktopNativePaintWindowProc(hwnd, msg, wParam, lParam) {
         }
         return 0
     }
-    if IsObject(info) && msg = 0x0014 ; WM_ERASEBKGND
+    if IsObject(info) && !ownerDrawButton && msg = 0x0014 ; WM_ERASEBKGND
         return 1
 
     result := originalProc
@@ -39029,7 +39513,11 @@ CPDesktopCreate() {
     CPRegisterMutedControl(chrome["profileLabel"])
     chrome["profile"] := ui.AddDropDownList("x0 y0 w182 Hidden 0x210",
         ["Current settings", "Manage profiles…"])
-    chrome["profile"].OnEvent("Change", CPDesktopProfileSelectionChanged)
+    chrome["profile"].OnEvent("Change", CPDesktopProfileSelectionPreview)
+    chrome["profile"].OnCommand(7, CPDesktopProfileSelectionBegin) ; CBN_DROPDOWN
+    chrome["profile"].OnCommand(9, CPDesktopProfileSelectionConfirm) ; CBN_SELENDOK
+    chrome["profile"].OnCommand(10, CPDesktopProfileSelectionCancel) ; CBN_SELENDCANCEL
+    chrome["profile"].OnCommand(8, CPDesktopProfileSelectionCancel) ; CBN_CLOSEUP without confirmation
     CPDesktop["combos"][chrome["profile"].Hwnd] := Map("ctrl", chrome["profile"],
         "height", SendMessage(0x0154, -1, 0, chrome["profile"].Hwnd), "separatorBefore", 1)
     CPPrepareStudyCombo(chrome["profile"].Hwnd)
@@ -39478,7 +39966,11 @@ CPDesktopCreateProfilesPage() {
     ddlStartupOverlays := CPDesktopPageRegisterControl(7, "startupChoice",
         ui.AddDropDownList("x0 y0 w420 Hidden 0x210", CPStartupOverlayOptions()))
 
-    ddlGameProfile.OnEvent("Change", GameProfileUpdateSummary)
+    ddlGameProfile.OnEvent("Change", CPDesktopProfileSelectionPreview)
+    ddlGameProfile.OnCommand(7, CPDesktopProfileSelectionBegin) ; CBN_DROPDOWN
+    ddlGameProfile.OnCommand(9, CPDesktopProfileSelectionConfirm) ; CBN_SELENDOK
+    ddlGameProfile.OnCommand(10, CPDesktopProfileSelectionCancel) ; CBN_SELENDCANCEL
+    ddlGameProfile.OnCommand(8, CPDesktopProfileSelectionCancel) ; CBN_CLOSEUP without confirmation
     btnGameProfileAdd.OnEvent("Click", CreateGameProfile)
     btnGameProfileSave.OnEvent("Click", SaveSelectedGameProfile)
     btnGameProfileApply.OnEvent("Click", ApplySelectedGameProfile)
@@ -40207,6 +40699,9 @@ CPDesktopLayoutExplanation(w) {
     CPDesktopPlace(expPage["prompts"], promptX, promptY + 62, 100, 28)
     CPDesktopSyncExplanationModel()
 
+    expPage["actionHelp"].Text := CPExplanationFailureStatus() != ""
+        ? CPExplanationFailureStatus() "`nFull error details are in the Explainer overlay."
+        : "Explain the latest Japanese text from Game Text Translation. No new capture is made."
     actionY := aiY + aiH + 16
     actionHelpH := Max(22, Ceil(CPMeasureWrappedTextHeight(expPage["actionHelp"], contentW * scale) / scale) + 4)
     actionH := 48 + actionHelpH + 16 + 38 + 20
@@ -40504,11 +40999,14 @@ CPDesktopRefreshOverlayColors(*) {
         for field in (page = 3 ? ["bg", "txt", "name"] : ["bg", "txt"]) {
             ctrl := overlayPage[field], pref := CPOverlayPreference(title, field), color := pref["value"]
             paint := CPDesktop["paint"][ctrl.Hwnd]
-            if paint.Get("color", "") != color {
+            colorChanged := paint.Get("color", "") != color
+            if colorChanged {
                 paint["color"] := color
                 ctrl.Text := pref["title"] ": #" StrUpper(color)
-                ctrl.Redraw()
             }
+            ; Also repair a lost owner-draw style when accepting the same RGB.
+            ; No page switch or full theme/layout pass should be needed.
+            CPDesktopRefreshPaintedButton(ctrl.Hwnd, colorChanged)
         }
     }
 }
@@ -41469,6 +41967,8 @@ CPDesktopRefreshStatus(force := false, *) {
     CPDesktopRefreshProfileSelector(force)
     mode := IniRead(iniPath, "capture", "mode", "region")
     captureText := "Capture source: " (mode = "window" ? "Selected window" : "Selected region")
+    if CPTranslationFailureStatus() != ""
+        captureText := CPTranslationFailureStatus()
     if CPDesktop["shot"]["captureHelp"].Text != captureText
         CPDesktop["shot"]["captureHelp"].Text := captureText
     CPDesktopRefreshOverlayColors()
@@ -42278,19 +42778,13 @@ PickAndApply(which) {
 
 ApplyColorValue(which, got) {
     global boxBgHex,txtHex,nameHex
-    global rectBg,rectTxt,rectName
 
-    if (which="bg") {
+    if (which="bg")
         boxBgHex := got
-        rectBg.Opt("Background" . got)
-    } else if (which="name") {
+    else if (which="name")
         nameHex := got
-        if IsSet(rectName)
-            rectName.Opt("Background" . got)
-    } else {
+    else
         txtHex := got
-        rectTxt.Opt("Background" . got)
-    }
 
     SyncUnifiedWindowAppearance()
     SaveAll()
@@ -42366,15 +42860,11 @@ PickAndApply_EW(which) {
 
 ApplyColorValue_EW(which, got) {
     global boxBgHex_EW,txtHex_EW
-    global rectBg_EW,rectTxt_EW
 
-    if (which="bg") {
+    if (which="bg")
         boxBgHex_EW := got
-        rectBg_EW.Opt("Background" . got)
-    } else {
+    else
         txtHex_EW := got
-        rectTxt_EW.Opt("Background" . got)
-    }
     SyncUnifiedWindowAppearance()
     SaveAll()
     RefreshColorSwatches_EW()
