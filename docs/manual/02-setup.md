@@ -30,6 +30,8 @@ Do not move only the executable: scripts, overlay components, Python, and settin
 
 The application uses provider APIs, not a provider's ordinary chat website. Create an API key in your own account and check the API project's billing, limits, and model access before sending requests.
 
+AI requests may incur provider charges. Changing a local setting, opening a saved explanation, or testing local audio input is not itself an AI request; consult your provider's current billing information before using AI features.
+
 ### Google Gemini
 
 Create or manage a key in [Google AI Studio](https://aistudio.google.com/app/apikey). Google's [API-key guide](https://ai.google.dev/gemini-api/docs/api-key) explains the project/key setup, and its [billing guide](https://ai.google.dev/gemini-api/docs/billing) explains account tiers and billing.

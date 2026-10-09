@@ -41,6 +41,8 @@ The **full-screen dashboard** is intended for controller use, particularly in Bi
 
 The **Study Library** opens in its own window so that reading and organizing material does not crowd the game controls.
 
+Menu paths in this manual, such as **Settings → Controls**, refer to the desktop interface. The full-screen dashboard exposes the same underlying settings through controller-friendly pages and pickers; differences are called out where useful.
+
 ## Names that are easy to confuse
 
 | Term | Meaning |

@@ -138,6 +138,8 @@ Removal operations may create local recovery backups and a Library Trash folder,
 
 ## Advanced control.ini settings
 
+Paths in this manual, such as `Settings\control.ini`, are relative to the folder containing `JRPG Translator.exe`, unless stated otherwise.
+
 The current UI intentionally has no Paths tab or show/hide-Paths setting. Most users should keep the supplied executable paths and diagnostics defaults.
 
 Advanced users can configure these options in `Settings\control.ini`, under its existing `[cfg]` section:
