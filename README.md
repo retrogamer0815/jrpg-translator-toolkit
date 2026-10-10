@@ -5,7 +5,8 @@
 # JRPG Translator - Translation and Study Toolkit
 
 JRPG Translator is a Windows toolkit for translating Japanese games while you
-play. It combines capture-based game text translation, direct live-audio translation, and a
+play and also offers features to help Japanese learners with their studies while playing.
+It combines capture-based game text translation, direct live-audio translation, and a
 separate Japanese-learning explainer with customizable overlay windows.
 
 The control panel works with a mouse and keyboard or directly from an
