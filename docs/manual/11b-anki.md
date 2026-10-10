@@ -2,6 +2,14 @@
 
 [← Recommendations](11a-study-recommendations.md) · [Contents](README.md) · [Next: Troubleshooting →](12-troubleshooting-and-advanced.md)
 
+## From your game to your phone
+
+Turn Japanese sentences and vocabulary you encounter while playing into flashcards you can review later on your phone. JRPG Translator adds your chosen material to **Anki for Windows**. From there, the free [AnkiWeb](https://ankiweb.net/) sync service lets you take those cards with you in [AnkiDroid for Android](https://play.google.com/store/apps/details?id=com.ichi2.anki) or [AnkiMobile for iPhone and iPad](https://apps.apple.com/us/app/ankimobile-flashcards/id373493387).
+
+Use the same AnkiWeb account on your computer and phone. After adding cards, sync Anki on Windows, then sync the mobile app before reviewing. Let media syncing finish too, so any included game screenshots are available. Sync again after reviewing to keep your progress up to date across devices.
+
+For first-time setup, follow Anki's [syncing guide](https://docs.ankiweb.net/manual/syncing), especially if you already have cards on more than one device. JRPG Translator prepares and adds the cards; Anki handles syncing and your daily reviews.
+
 ## Requirements
 
 You need desktop **Anki**, a suitable deck and note type, and the **AnkiConnect** add-on. Anki must be running when JRPG Translator connects to it.
