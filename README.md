@@ -575,8 +575,6 @@ intentional repository assets.
 - [Python](https://www.python.org/): PSF License.
 - [PixelMplus](https://itouhiro.github.io/mplus-fonts/): SIL Open Font License
   1.1.
-- Application icon by Miguel C Balandrano via Flaticon; attribution is required
-  by the source license.
 
 ## License
 
