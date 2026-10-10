@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/desktop-logo.png" alt="JRPG Translator logo: a game controller beneath a Japanese-to-English translation symbol" width="200" height="200">
+</p>
+
 # JRPG Translator Toolkit
 
 JRPG Translator is a Windows toolkit for translating Japanese games while you
