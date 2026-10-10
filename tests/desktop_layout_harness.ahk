@@ -11,7 +11,8 @@ DirCreate(A_ScriptDir "\Settings")
 if FileExist(envPath)
     FileDelete(envPath)
 FileAppend("OPENAI_API_KEY=synthetic-openai`nGEMINI_API_KEY=synthetic-gemini`n", envPath, "UTF-8")
-global APP_VERSION := "0.9.9.0", PROJECT_URL := "https://example.invalid/jrpg-translator"
+; @APP_VERSION@
+global PROJECT_URL := "https://example.invalid/jrpg-translator"
 global BUG_REPORT_URL := PROJECT_URL "/issues/new", WRITTEN_GUIDE_URL := PROJECT_URL "/blob/main/docs/manual/README.md"
 global BEGINNER_VIDEO_URL := "https://example.invalid/beginner"
 global gPidAudio := 0, gJustStoppedUntil := 0, gLastAction := ""
@@ -34,6 +35,9 @@ global audioProvider := "Gemini", geminiAudioModel := "gemini-3.5-live-translate
 global audioTargetLangs := ["English (en)", "German (de)", "Japanese (ja)"], audioTargetLang := "English (en)"
 global pythonExe := A_ScriptDir "\synthetic-python.exe"
 global overlayAhk := A_ScriptDir "\synthetic-overlay.exe"
+; Status polling during audio-stop checks must stay inside the test fixture.
+global overlayDir := A_ScriptDir "\synthetic-overlay-state"
+DirCreate(overlayDir)
 global imgScript := A_ScriptDir "\synthetic-image.py"
 global audioScript := A_ScriptDir "\synthetic-audio.py"
 global explainScript := A_ScriptDir "\synthetic-explainer.py"
@@ -1595,6 +1599,10 @@ DesktopTestOrganizePages() {
             "Binding display uses the app-painted field frame")
     }
     apiPage := CPDesktop["organizePages"][9]
+    DesktopAssert(InStr(apiPage["introHelp"].Text, "One method is enough")
+        && InStr(apiPage["windowsHelp"].Text, "not encrypted")
+        && InStr(apiPage["keysHelp"].Text, "USB stick"),
+        "API setup explains the choice, portability and storage cautions")
     DesktopAssert(CPDesktopPage(9)["adaptedControls"].Length = 0,
         "API Keys page has no adapted legacy controls")
     DesktopAssert(apiPage["inAppEntry"] = cbApiInApp
@@ -1628,6 +1636,23 @@ DesktopTestOrganizePages() {
             for panelKey in CPDesktop["organizePanels"][page] {
                 p[panelKey].GetPos(&cardX, &cardY, &cardW, &cardH)
                 DesktopAssert(cardX >= 208 && cardX + cardW <= testWidth - 24 && cardH >= 0, "Cards fit the viewport width")
+            }
+            if page = 9 {
+                p["gettingStartedPanel"].GetPos(&introX, &introY, &introW, &introH)
+                p["windowsPanel"].GetPos(, &windowsY)
+                DesktopAssert(introY + introH < windowsY, "API introduction precedes both storage options")
+                previousRight := 0, previousY := 0
+                for key in ["getGeminiKey", "getOpenAIKey", "geminiPricing"] {
+                    ctrl := p[key]
+                    ctrl.GetPos(&linkX, &linkY, &linkW, &linkH)
+                    DesktopAssert(DesktopShown(ctrl) && ctrl.Enabled
+                        && linkX >= introX && linkX + linkW <= introX + introW
+                        && linkY >= introY && linkY + linkH <= introY + introH,
+                        "Provider links stay usable and inside their card")
+                    DesktopAssert(linkY > previousY || linkX >= previousRight,
+                        "Provider links wrap without overlapping")
+                    previousY := linkY, previousRight := linkX + linkW
+                }
             }
             for ctrl in CPDesktop["organizeStops"] {
                 if !DesktopShown(ctrl)
@@ -1725,6 +1750,10 @@ DesktopTestOrganizePages() {
     CPDesktopLayout(ui, 0, 1120, 760)
     CPCanvasScrollTo(0, 0)
     for ctrl in [eGemini, eOpenAI] {
+        ; The onboarding introduction puts these fields below the first screen.
+        ; Verify them where users reach them, after scrolling into view.
+        ctrl.GetPos(, &keyY)
+        CPCanvasScrollTo(0, keyY + CPCanvasScrollY - CPDesktop["headerH"] - 110)
         DesktopAssert(DesktopWindowAtCenter(ctrl) = ctrl.Hwnd,
             "API key edit receives real pointer input through its decorative field frame")
         passwordChar := SendMessage(0xD2, 0, 0, ctrl.Hwnd)
@@ -3703,7 +3732,6 @@ TestAppearanceColorApply() {
 TestHelpDialogs(reader) {
     global controlDarkMode, APP_VERSION, PROJECT_URL, BUG_REPORT_URL
     global BEGINNER_VIDEO_URL, WRITTEN_GUIDE_URL
-    APP_VERSION := "0.9.9.0"
     PROJECT_URL := "https://example.invalid/jrpg-translator"
     BUG_REPORT_URL := PROJECT_URL "/issues/new"
     BEGINNER_VIDEO_URL := "https://example.invalid/beginner"
@@ -3748,7 +3776,8 @@ TestHelpDialogs(reader) {
             && about["desktop"]["kind"] = "about",
             "About window uses the modern desktop dialog shell")
         ac := about["controls"]
-        DesktopAssert(ac["version"].Text = "Version 0.9.9.0"
+        DesktopAssert(ac["version"].Text = "Version " APP_VERSION
+            && InStr(AboutVersionInfo(), "JRPG Translator " APP_VERSION)
             && InStr(AboutVersionInfo(), PROJECT_URL)
             && ac["creator"].Text = "Created by retrogamer0815",
             "About window and copied diagnostics retain version and project information")

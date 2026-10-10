@@ -2,6 +2,56 @@
 
 All notable changes to JRPG Translator are documented here.
 
+## 1.0.0 - 2026-10-10
+
+The first stable 1.0 release brings together the new desktop and Big Box
+interfaces and the usability and reliability improvements developed during
+0.9.9 testing. The application, Study launchers, and optional LaunchBox plugin
+now share version 1.0.0, without a testing or release-candidate suffix.
+
+### Desktop and Study interfaces
+
+- Redesigned the control panel with sidebar navigation, grouped settings,
+  and a Profile selector in the header.
+- Modernized Study Library, Study Reader, Review for Anki, and their dialogs,
+  with responsive layouts and improved keyboard and controller navigation.
+- Fixed Study window title-bar hover feedback and window controls.
+- Added animated progress feedback for example sentences and new explanation
+  versions, alongside recommendation-generation feedback.
+
+### Big Box, controllers, and Profiles
+
+- Added a fullscreen Big Box dashboard with game artwork, quick controls,
+  complete settings pages, and fullscreen Study and Anki workflows.
+- Added direct open/close controls for Translator and Explainer overlays,
+  clearer appearance-setting labels, and fine opacity adjustment with
+  acceleration when holding left/right.
+- Improved directional navigation, focus restoration, and dropdown handling.
+  Browsing Profiles no longer confirms or applies them prematurely.
+- Both profile-switch entry points now check for unsaved changes. Fixed
+  **Save and switch** and **Switch without saving**; Cancel keeps current settings.
+- Fixed overlay color previews losing their styling after a color change.
+
+### Reliability and release packaging
+
+- Stabilized repeated capture-region selection and cancellation cleanup.
+- Guarded overlay focus handling when Windows has no active target window.
+- Improved translation and explanation failure notifications when overlays
+  are hidden, and bounded timeout handling for model and Anki study requests.
+- Improved cleanup after failures, cancellation, or closing a busy window.
+- Updated the plugin's packaged setup guide and release version metadata.
+  Release DLLs and debug symbols use neutral paths instead of personal build paths.
+
+### Getting started and documentation
+
+- Updated welcome screens with current video and written guides, consistent
+  Continue buttons, and clearer optional LaunchBox setup wording.
+- Opening API Keys keeps the main welcome guide available. The API Keys page
+  now explains both storage options and links to provider key-creation pages.
+- Expanded the illustrated manual, controls and JoyToKey guidance, and mobile
+  Anki syncing introduction; refreshed the homepage and manual screenshots.
+- Added a concise bundled quick start and an online-manual shortcut.
+
 ## 0.9.9-testing.1 - 2026-09-04
 
 This is a testing snapshot for the planned 0.9.9 release. It backs up the

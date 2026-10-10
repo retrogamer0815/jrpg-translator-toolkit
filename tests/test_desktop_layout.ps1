@@ -14,12 +14,13 @@ param(
     [switch]$OverlayColorsOnly,
     [switch]$CaptureNavigationOnly,
     [switch]$WelcomeOnly,
+    [switch]$CaptionOnly,
     [string]$SourcePath,
     [string]$AutoHotkey = 'C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe',
     [string]$OutputDirectory = (Join-Path ([IO.Path]::GetTempPath()) ('jrpg-desktop-tests-' + [Guid]::NewGuid().ToString('N')))
 )
 $ErrorActionPreference = 'Stop'
-if (@($StudyOnly, $DialogsOnly, $ShutdownOnly, $ResizeOnly, $AudioFeedbackOnly, $ProfileFeedbackOnly, $ChapterOnly, $PromptUnsavedOnly, $GenerationActivityOnly, $MessageNavigationOnly, $ProfileSelectionOnly, $ProfileSwitchOnly, $OverlayColorsOnly, $CaptureNavigationOnly, $WelcomeOnly).Where({ [bool]$_ }).Count -gt 1) {
+if (@($StudyOnly, $DialogsOnly, $ShutdownOnly, $ResizeOnly, $AudioFeedbackOnly, $ProfileFeedbackOnly, $ChapterOnly, $PromptUnsavedOnly, $GenerationActivityOnly, $MessageNavigationOnly, $ProfileSelectionOnly, $ProfileSwitchOnly, $OverlayColorsOnly, $CaptureNavigationOnly, $WelcomeOnly, $CaptionOnly).Where({ [bool]$_ }).Count -gt 1) {
     throw 'Choose only one focused test mode.'
 }
 $repo = Split-Path -Parent $PSScriptRoot
@@ -551,6 +552,9 @@ foreach ($fixture in @(@('landscape', 720, 540), @('wide', 1600, 200), @('portra
 # Native wheel bursts are delivered only to the synthetic GUI and its controls.
 $uiGlobals = [regex]::Matches($source.Substring(0, $source.IndexOf('CPRegisterCanvasMessages() {')), '(?m)^global CP[^\r\n]*') | ForEach-Object { $_.Value }
 $harness = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'desktop_layout_harness.ahk'))
+$appVersionDeclaration = [regex]::Match($source, '(?m)^global APP_VERSION := "[^"\r\n]+"').Value
+if (!$appVersionDeclaration) { throw 'Missing application version declaration.' }
+$harness = $harness.Replace('; @APP_VERSION@', $appVersionDeclaration)
 $captureSource = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'bigbox_navigation_harness.ahk'))
 $capture = [regex]::Match($captureSource, '(?ms)^TestCapture\(.*?^}').Value.Replace('CPBigBoxGui', 'ui')
 $capture = $capture.Replace('SendMessage(0x0317, dc, 0x1C, ui.Hwnd)', 'DllCall("user32\PrintWindow", "ptr", ui.Hwnd, "ptr", dc, "uint", 1)')
@@ -688,6 +692,12 @@ if ($ShutdownOnly) {
     $generated = $generated.Replace('; @STUDY_ONLY@', 'DesktopTestExitWithLiveWindow()')
 }
 if ($WelcomeOnly) {
+    if (!$source.Contains('global BEGINNER_VIDEO_URL := "https://www.youtube.com/watch?v=BUM4VEnBtv4&t=292s"')) {
+        throw 'The beginner video must start at the general setup chapter (4:52).'
+    }
+    if (!$source.Contains('global STUDY_VIDEO_URL := "https://www.youtube.com/watch?v=BUM4VEnBtv4&t=3060s"')) {
+        throw 'The Study video must start at the Study Library chapter (51:00).'
+    }
     if (!$source.Contains('global WRITTEN_GUIDE_URL := PROJECT_URL "/blob/main/docs/manual/README.md"')) {
         throw 'The written-guide link must open the manual landing page.'
     }
@@ -699,11 +709,14 @@ if ($WelcomeOnly) {
     # Exercise real welcome events and page selection in offscreen windows.
     # Suppress only foreground activation and external browser launches.
     $isolatedSource = $source
-    foreach ($name in @('ShowWelcomeDialog', 'ShowStudyLibraryWelcome', 'OpenWelcomeApiKeys', 'OpenAboutUrl')) {
+    foreach ($name in @('ShowWelcomeDialog', 'ShowStudyLibraryWelcome', 'OpenWelcomeApiKeys', 'OpenAboutUrl', 'OpenStudyLibraryWelcomeAnkiConnect')) {
         $body = [regex]::Match($source, '(?ms)^' + $name + '\(.*?^}').Value
         if (!$body) { throw "Missing welcome function: $name" }
         if ($name -eq 'OpenAboutUrl') {
             $replacement = "OpenAboutUrl(url, description, *) {`r`n    TestWelcomeOpenUrl(url, description)`r`n}"
+        } elseif ($name -eq 'OpenStudyLibraryWelcomeAnkiConnect') {
+            $replacement = $body.Replace('Run("https://ankiweb.net/shared/info/2055492159")',
+                'TestWelcomeOpenUrl("https://ankiweb.net/shared/info/2055492159", "AnkiConnect")')
         } else {
             $replacement = $body.Replace('WinActivate(', 'TestWelcomeActivate(').
                 Replace('StudyDesktopDialogShow(state, 880, 720, state["controls"]["apiKeys"])', 'DesktopDialogFixtureShow(state, 880, 720)').
@@ -713,6 +726,10 @@ if ($WelcomeOnly) {
         $isolatedSource = $isolatedSource.Replace($body, $replacement)
     }
     [IO.File]::WriteAllText((Join-Path $output.FullName 'JRPG Translator.ahk'), $isolatedSource, [Text.UTF8Encoding]::new($true))
+}
+if ($CaptionOnly) {
+    $generated = $generated.Replace('; @STUDY_ONLY@', 'TestStudyCaptionControls()' + "`r`n" + '    SetTimer(CPDesktopRefreshStatus, 0)' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " study caption assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
+    $generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'study_caption_harness.ahk'))
 }
 if ($DialogsOnly) {
     $generated = $generated.Replace('; @STUDY_ONLY@', 'TestDesktopStudyDialogs()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " desktop dialog assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
@@ -790,7 +807,7 @@ if (Test-Path -LiteralPath $namingBounds) {
     }
     Write-Output "PASS: $namingChecks naming-control visibility checks."
 }
-if ($StudyOnly -or $ShutdownOnly -or $DialogsOnly -or $ResizeOnly -or $AudioFeedbackOnly -or $ProfileFeedbackOnly -or $ChapterOnly -or $PromptUnsavedOnly -or $GenerationActivityOnly -or $MessageNavigationOnly -or $ProfileSelectionOnly -or $ProfileSwitchOnly -or $OverlayColorsOnly -or $CaptureNavigationOnly -or $WelcomeOnly) {
+if ($StudyOnly -or $ShutdownOnly -or $DialogsOnly -or $ResizeOnly -or $AudioFeedbackOnly -or $ProfileFeedbackOnly -or $ChapterOnly -or $PromptUnsavedOnly -or $GenerationActivityOnly -or $MessageNavigationOnly -or $ProfileSelectionOnly -or $ProfileSwitchOnly -or $OverlayColorsOnly -or $CaptureNavigationOnly -or $WelcomeOnly -or $CaptionOnly) {
     Write-Output $result.Trim()
     Write-Output "Test artifacts: $output"
     return

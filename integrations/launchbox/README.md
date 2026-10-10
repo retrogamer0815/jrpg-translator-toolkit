@@ -1,9 +1,12 @@
 # JRPG Translator LaunchBox / Big Box Integration
 
-This preview plugin integrates JRPG Translator and JoyToKey with LaunchBox and
+This optional plugin integrates JRPG Translator and JoyToKey with LaunchBox and
 Big Box on a per-game basis.
 
-Companion source snapshot: JRPG Translator v0.9.5.
+Version 1.0.0, for JRPG Translator 1.0.0.
+
+For installation and everyday use, see the [packaged user guide](README.package.md)
+or the [illustrated online manual](https://github.com/retrogamer0815/jrpg-translator-toolkit/blob/main/docs/manual/10-launchbox-and-big-box.md).
 
 Current behavior:
 
@@ -54,7 +57,7 @@ is not in the automatically detected location.
 
 ## Build From Source
 
-Building requires the .NET 9 SDK and a local LaunchBox installation. The script
+Building requires the .NET 10 SDK and a local LaunchBox installation. The script
 checks `LAUNCHBOX_ROOT`, the common `%USERPROFILE%\LaunchBox` location, or an
 explicit `-LaunchBoxRoot` argument.
 
@@ -70,7 +73,7 @@ runs a self-contained smoke test that does not use personal JoyToKey profiles.
 Create an installable ZIP with:
 
 ```powershell
-.\package.ps1 -Version 0.1.0-preview
+.\package.ps1 -Version 1.0.0
 ```
 
 Generated DLLs, ZIPs, logs, local plugin data, and machine-specific paths are

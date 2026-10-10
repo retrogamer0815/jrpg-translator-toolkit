@@ -2,7 +2,7 @@ param(
     [string]$LaunchBoxRoot = $env:LAUNCHBOX_ROOT,
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
-    [string]$Version = "0.1.0-preview",
+    [string]$Version = "1.0.0",
     [switch]$IncludeSymbols,
     [switch]$SkipTests
 )
@@ -40,7 +40,7 @@ if ($IncludeSymbols) {
         Copy-Item -LiteralPath $pdbFile -Destination $packageDir
     }
 }
-Copy-Item -LiteralPath (Join-Path $projectDir "README.md") -Destination $packageDir
+Copy-Item -LiteralPath (Join-Path $projectDir "README.package.md") -Destination (Join-Path $packageDir "README.md")
 
 if (Test-Path -LiteralPath $archivePath) {
     Remove-Item -LiteralPath $archivePath -Force

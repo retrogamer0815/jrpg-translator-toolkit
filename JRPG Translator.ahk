@@ -2,7 +2,7 @@
 #SingleInstance Off
 #Warn
 #NoTrayIcon
-;@Ahk2Exe-SetVersion 0.9.9.0
+;@Ahk2Exe-SetVersion 1.0.0.0
 ;@Ahk2Exe-SetName JRPG Translator
 ;@Ahk2Exe-SetDescription JRPG Translator
 ;@Ahk2Exe-SetCopyright Copyright (c) 2025 retrogamer0815
@@ -80,13 +80,13 @@ global CPBigBoxFocusFrame := Map("key", "", "rect", "", "thickness", 3, "parts",
 global CPBigBoxPaintButtons := Map()
 global CPBigBoxPaintRegistered := false
 global GameProfileLastError := ""
-global APP_VERSION := "0.9.9-testing.1"
+global APP_VERSION := "1.0.0"
 global PROJECT_URL := "https://github.com/retrogamer0815/jrpg-translator-toolkit"
 global BUG_REPORT_URL := PROJECT_URL "/issues/new"
 global WRITTEN_GUIDE_URL := PROJECT_URL "/blob/main/docs/manual/README.md"
 global STUDY_WRITTEN_GUIDE_URL := PROJECT_URL "/blob/main/docs/manual/11-study-library.md"
-global BEGINNER_VIDEO_URL := "https://youtu.be/pdZ0fBS8COc"
-global STUDY_VIDEO_URL := "https://youtu.be/kKdD3X8bjsU"
+global BEGINNER_VIDEO_URL := "https://www.youtube.com/watch?v=BUM4VEnBtv4&t=292s"
+global STUDY_VIDEO_URL := "https://www.youtube.com/watch?v=BUM4VEnBtv4&t=3060s"
 for __cpIndex, __cpArg in A_Args {
     __cpArgLower := StrLower(__cpArg)
     if (__cpArgLower = "--background") {
@@ -2490,7 +2490,7 @@ CPThemeMeasureItem(wParam, lParam, msg, parentHwnd) {
 
 CPThemeDrawItem(wParam, lParam, msg, parentHwnd) {
     global ui, controlDarkMode, CPThemeBrushSurface, CPThemeBrushFocus
-        , CPThemedPopupButtons, CPComboSeparatorBefore
+        , CPThemedPopupButtons, CPComboSeparatorBefore, CPDesktopNativePaintHwnds
     if !lParam
         return
     if CPDesktopActive() && CPDesktopDrawItem(lParam)
@@ -2501,6 +2501,9 @@ CPThemeDrawItem(wParam, lParam, msg, parentHwnd) {
     if (cpDrawType = 4) { ; ODT_BUTTON
         cpButtonHwndOffset := (A_PtrSize = 8) ? 24 : 20
         cpButtonHwnd := NumGet(lParam, cpButtonHwndOffset, "ptr")
+        if CPDesktopNativePaintHwnds.Has(cpButtonHwnd)
+            && CPDesktopNativePaintHwnds[cpButtonHwnd].Has("paintState")
+            return CPDesktopDrawItem(lParam, CPDesktopNativePaintHwnds[cpButtonHwnd]["paintState"])
         if cpButtonHwnd && IsSet(CPThemedPopupButtons)
             && IsObject(CPThemedPopupButtons)
             && CPThemedPopupButtons.Has(cpButtonHwnd)
@@ -22365,8 +22368,6 @@ StudyDesktopRegister(state, kind, minW := 960, minH := 700) {
         for message in [0x24, 0x2B, 0x133, 0x134, 0x135, 0x138, 0x14, 0x84, 0x82]
             OnMessage(message, StudyDesktopWindowMessage, -1)
         OnMessage(0x84, StudyDesktopLabelHitTest)
-        OnMessage(0x200, StudyDesktopCaptionMouse)
-        OnMessage(0x2A3, StudyDesktopCaptionMouse)
         exitRegistered := true
     }
     dlg := state["gui"]
@@ -23454,32 +23455,12 @@ StudyDesktopShutdown(*) {
     }
     StudyDesktopRegistry().Clear()
     OnMessage(0x84, StudyDesktopLabelHitTest, 0)
-    OnMessage(0x200, StudyDesktopCaptionMouse, 0)
-    OnMessage(0x2A3, StudyDesktopCaptionMouse, 0)
 }
 
 StudyDesktopLabelHitTest(wParam, lParam, msg, hwnd) {
     d := StudyDesktopContext(hwnd)
     if IsObject(d) && (hwnd = d["chrome"]["brand"].Hwnd || (d["kind"] = "reader" && hwnd = d["chrome"]["library"].Hwnd))
         return -1 ; Header labels do not intercept native dragging.
-}
-
-StudyDesktopCaptionMouse(wParam, lParam, msg, hwnd) {
-    d := StudyDesktopContext(hwnd)
-    if !IsObject(d) || !d["paint"].Has(hwnd) || d["paint"][hwnd]["kind"] != "caption"
-        return
-    next := msg = 0x2A3 ? 0 : hwnd, previous := d["hover"]
-    if next = previous
-        return
-    d["hover"] := next
-    if previous
-        try GuiCtrlFromHwnd(previous).Redraw()
-    if next {
-        GuiCtrlFromHwnd(next).Redraw()
-        track := Buffer(A_PtrSize = 8 ? 24 : 16, 0)
-        NumPut("uint", track.Size, "uint", 2, "ptr", hwnd, track)
-        DllCall("user32\TrackMouseEvent", "ptr", track)
-    }
 }
 
 StudyDesktopWindowAction(state, action, *) {
@@ -30305,15 +30286,17 @@ ShowStudyLibraryWelcome(slState, *) {
         "Don't show this introduction again"
     )
     btnStudyVideo := dlg.Add(
-        "Button", "xm y+20 w150", "Watch Study Guide"
-    )
-    btnAnkiConnect := dlg.Add(
-        "Button", "x+10 yp w165", "Open AnkiConnect Page"
+        "Button", "xm y+20 w150", "Watch Video Guide"
     )
     btnWrittenGuide := dlg.Add(
         "Button", "x+10 yp w180", "Open Written Guide"
     )
+    btnAnkiConnect := dlg.Add(
+        "Button", "x+10 yp w165", "Open AnkiConnect Page"
+    )
     btnContinue := dlg.Add("Button", "x+10 yp w110 Default", "Continue")
+    CPDesktopPrepareNativePaint(btnContinue, "button",
+        Map("ctrl", btnContinue, "kind", "primary", "surface", "window", "nativeDialog", true))
 
     CPStudyLibraryWelcomeDialog := Map(
         "gui", dlg,
@@ -39207,7 +39190,7 @@ CPDesktopRegisterInputField(page, key, ctrl, viewName := "") {
 ; Keep the native checkbox and UpDown input semantics, but replace the two
 ; remaining bright Windows frames with the same restrained desktop palette as
 ; the app's rounded fields and buttons.
-CPDesktopPrepareNativePaint(ctrl, kind) {
+CPDesktopPrepareNativePaint(ctrl, kind, paint := 0) {
     global CPDesktopNativePaintHwnds, CPDesktopNativePaintCallback
     if !IsObject(ctrl) || !ctrl.Hwnd || CPDesktopNativePaintHwnds.Has(ctrl.Hwnd)
         return false
@@ -39220,6 +39203,14 @@ CPDesktopPrepareNativePaint(ctrl, kind) {
     CPDesktopNativePaintHwnds[ctrl.Hwnd] := Map("proc", originalProc, "kind", kind)
     if kind = "button"
         CPDesktopNativePaintHwnds[ctrl.Hwnd]["defaultButton"] := (DllCall("user32\GetWindowLongPtr", "ptr", ctrl.Hwnd, "int", -16, "ptr") & 0xF) = 1
+    if kind = "button" && IsObject(paint) {
+        ; Native dialogs can reuse the desktop primary-button renderer without
+        ; joining its layout registry. The subclass retains Enter/controller A
+        ; semantics and removes this paint state when the button is destroyed.
+        CPDesktopNativePaintHwnds[ctrl.Hwnd]["paintState"] := Map("paint", Map(ctrl.Hwnd, paint))
+        style := DllCall("user32\GetWindowLongPtr", "ptr", ctrl.Hwnd, "int", -16, "ptr")
+        DllCall("user32\SetWindowLongPtr", "ptr", ctrl.Hwnd, "int", -16, "ptr", (style & ~0xF) | 0xB, "ptr")
+    }
     DllCall("user32\InvalidateRect", "ptr", ctrl.Hwnd, "ptr", 0, "int", 1)
     return true
 }
@@ -40140,7 +40131,7 @@ CPDesktopCreateOrganizePages() {
     titles := Map(6, [["rules", "Terminology overrides"], ["local", "Local corrections"], ["model", "Model instructions"]],
         7, [["saved", "Saved profiles"], ["startup", "Startup overlays"], ["included", "What a profile includes"]],
         8, [["bindings", "Input bindings"], ["controller", "Controller options"]],
-        9, [["windows", "Windows environment variables"], ["keys", "In-app API keys"]])
+        9, [["gettingStarted", "Getting started"], ["windows", "Save on this PC"], ["keys", "Save with the app"]])
     for page, headings in titles {
         tab.UseTab(page)
         CPDesktop["organizePanels"][page] := []
@@ -40177,8 +40168,16 @@ CPDesktopCreateOrganizePages() {
     for action in hotkeyActions
         CPDesktopOrganizeLabel(8, "action_" action, hotkeyLabels[action])
     tab.UseTab(9)
-    CPDesktopOrganizeLabel(9, "windowsHelp", "Keep keys outside the app's .env file. In Windows User variables, add GEMINI_API_KEY and/or OPENAI_API_KEY, then restart JRPG Translator. Environment variables are not an encrypted secret vault.")
-    CPDesktopOrganizeLabel(9, "keysHelp", "Optional: save keys as plain text in Settings\.env. Turning off in-app entry does not delete an existing .env file; use Delete .env to remove it.")
+    CPDesktopOrganizeLabel(9, "introHelp", "Choose one of the two ways below to save your API keys: keep them on this PC, or take them with the app. One method is enough. You only need a key for the provider you want to use.")
+    CPDesktopOrganizeLabel(9, "providerHelp", "Need a key? Get one from Google (Gemini) or OpenAI using the links below. As of October 2026, Google offers a free tier for selected Gemini models, useful for trying the tool. Availability and usage limits apply; check the current free-tier details.")
+    CPDesktopOrganizeButton(9, "getGeminiKey", "Get a Gemini key…",
+        OpenAboutUrl.Bind("https://aistudio.google.com/apikey", "Google AI Studio"), "link")
+    CPDesktopOrganizeButton(9, "getOpenAIKey", "Get an OpenAI key…",
+        OpenAboutUrl.Bind("https://platform.openai.com/api-keys", "OpenAI API keys"), "link")
+    CPDesktopOrganizeButton(9, "geminiPricing", "Gemini free-tier details…",
+        OpenAboutUrl.Bind("https://ai.google.dev/gemini-api/docs/pricing", "Gemini pricing and free-tier details"), "link")
+    CPDesktopOrganizeLabel(9, "windowsHelp", "Recommended if you use one PC: Windows keeps the keys outside the app folder, so copying or sharing that folder does not copy your keys. Open Windows environment variables below. Under User variables, add GEMINI_API_KEY for Gemini or OPENAI_API_KEY for OpenAI, paste your key as the value, then restart JRPG Translator. These keys stay on this PC; they are not encrypted.")
+    CPDesktopOrganizeLabel(9, "keysHelp", "Convenient for portable use, such as taking the app to another PC on a USB stick. Enable entry below, paste your key and select Save keys. Keys are saved as unencrypted text in Settings\.env and travel with the app folder. Keep that folder private. Unchecking the box does not remove saved keys; use Delete .env to remove them.")
     CPDesktopOrganizeLabel(9, "gemini", "Gemini API key")
     CPDesktopOrganizeLabel(9, "openai", "OpenAI API key")
 }
@@ -40350,6 +40349,22 @@ CPDesktopLayoutBindings(p, px, y, pw, stops) {
 CPDesktopLayoutApiKeys(p, px, y, pw, stops) {
     global cbApiInApp, eGemini, eOpenAI, btnSaveEnv, btnDelEnv, btnOpenEnvVars
     x := px + 20, cw := pw - 40, start := y
+    CPDesktopPlace(p["gettingStarted"], x, y + 18, cw, 28)
+    y := CPDesktopOrganizeHelp(p["introHelp"], x, y + 58, cw) + 12
+    y := CPDesktopOrganizeHelp(p["providerHelp"], x, y, cw) + 10
+    nextX := x
+    for spec in [["getGeminiKey", 184], ["getOpenAIKey", 184], ["geminiPricing", 208]] {
+        if nextX > x && nextX + spec[2] > x + cw {
+            nextX := x
+            y += 42
+        }
+        CPDesktopPlace(p[spec[1]], nextX, y, spec[2], 34)
+        nextX += spec[2] + 12
+        stops.Push(p[spec[1]])
+    }
+    y += 54
+    CPDesktopPlace(p["gettingStartedPanel"], px, start, pw, y - start)
+    start := y + 16, y := start
     CPDesktopPlace(p["windows"], x, y + 18, cw, 28)
     y := CPDesktopOrganizeHelp(p["windowsHelp"], x, y + 58, cw) + 14
     btnOpenEnvVars.Text := "Open environment variables…"
@@ -41073,29 +41088,46 @@ CPDesktopWindowAction(action, *) {
         PostMessage(0x10, 0, 0, ui.Hwnd) ; Use the same close/unsaved-settings handler as Alt+F4.
 }
 
-CPDesktopCaptionHover(wParam, lParam, msg, hwnd) {
+CPDesktopCaptionContext(hwnd) {
     global CPDesktop
-    if !CPDesktopActive() || !CPDesktop["paint"].Has(hwnd)
+    ; Route every custom title bar through the same mouse handling, while
+    ; keeping hover state local to the main window or the owning Study window.
+    d := CPDesktopActive() && CPDesktop["paint"].Has(hwnd)
+        ? CPDesktop : StudyDesktopContext(hwnd)
+    return IsObject(d) && d["paint"].Has(hwnd) && d["paint"][hwnd]["kind"] = "caption" ? d : 0
+}
+
+CPDesktopCaptionHover(wParam, lParam, msg, hwnd) {
+    d := CPDesktopCaptionContext(hwnd)
+    if !IsObject(d) || d["hover"] = hwnd
         return
-    spec := CPDesktop["paint"][hwnd]
-    if spec["kind"] != "caption" || CPDesktop["hover"] = hwnd
-        return
-    previous := CPDesktop["hover"]
-    CPDesktop["hover"] := hwnd
+    previous := d["hover"]
+    d["hover"] := hwnd
     if previous
-        try GuiCtrlFromHwnd(previous).Redraw()
-    spec["ctrl"].Redraw()
+        CPDesktopRedrawCaption(previous)
+    CPDesktopRedrawCaption(hwnd)
     track := Buffer(A_PtrSize = 8 ? 24 : 16, 0)
     NumPut("uint", track.Size, "uint", 2, "ptr", hwnd, track) ; TME_LEAVE
     DllCall("user32\TrackMouseEvent", "ptr", track)
 }
 
 CPDesktopCaptionLeave(wParam, lParam, msg, hwnd) {
-    global CPDesktop
-    if !CPDesktopActive() || CPDesktop["hover"] != hwnd
+    d := CPDesktopCaptionContext(hwnd)
+    ; A queued leave from the previous button must not clear the current one.
+    if !IsObject(d) || d["hover"] != hwnd
         return
-    CPDesktop["hover"] := 0
-    try GuiCtrlFromHwnd(hwnd).Redraw()
+    d["hover"] := 0
+    CPDesktopRedrawCaption(hwnd)
+}
+
+CPDesktopRedrawCaption(hwnd) {
+    ; GuiCtrl.Redraw invalidates through the parent. Study windows deliberately
+    ; use WS_CLIPCHILDREN without WS_EX_COMPOSITED, so that parent redraw does
+    ; not repaint the owner-drawn caption button. Target the child HWND itself
+    ; and finish its small paint now, on both mouse enter and mouse leave.
+    if hwnd && DllCall("user32\IsWindow", "ptr", hwnd)
+        DllCall("user32\RedrawWindow", "ptr", hwnd, "ptr", 0, "ptr", 0,
+            "uint", 0x0001 | 0x0100) ; RDW_INVALIDATE | RDW_UPDATENOW
 }
 
 CPDesktopDrawCaptionGlyph(dc, action, l, t, r, b, scale, hex, frameHwnd := 0) {
@@ -41667,7 +41699,7 @@ CPDesktopDrawItem(data, drawState := 0) {
     ; outline behind after every mouse activation.
     focused := (state & 0x10) != 0 && (state & 0x200) = 0
     disabled := (state & 6) != 0
-    surface := colors[paint["surface"]]
+    surface := paint.Get("nativeDialog", false) ? CPPalette()["window"] : colors[paint["surface"]]
     DllCall("user32\FillRect", "ptr", dc, "ptr", rect, "ptr", CPDesktopBrush(surface))
     textColor := colors[disabled ? "muted" : "text"]
     if kind = "panel" || kind = "sidebar" || kind = "bar" {

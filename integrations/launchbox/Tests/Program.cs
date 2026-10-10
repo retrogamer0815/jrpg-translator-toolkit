@@ -2,19 +2,32 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
 using System.Xml.Serialization;
 using System.Windows;
 using System.Windows.Controls;
 using JrpgTranslator.LaunchBox;
 using Unbroken.LaunchBox.Plugins;
 
-// Companion source snapshot: JRPG Translator v0.9.5.
+// Release packaging and behavior checks for JRPG Translator 1.0.0.
 
 internal static class Program
 {
     [STAThread]
     private static int Main(string[] args)
     {
+        Assembly pluginAssembly = typeof(GameSetupMenuItem).Assembly;
+        Require(pluginAssembly.GetName().Version == new Version(1, 0, 0, 0),
+            "The plugin assembly version must be 1.0.0.0.");
+        Require(pluginAssembly.GetCustomAttribute<AssemblyFileVersionAttribute>()?.Version == "1.0.0.0",
+            "The plugin file version must be 1.0.0.0.");
+        Require(pluginAssembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion == "1.0.0",
+            "The plugin product version must be 1.0.0 without a preview suffix.");
+#if !DEBUG
+        TestReleaseBuildPaths(pluginAssembly.Location);
+#endif
+
         string profileDirectory = Path.Combine(
             Path.GetTempPath(),
             "JrpgTranslatorLaunchBoxSmokeTest",
@@ -317,6 +330,37 @@ internal static class Program
         Require(emptyProfile.Items.Count == 1 && emptyProfile.SelectedIndex == 0 && emptyProfile.IsEnabled,
             "None must be available even when no Profiles have been created.");
         emptyWindow.Close();
+    }
+
+    private static void TestReleaseBuildPaths(string assemblyPath)
+    {
+        const string mappedRoot = "/_/";
+        using FileStream assemblyStream = File.OpenRead(assemblyPath);
+        using PEReader executable = new PEReader(assemblyStream);
+        DebugDirectoryEntry[] entries = executable.ReadDebugDirectory()
+            .Where(entry => entry.Type == DebugDirectoryEntryType.CodeView).ToArray();
+        Require(entries.Length == 1, "The release DLL must retain one debug-symbol reference.");
+        string debugPath = executable.ReadCodeViewDebugDirectoryData(entries[0]).Path.Replace('\\', '/');
+        Require(debugPath.StartsWith(mappedRoot, StringComparison.Ordinal),
+            "The release DLL must use a neutral debug path, not a developer's local directory.");
+
+        using FileStream symbolStream = File.OpenRead(Path.ChangeExtension(assemblyPath, ".pdb"));
+        using MetadataReaderProvider symbols = MetadataReaderProvider.FromPortablePdbStream(symbolStream);
+        MetadataReader reader = symbols.GetMetadataReader();
+        Require(reader.Documents.Count > 0, "The release symbols must contain source documents.");
+        foreach (DocumentHandle handle in reader.Documents)
+        {
+            string sourcePath = reader.GetString(reader.GetDocument(handle).Name).Replace('\\', '/');
+            Require(sourcePath.StartsWith(mappedRoot, StringComparison.Ordinal),
+                "Release source documents must use neutral paths instead of personal build paths.");
+        }
+        // Source Link metadata must also be normalized, not just document names.
+        string symbolContent = System.Text.Encoding.UTF8.GetString(
+            File.ReadAllBytes(Path.ChangeExtension(assemblyPath, ".pdb")));
+        Require(!System.Text.RegularExpressions.Regex.IsMatch(symbolContent,
+            @"[A-Za-z]:[\\/]+Users[\\/]+", System.Text.RegularExpressions.RegexOptions.IgnoreCase),
+            "Release symbols must not embed Windows user-directory paths in their metadata.");
+        Console.WriteLine("Release DLL and symbol paths use the neutral build root.");
     }
 
     private static T PrivateField<T>(GameSetupWindow window, string name) where T : class

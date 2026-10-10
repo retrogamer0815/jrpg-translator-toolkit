@@ -5,6 +5,18 @@ TestWelcomeGuide() {
     TestWelcomeUrls := [], TestWelcomeActivation := ""
     ui.Show("NA x-12000 y-12000 w1120 h760")
     TestHelpDialogs(Map("gui", ui))
+    ; Exercise the real Settings link callbacks without opening a browser or
+    ; reading the user's credentials. This harness uses synthetic settings.
+    CPDesktopNavigate(9)
+    apiPage := CPDesktop["organizePages"][9]
+    for spec in [["getGeminiKey", "https://aistudio.google.com/apikey"],
+        ["getOpenAIKey", "https://platform.openai.com/api-keys"],
+        ["geminiPricing", "https://ai.google.dev/gemini-api/docs/pricing"]] {
+        urlsBefore := TestWelcomeUrls.Length
+        TestWelcomeClick(apiPage[spec[1]])
+        DesktopAssert(TestWelcomeUrls.Length = urlsBefore + 1 && TestWelcomeUrls[-1] = spec[2],
+            "API setup link opens its official provider page: " spec[1])
+    }
 
     for dark in [1, 0] {
         controlDarkMode := dark
@@ -93,6 +105,7 @@ TestWelcomeGuide() {
 TestStudyWelcomeGuide() {
     global ui, iniPath, CPStudyLibraryWelcomeDialog, controlDarkMode
     global STUDY_VIDEO_URL, STUDY_WRITTEN_GUIDE_URL, PROJECT_URL, TestWelcomeUrls
+    global CPDesktopNativePaintHwnds
     STUDY_VIDEO_URL := "https://example.invalid/study-video"
     STUDY_WRITTEN_GUIDE_URL := PROJECT_URL "/blob/main/docs/manual/11-study-library.md"
     owner := Map("gui", ui)
@@ -101,7 +114,7 @@ TestStudyWelcomeGuide() {
         IniWrite(0, iniPath, "study_library", "welcomeDismissed")
         ShowStudyLibraryWelcome(owner)
         welcome := CPStudyLibraryWelcomeDialog, g := welcome["gui"], hwnd := g.Hwnd
-        expected := ["Watch Study Guide", "Open AnkiConnect Page", "Open Written Guide", "Continue"]
+        expected := ["Watch Video Guide", "Open Written Guide", "Open AnkiConnect Page", "Continue"]
         buttons := []
         for ctrl in g
             if ctrl.Type = "Button"
@@ -118,26 +131,40 @@ TestStudyWelcomeGuide() {
         }
         DesktopAssert(StudyControllerFocusedHwnd(hwnd) = buttons[4].Hwnd,
             "Study welcome initially focuses Continue")
+        continueHwnd := buttons[4].Hwnd
+        DesktopAssert(CPDesktopNativePaintHwnds.Has(continueHwnd)
+            && CPDesktopNativePaintHwnds[continueHwnd]["paintState"]["paint"][continueHwnd]["kind"] = "primary",
+            "Study Continue uses the shared blue primary-button renderer")
+        for ctrl in [buttons[1], buttons[2], buttons[3], buttons[4]] {
+            ctrl.Focus()
+            CPApplyOwnedDialogTheme(g)
+            DesktopAssert((DllCall("user32\GetWindowLongPtr", "ptr", continueHwnd, "int", -16, "ptr") & 0xF) = 0xB,
+                "Continue retains its blue owner-drawn style after focus and theme changes")
+        }
+        DesktopAssert((SendMessage(0x87, 0, 0, continueHwnd) & 0x10) != 0,
+            "Painted Continue retains default-button Enter/controller A semantics")
         urlsBefore := TestWelcomeUrls.Length
-        TestWelcomeClick(buttons[1]), TestWelcomeClick(buttons[3])
-        DesktopAssert(TestWelcomeUrls.Length = urlsBefore + 2
+        TestWelcomeClick(buttons[1]), TestWelcomeClick(buttons[2]), TestWelcomeClick(buttons[3])
+        DesktopAssert(TestWelcomeUrls.Length = urlsBefore + 3
             && TestWelcomeUrls[urlsBefore + 1] = STUDY_VIDEO_URL
-            && TestWelcomeUrls[urlsBefore + 2] = STUDY_WRITTEN_GUIDE_URL,
-            "Study guide buttons open the video and the Study Library manual chapter")
+            && TestWelcomeUrls[urlsBefore + 2] = STUDY_WRITTEN_GUIDE_URL
+            && TestWelcomeUrls[urlsBefore + 3] = "https://ankiweb.net/shared/info/2055492159",
+            "Reordered Study guide buttons open the video, written guide, and AnkiConnect page")
         DesktopAssert(DllCall("user32\IsWindowVisible", "ptr", hwnd)
             && IniRead(iniPath, "study_library", "welcomeDismissed", -1) = 0,
             "Opening Study guides keeps the welcome window and preference unchanged")
-        if dark {
-            g.GetClientPos(,, &pixelW, &pixelH)
-            dpi := GetWindowDPI(hwnd) / 96
-            TestDesktopStudyCapture(g, "help-study-welcome.png", Round(pixelW * dpi), Round(pixelH * dpi))
-        }
+        g.GetClientPos(,, &pixelW, &pixelH)
+        dpi := GetWindowDPI(hwnd) / 96
+        TestDesktopStudyCapture(g, dark ? "help-study-welcome.png" : "help-study-welcome-light.png",
+            Round(pixelW * dpi), Round(pixelH * dpi))
         welcome["dontShowAgain"].Value := 0
         TestWelcomeClick(buttons[4])
         DesktopAssert(!DllCall("user32\IsWindow", "ptr", hwnd)
             && !IsObject(CPStudyLibraryWelcomeDialog)
             && IniRead(iniPath, "study_library", "welcomeDismissed", -1) = 0,
             "Continue closes Study welcome without suppressing an unchecked introduction")
+        DesktopAssert(!CPDesktopNativePaintHwnds.Has(continueHwnd),
+            "Closing Study welcome releases its button painting state")
         ShowStudyLibraryWelcome(owner)
         g := CPStudyLibraryWelcomeDialog["gui"], hwnd := g.Hwnd
         CPStudyLibraryWelcomeDialog["dontShowAgain"].Value := 1
