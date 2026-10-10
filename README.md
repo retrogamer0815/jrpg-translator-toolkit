@@ -94,13 +94,13 @@ view. Click either image to view it at full size.
   </tr>
   <tr>
     <td>
-      <a href="docs/media/study-library.png">
-        <img src="docs/media/study-library.png" alt="Searchable Study Library with saved explanations, source screenshots, metadata, and Anki status">
+      <a href="docs/manual/images/study-library-overview.png">
+        <img src="docs/manual/images/study-library-overview.png" alt="Searchable Study Library with saved explanations, source screenshots, metadata, and Anki status">
       </a>
     </td>
     <td>
-      <a href="docs/media/study-reader.png">
-        <img src="docs/media/study-reader.png" alt="Study Reader showing a Japanese explanation beside its source screenshot and context">
+      <a href="docs/manual/images/study-reader.png">
+        <img src="docs/manual/images/study-reader.png" alt="Study Reader showing a Japanese explanation beside its source screenshot and context">
       </a>
     </td>
   </tr>
@@ -117,13 +117,13 @@ checking the editable card preview.
   </tr>
   <tr>
     <td>
-      <a href="docs/media/review-for-anki-v095.png">
-        <img src="docs/media/review-for-anki-v095.png" alt="Review for Anki window with AI-ranked sentence candidates from the Study Library">
+      <a href="docs/manual/images/candidate-review.png">
+        <img src="docs/manual/images/candidate-review.png" alt="Review for Anki window with AI-ranked sentence candidates from the Study Library">
       </a>
     </td>
     <td>
-      <a href="docs/media/add-explanation-to-anki-v095.png">
-        <img src="docs/media/add-explanation-to-anki-v095.png" alt="Editable Anki card preview with Japanese text, explanation, destination deck, and source screenshot">
+      <a href="docs/manual/images/card-preview-and-explicit-add.png">
+        <img src="docs/manual/images/card-preview-and-explicit-add.png" alt="Editable Anki card preview with Japanese text, explanation, destination deck, and source screenshot">
       </a>
     </td>
   </tr>
