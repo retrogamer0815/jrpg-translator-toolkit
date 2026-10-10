@@ -4,7 +4,7 @@
 
 The supplied screenshots illustrate **28 of 28 topics: all complete, with no outstanding screenshot placeholders**. No nonexistent image is embedded.
 
-S05 is an annotated overview based on the supplied S07 screenshot; the unannotated original is retained. S03c is a privacy-redacted derivative of the supplied Windows dialog screenshot. All other published images are the supplied screenshots, unmodified, including the user's red highlights in S06c–S06e. Click an image filename below to inspect the published asset. Screenshot coverage last updated: 7 October 2026.
+S05 is an annotated overview based on the supplied S07 screenshot; the unannotated original is retained. S03c is a privacy-redacted derivative of the supplied Windows dialog screenshot. All other published images are the supplied screenshots, unmodified, including the user's red highlights in S06c–S06e. Click an image filename below to inspect the published asset. S27b shows an imported flashcard in Anki for Windows, with HTML section links and the embedded source game screenshot. Screenshot coverage last updated: 10 October 2026.
 
 ## Capture guidelines
 
@@ -48,7 +48,7 @@ S05 is an annotated overview based on the supplied S07 screenshot; the unannotat
 | S24 | Complete | [Study Reader](11-study-library.md) | [study-reader.png](images/study-reader.png) | Added: Japanese source, translation/analysis, version and section navigation, and screenshot context. |
 | S25 | Complete | [Candidate review](11a-study-recommendations.md) | [candidate-review.png](images/candidate-review.png) | Added: Sentences/Vocabulary selectors, review scope, ratings/reason, and explicit regeneration/add/review actions. |
 | S26 | Complete | [Recommendation preferences](11a-study-recommendations.md) | [recommendation-preferences.png](images/recommendation-preferences.png), [regenerate-recommendations.png](images/regenerate-recommendations.png), [recommendation-customization.png](images/recommendation-customization.png) | S26a: generation confirmation with candidate counts, level/style, and Customize. S26b: regeneration confirmation and rating-replacement warning. S26c: study-focus areas, optional selection guidance, and Apply preferences. |
-| S27 | Complete | [Anki connection and mapping](11b-anki.md) | [anki-connection-and-mapping.png](images/anki-connection-and-mapping.png) | Added: successful connection, deck/note type, and Japanese/Explanation field mapping. |
+| S27 | Complete | [Anki connection, mapping, and imported card](11b-anki.md) | S27a: [anki-connection-and-mapping.png](images/anki-connection-and-mapping.png), S27b: [anki-imported-card-windows.png](images/anki-imported-card-windows.png) | S27a: successful connection, deck/note type, and Japanese/Explanation field mapping. S27b: imported flashcard in Anki for Windows with a Jump to section table of contents using HTML links and an embedded source game screenshot. |
 | S28 | Complete | [Card preview and explicit add](11b-anki.md) | [card-preview-and-explicit-add.png](images/card-preview-and-explicit-add.png) | Added: front/back review, destination deck, optional screenshot, and explicit Add to Anki. |
 
 ## Replace a placeholder

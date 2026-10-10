@@ -23,6 +23,9 @@ The original S06 and S07 overview screenshots are retained as figures S06a and S
 | S23b - metadata-and-current-chapter.png | [edit-explanation-details.png](edit-explanation-details.png) | S23b |
 | S26b - recommendation-preferences.png | [regenerate-recommendations.png](regenerate-recommendations.png) | S26b |
 | S26c - recommendation-preferences.png | [recommendation-customization.png](recommendation-customization.png) | S26c |
+| Preview window - cleaned.png | [anki-imported-card-windows.png](anki-imported-card-windows.png) | S27b |
+
+The S27b companion screenshot added on 10 October 2026 shows an imported JRPG Translator flashcard in Anki for Windows. The supplied cleaned PNG is copied without further modification; it shows the HTML section links and embedded game screenshot.
 
 The S09–S26 companion screenshots added on 25 September 2026 are also unchanged originals. S21b now uses the supplied Manage Study Libraries replacement instead of the earlier Rename Library image; the redundant S21c placeholder was removed at the project owner's request. S26b shows the regeneration confirmation, and S26c shows the Customize dialog's study-focus areas and optional selection guidance. The unfilled S22b placeholder was also removed at the project owner's request; the existing S22a image remains. Superseded images remain recoverable from Git history.
 

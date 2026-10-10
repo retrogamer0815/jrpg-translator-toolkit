@@ -27,7 +27,7 @@ In the Study Library, choose **Anki... → Anki connection and link check...**.
 
 ![Anki connection dialog reporting a successful AnkiConnect test, with Study Profile, deck, Basic note type, and Front and Back field mappings](images/anki-connection-and-mapping.png)
 
-*Figure S27. This example maps Japanese to Front and the explanation to Back in the Basic note type. Use the fields that match your own note type, then save the mapping.*
+*Figure S27a. This example maps Japanese to Front and the explanation to Back in the Basic note type. Use the fields that match your own note type, then save the mapping.*
 
 Use the exact fields in your own note type. A note type can call them Front/Back, Japanese/Explanation, or something else; the mapping tells JRPG Translator which ones have the relevant meaning.
 
@@ -66,6 +66,10 @@ For an existing Library entry, select one explanation and choose **Anki... → A
 ![Review explanation card dialog with Japanese front, explanation back, destination deck, optional source screenshot, and Add to Anki and Cancel buttons](images/card-preview-and-explicit-add.png)
 
 *Figure S28. Review the card text, destination, and optional screenshot before choosing Add to Anki. Opening this preview does not send the card.*
+
+![Anki for Windows preview of an imported JRPG Translator flashcard, showing a Jump to section table of contents with HTML links, the original Japanese text, and an embedded source game screenshot](images/anki-imported-card-windows.png)
+
+*Figure S27b. An imported JRPG Translator flashcard in Anki for Windows. The **Jump to section** table of contents uses HTML links to navigate the explanation sections, and the embedded game screenshot keeps the original dialogue in context.*
 
 A good card usually asks one clear question. A complete multi-section explanation can be useful as reference on the back, but you do not have to keep every generated paragraph.
 
