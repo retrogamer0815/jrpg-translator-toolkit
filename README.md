@@ -74,8 +74,8 @@ Profile automatically for each game.
       </a>
     </td>
     <td>
-      <a href="docs/media/launchbox-integration.jpg">
-        <img src="docs/media/launchbox-integration.jpg" alt="Per-game JRPG Translator and JoyToKey setup window in LaunchBox">
+      <a href="docs/manual/images/per-game-plugin-setup.png">
+        <img src="docs/manual/images/per-game-plugin-setup.png" alt="Per-game JRPG Translator and JoyToKey setup window in LaunchBox">
       </a>
     </td>
   </tr>
