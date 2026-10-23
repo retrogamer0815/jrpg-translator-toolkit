@@ -23,6 +23,7 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 from dotenv import load_dotenv
+from model_job import model_timeout_seconds
 
 from study_library_sections import (
     SECTION_SCHEMA,
@@ -45,10 +46,7 @@ EXPLAINER_TXT = os.path.join(OVERLAY_DIR, "explainer.txt")
 EXPLAINER_DONE = os.path.join(OVERLAY_DIR, "explainer.done")
 os.makedirs(OVERLAY_DIR, exist_ok=True)
 
-MODEL_TIMEOUT_SECONDS = max(
-    15.0,
-    min(180.0, float(os.environ.get("JRPG_MODEL_TIMEOUT_SECONDS", "75"))),
-)
+MODEL_TIMEOUT_SECONDS = model_timeout_seconds("explanation")
 
 import time  # add near the other imports
 

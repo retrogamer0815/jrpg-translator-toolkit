@@ -2,6 +2,29 @@
 
 All notable changes to JRPG Translator are documented here.
 
+## 1.0.1 - 2026-10-23
+
+### Model request timeouts
+
+- Separated request deadlines by task: translations retain their 75-second
+  timeout, explanations allow five minutes, example sentences allow two minutes,
+  and Anki candidate evaluations allow ten minutes per batch.
+- Updated interface watchdogs to allow an additional 45 seconds for startup and
+  saving results instead of ending longer tasks after two minutes. Timeout
+  messages now report the applicable limit.
+- Prevented inherited translation timeout settings from shortening Study tasks.
+  Completed evaluation batches remain saved if a later batch fails or is canceled.
+
+### Desktop keyboard, controller, and mouse navigation
+
+- Fixed clipped focus borders around Manage models in compact Game Text, Audio,
+  and Explanation layouts.
+- Mouse movement, clicks, and scrolling now hide keyboard/controller navigation
+  frames. Keyboard or controller navigation restores them while preserving the
+  focused control and normal mouse interaction.
+- Added regression coverage for task deadlines, batch handling, focus-frame
+  visibility, and switching between mouse and keyboard/controller navigation.
+
 ## 1.0.0 - 2026-10-10
 
 The first stable 1.0 release brings together the new desktop and Big Box

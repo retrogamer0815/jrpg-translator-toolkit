@@ -8,7 +8,7 @@ $main = [IO.File]::ReadAllText((Join-Path $repo 'JRPG Translator.ahk'))
 $overlay = [IO.File]::ReadAllText((Join-Path $repo 'bin/overlay.ahk'))
 $generated = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'reliability_paths_harness.ahk'))
 foreach ($entry in @(
-    @($main, @('SaveApiEnv', 'CPReplaceApiEnvFile', 'ExplainNow', 'ExplainNowCore', 'CPExplanationFailureSummary', 'CPExplanationFailureStatus', 'CPReportExplanationFailure', 'StudyWindowRevealFinished', 'StudyWindowRevealCore', 'StudyWindowHasHandle')),
+    @($main, @('SaveApiEnv', 'CPReplaceApiEnvFile', 'ExplainNow', 'ExplainNowCore', 'CPModelRequestTimeoutMs', 'CPExplanationFailureSummary', 'CPExplanationFailureStatus', 'CPReportExplanationFailure', 'StudyWindowRevealFinished', 'StudyWindowRevealCore', 'StudyWindowHasHandle')),
     @($overlay, @('flushTranslate', 'FlushTranslateCore', 'RemoveAcceptedCaptures', 'FlushBufferedScreenshots'))
 )) {
     foreach ($name in $entry[1]) {

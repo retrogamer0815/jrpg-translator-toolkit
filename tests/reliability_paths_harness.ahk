@@ -56,7 +56,7 @@ try {
     Check(ShotBuf.Length = 2 && ShotBuf[1] = "one.png", "Only accepted occurrence removed")
 
     EnvSet("EXPLAIN_ERROR_FILE", "prior synthetic value")
-    for scenario in ["launch-failed", "locked-error", "504", "404", "503", "429", "401", "no-result", "timeout", "success", "success"] {
+    for scenario in ["launch-failed", "locked-error", "504", "404", "503", "429", "401", "no-result", "timeout", "slow-success", "success", "success"] {
         mode := scenario
         before := explanationRuns
         beforeMessages := messages.Length
@@ -67,7 +67,7 @@ try {
         Check(explanationRuns = before + 1, "Explanation can start: " scenario)
         Check(EnvGet("EXPLAIN_ERROR_FILE") = "prior synthetic value", "Explanation restores scoped environment: " scenario)
         Check(messages.Length = beforeMessages, "No blocking failure dialog: " scenario)
-        if scenario != "success" {
+        if scenario != "success" && scenario != "slow-success" {
             Check(CPExplanationFailureStatus() != "", "Retained failure status: " scenario)
             Check(toasts[-1][2] = 15000 && toasts[-1][3] = 2, "Long priority failure toast: " scenario)
             Check(terminalToken = EnvGet("JRPG_REQUEST_ID") && terminalMessage != "", "Full details and completion retained: " scenario)
@@ -143,8 +143,9 @@ TestTranslateRun(cmd, directory, flags, &processId) {
     processId := 0
 }
 TestExplainRun(cmd, directory, flags, &processId) {
-    global explanationRuns, mode, locked, overlayDir
+    global explanationRuns, explanationPolls, mode, locked, overlayDir
     explanationRuns += 1
+    explanationPolls := 0
     if mode = "launch-failed"
         throw OSError(5)
     if mode = "locked-error" {
@@ -159,8 +160,13 @@ TestExplainRun(cmd, directory, flags, &processId) {
     }
     processId := 0
 }
-TestExplainAlive(*) => mode = "timeout"
-TestExplainStartedAt() => mode = "timeout" ? A_TickCount - 120001 : A_TickCount
+TestExplainAlive(*) {
+    global explanationPolls, mode
+    explanationPolls += 1
+    return mode = "timeout" || (mode = "slow-success" && explanationPolls = 1)
+}
+TestExplainStartedAt() => mode = "timeout" ? A_TickCount - CPModelRequestTimeoutMs("explanation") - 1
+    : mode = "slow-success" ? A_TickCount - 120001 : A_TickCount
 TestExplainClose(*) {
     global closedChild
     closedChild := true

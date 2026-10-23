@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import redirect_stdout, redirect_stderr
+import math
 import os
 from pathlib import Path
 import runpy
@@ -14,16 +15,32 @@ import sys
 import traceback
 
 
-def model_timeout_seconds() -> float:
+# Keep these defaults in sync with CPModelRequestTimeoutMs in the control panel.
+# Evaluations get this allowance per batch, not for the entire candidate list.
+MODEL_TIMEOUT_SECONDS = {
+    "translation": 75.0,
+    "explanation": 300.0,
+    "evaluation": 600.0,
+    "example": 120.0,
+}
+
+
+def model_timeout_seconds(request_kind: str = "translation") -> float:
+    default = MODEL_TIMEOUT_SECONDS[request_kind]
+    # The overlay's legacy environment variable is translation-specific. It may
+    # be inherited by study helpers and must not shorten their longer deadlines.
+    if request_kind != "translation":
+        return default
     try:
-        return max(15.0, min(90.0, float(os.environ.get("JRPG_MODEL_TIMEOUT_SECONDS", "75"))))
+        value = float(os.environ.get("JRPG_MODEL_TIMEOUT_SECONDS", str(default)))
+        return max(15.0, min(90.0, value)) if math.isfinite(value) else default
     except ValueError:
-        return 75.0
+        return default
 
 
-def gemini_http_options(types):
+def gemini_http_options(types, request_kind: str = "translation"):
     return types.HttpOptions(
-        timeout=int(model_timeout_seconds() * 1000),
+        timeout=int(model_timeout_seconds(request_kind) * 1000),
         retry_options=types.HttpRetryOptions(attempts=1),
     )
 

@@ -1057,6 +1057,7 @@ def generate_recommendations(
                     additional_criteria,
                     prompt_instructions,
                 ),
+                request_kind="evaluation",
             )
             parsed = extract_json_object(raw)
             model_items = parsed.get("items", [])

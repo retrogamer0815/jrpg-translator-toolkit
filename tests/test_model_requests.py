@@ -3,6 +3,7 @@ import ast
 import io
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,13 +19,55 @@ import model_job
 
 class ModelRequests(unittest.TestCase):
     def test_timeout_is_bounded_and_invalid_configuration_falls_back(self):
-        for value, expected in [("75", 75), ("invalid", 75), ("900", 90), ("0", 15)]:
+        for value, expected in [("75", 75), ("invalid", 75), ("900", 90), ("0", 15),
+                                ("nan", 75), ("inf", 75), ("1e999", 75)]:
             with patch.dict(os.environ, {"JRPG_MODEL_TIMEOUT_SECONDS": value}):
                 self.assertEqual(model_job.model_timeout_seconds(), expected)
 
+    def test_study_deadlines_are_not_shortened_by_inherited_translation_timeout(self):
+        for legacy in ("15", "75", "invalid"):
+            with patch.dict(os.environ, {"JRPG_MODEL_TIMEOUT_SECONDS": legacy}):
+                for kind, seconds in [("explanation", 300), ("evaluation", 600), ("example", 120)]:
+                    self.assertEqual(model_job.model_timeout_seconds(kind), seconds)
+        with self.assertRaises(KeyError):
+            model_job.model_timeout_seconds("misspelled-task")
+
+    def test_ui_deadlines_match_provider_defaults_and_all_generation_entry_points(self):
+        source = (ROOT / "JRPG Translator.ahk").read_text(encoding="utf-8-sig")
+        policy = re.search(r"(?ms)^CPModelRequestTimeoutMs\(.*?^}", source).group()
+        defaults = dict((kind, float(seconds)) for kind, seconds in
+                        re.findall(r'"(translation|explanation|evaluation|example)", (\d+)', policy))
+        self.assertEqual(defaults, model_job.MODEL_TIMEOUT_SECONDS)
+        self.assertIn('(seconds[requestKind] + 45) * 1000', policy)
+        for function, kind in [("ExplainNowCore", "explanation"),
+                               ("StudyReaderGenerateNewVersion", "explanation"),
+                               ("StudyReaderGenerateVocabularyExample", "example"),
+                               ("StudyCandidatesRunBridge", "evaluation")]:
+            body = re.search(r"(?ms)^" + function + r"\(.*?^}", source).group()
+            self.assertIn('CPModelRequestTimeoutMs("' + kind + '")', body)
+        explain = re.search(r"(?ms)^ExplainNowCore\(.*?^}", source).group()
+        self.assertNotIn('EnvSet("JRPG_MODEL_TIMEOUT_SECONDS"', explain)
+        self.assertNotIn('>= 120000', explain)
+        overlay = (ROOT / "bin/overlay.ahk").read_text(encoding="utf-8-sig")
+        self.assertIn('__TranslationTimeoutMs := 120000', overlay)
+        self.assertIn('EnvSet("JRPG_MODEL_TIMEOUT_SECONDS", "75")', overlay)
+
+    def test_explainer_uses_explanation_policy_for_both_providers(self):
+        source = (ROOT / "scripts/explainer.py").read_text(encoding="utf-8-sig")
+        tree = ast.parse(source)
+        assignment = next(n for n in tree.body if isinstance(n, ast.Assign)
+                          and any(isinstance(t, ast.Name) and t.id == "MODEL_TIMEOUT_SECONDS" for t in n.targets))
+        namespace = {"model_timeout_seconds": model_job.model_timeout_seconds}
+        with patch.dict(os.environ, {"JRPG_MODEL_TIMEOUT_SECONDS": "75"}):
+            exec(compile(ast.Module(body=[assignment], type_ignores=[]), "fixture", "exec"), namespace)
+        self.assertEqual(namespace["MODEL_TIMEOUT_SECONDS"], 300)
+        self.assertIn('timeout=int(MODEL_TIMEOUT_SECONDS * 1000)', source)
+        self.assertIn('timeout=MODEL_TIMEOUT_SECONDS,', source)
+
     def test_gemini_and_openai_are_bounded_without_automatic_retries(self):
         for provider in ("gemini", "openai"):
-            for failure in (False, True):
+            for kind, failure in ((kind, failure) for kind in model_job.MODEL_TIMEOUT_SECONDS
+                                  for failure in (False, True)):
                 client = Mock()
                 client.models.generate_content.return_value = SimpleNamespace(text="ok")
                 client.responses.create.return_value = SimpleNamespace(output_text="ok")
@@ -42,14 +85,15 @@ class ModelRequests(unittest.TestCase):
                      patch.dict(os.environ, {"JRPG_MODEL_TIMEOUT_SECONDS": "75"}):
                     if failure:
                         with self.assertRaises(TimeoutError):
-                            example_sentence.call_model(provider, "fixture", "fixture")
+                            example_sentence.call_model(provider, "fixture", "fixture", request_kind=kind)
                     else:
-                        self.assertEqual(example_sentence.call_model(provider, "fixture", "fixture"), "ok")
+                        self.assertEqual(example_sentence.call_model(provider, "fixture", "fixture", request_kind=kind), "ok")
                 kwargs = factory.call_args.kwargs
+                expected = model_job.MODEL_TIMEOUT_SECONDS[kind]
                 if provider == "gemini":
-                    self.assertEqual(kwargs["http_options"], {"timeout": 75000, "retry_options": {"attempts": 1}})
+                    self.assertEqual(kwargs["http_options"], {"timeout": expected * 1000, "retry_options": {"attempts": 1}})
                 else:
-                    self.assertEqual(kwargs["timeout"], 75)
+                    self.assertEqual(kwargs["timeout"], expected)
                     self.assertEqual(kwargs["max_retries"], 0)
                 client.close.assert_called_once()
                 call.assert_called_once()

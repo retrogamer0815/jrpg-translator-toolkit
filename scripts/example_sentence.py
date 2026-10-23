@@ -166,7 +166,7 @@ def normalize_result(value):
     return plain, reading, translation
 
 
-def call_model(provider: str, model: str, prompt: str) -> str:
+def call_model(provider: str, model: str, prompt: str, *, request_kind: str = "example") -> str:
     from model_job import gemini_http_options, model_timeout_seconds
     if provider == "gemini":
         try:
@@ -185,7 +185,7 @@ def call_model(provider: str, model: str, prompt: str) -> str:
         # Keep the Client itself alive for the complete synchronous request.
         # Accessing .models from a temporary Client can leave its HTTP session
         # closed before generate_content begins on some google-genai versions.
-        client = genai.Client(api_key=key, http_options=gemini_http_options(types))
+        client = genai.Client(api_key=key, http_options=gemini_http_options(types, request_kind))
         try:
             response = client.models.generate_content(
                 model=model,
@@ -219,7 +219,7 @@ def call_model(provider: str, model: str, prompt: str) -> str:
         )
         if not key:
             raise RuntimeError("OpenAI API key missing.")
-        client = OpenAI(api_key=key, timeout=model_timeout_seconds(), max_retries=0)
+        client = OpenAI(api_key=key, timeout=model_timeout_seconds(request_kind), max_retries=0)
         try:
             response = client.responses.create(model=model, input=prompt)
         finally:

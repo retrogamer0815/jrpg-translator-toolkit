@@ -4,6 +4,12 @@
 global assertions := 0, notices := [], warningCues := 0, overlayDir := A_ScriptDir
 global OcrTxt := A_ScriptDir "\ocr.txt", OcrDoneTxt := A_ScriptDir "\ocr.done"
 try {
+    for kind, seconds in Map("translation", 75, "explanation", 300, "evaluation", 600, "example", 120) {
+        timeout := CPModelRequestTimeoutMs(kind)
+        Check(timeout = (seconds + 45) * 1000, kind " watchdog includes persistence grace")
+        s := Map("modelOutcome", "timeout", "modelTimeoutMs", timeout)
+        Check(InStr(CPModelRequestError(s, ""), (seconds + 45) " seconds"), kind " reports its actual deadline")
+    }
     for mode in ["success", "failure", "hang", "batches", "repeated", "cancel", "closed", "ownerClosed"] {
         state := Map("closed", false), progress := A_ScriptDir "\" mode ".progress"
         cmd := Format('"{1}" /ErrorStdOut "{2}" "{3}" "{4}"', A_AhkPath,
@@ -128,7 +134,10 @@ TestRecommendationBridgeFailures() {
             Check(!InStr(state["modelFailureDetails"], "Stale"), "An early bridge failure cannot report stale diagnostics")
     }
 }
-TestBridgeRun(command, state, progress) => CPModelRequestRun(command, state, progress, 300)
+TestBridgeRun(command, state, progress, timeout) {
+    Check(timeout = CPModelRequestTimeoutMs("evaluation"), "Review uses the evaluation deadline")
+    return CPModelRequestRun(command, state, progress, 300)
+}
 StudyCandidatesBridgeCommand(state, *) => Map("ok", true, "command", state["command"])
 StudyCandidatesGuiAlive(state) => !state.Get("closed", false)
 StudyCandidatesBeginWork(state) {

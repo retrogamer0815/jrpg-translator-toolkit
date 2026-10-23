@@ -15,12 +15,13 @@ param(
     [switch]$CaptureNavigationOnly,
     [switch]$WelcomeOnly,
     [switch]$CaptionOnly,
+    [switch]$FocusOnly,
     [string]$SourcePath,
     [string]$AutoHotkey = 'C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe',
     [string]$OutputDirectory = (Join-Path ([IO.Path]::GetTempPath()) ('jrpg-desktop-tests-' + [Guid]::NewGuid().ToString('N')))
 )
 $ErrorActionPreference = 'Stop'
-if (@($StudyOnly, $DialogsOnly, $ShutdownOnly, $ResizeOnly, $AudioFeedbackOnly, $ProfileFeedbackOnly, $ChapterOnly, $PromptUnsavedOnly, $GenerationActivityOnly, $MessageNavigationOnly, $ProfileSelectionOnly, $ProfileSwitchOnly, $OverlayColorsOnly, $CaptureNavigationOnly, $WelcomeOnly, $CaptionOnly).Where({ [bool]$_ }).Count -gt 1) {
+if (@($StudyOnly, $DialogsOnly, $ShutdownOnly, $ResizeOnly, $AudioFeedbackOnly, $ProfileFeedbackOnly, $ChapterOnly, $PromptUnsavedOnly, $GenerationActivityOnly, $MessageNavigationOnly, $ProfileSelectionOnly, $ProfileSwitchOnly, $OverlayColorsOnly, $CaptureNavigationOnly, $WelcomeOnly, $CaptionOnly, $FocusOnly).Where({ [bool]$_ }).Count -gt 1) {
     throw 'Choose only one focused test mode.'
 }
 $repo = Split-Path -Parent $PSScriptRoot
@@ -559,6 +560,10 @@ $captureSource = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'bigbox_navigat
 $capture = [regex]::Match($captureSource, '(?ms)^TestCapture\(.*?^}').Value.Replace('CPBigBoxGui', 'ui')
 $capture = $capture.Replace('SendMessage(0x0317, dc, 0x1C, ui.Hwnd)', 'DllCall("user32\PrintWindow", "ptr", ui.Hwnd, "ptr", dc, "uint", 1)')
 $generated = $harness.Replace('; @UI_GLOBALS@', ($uiGlobals -join "`r`n")).Replace('; @CAPTURE@', $capture)
+$generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'desktop_focus_harness.ahk'))
+if ($FocusOnly) {
+    $generated = $generated.Replace('; @STUDY_ONLY@', 'TestDesktopFocusInput()' + "`r`n" + '    DesktopTestOwnerDrawFocusCues()' + "`r`n" + '    DesktopTestOwnerDrawNavigationStability()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " desktop focus assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
+}
 # Exercise the actual Study control construction and event wiring without its
 # bridge/database/startup calls. All paths/settings below belong to this fixture.
 foreach ($kind in @('Library', 'Reader')) {
@@ -807,7 +812,7 @@ if (Test-Path -LiteralPath $namingBounds) {
     }
     Write-Output "PASS: $namingChecks naming-control visibility checks."
 }
-if ($StudyOnly -or $ShutdownOnly -or $DialogsOnly -or $ResizeOnly -or $AudioFeedbackOnly -or $ProfileFeedbackOnly -or $ChapterOnly -or $PromptUnsavedOnly -or $GenerationActivityOnly -or $MessageNavigationOnly -or $ProfileSelectionOnly -or $ProfileSwitchOnly -or $OverlayColorsOnly -or $CaptureNavigationOnly -or $WelcomeOnly -or $CaptionOnly) {
+if ($StudyOnly -or $ShutdownOnly -or $DialogsOnly -or $ResizeOnly -or $AudioFeedbackOnly -or $ProfileFeedbackOnly -or $ChapterOnly -or $PromptUnsavedOnly -or $GenerationActivityOnly -or $MessageNavigationOnly -or $ProfileSelectionOnly -or $ProfileSwitchOnly -or $OverlayColorsOnly -or $CaptureNavigationOnly -or $WelcomeOnly -or $CaptionOnly -or $FocusOnly) {
     Write-Output $result.Trim()
     Write-Output "Test artifacts: $output"
     return

@@ -2,7 +2,7 @@
 #SingleInstance Off
 #Warn
 #NoTrayIcon
-;@Ahk2Exe-SetVersion 1.0.0.0
+;@Ahk2Exe-SetVersion 1.0.1.0
 ;@Ahk2Exe-SetName JRPG Translator
 ;@Ahk2Exe-SetDescription JRPG Translator
 ;@Ahk2Exe-SetCopyright Copyright (c) 2025 retrogamer0815
@@ -80,7 +80,7 @@ global CPBigBoxFocusFrame := Map("key", "", "rect", "", "thickness", 3, "parts",
 global CPBigBoxPaintButtons := Map()
 global CPBigBoxPaintRegistered := false
 global GameProfileLastError := ""
-global APP_VERSION := "1.0.0"
+global APP_VERSION := "1.0.1"
 global PROJECT_URL := "https://github.com/retrogamer0815/jrpg-translator-toolkit"
 global BUG_REPORT_URL := PROJECT_URL "/issues/new"
 global WRITTEN_GUIDE_URL := PROJECT_URL "/blob/main/docs/manual/README.md"
@@ -10955,6 +10955,14 @@ UpdateCPFocusRing(*) {
         return
     }
 
+    if !CPDesktopNavigationFocusVisible(ui.Hwnd) {
+        CPFocusVisualNavHwnd := 0
+        CPRestoreFocusVisual()
+        CPSetTabFocusIndicator(false)
+        CPUpdateFontSizeControllerHint()
+        CPUpdateMaxPngControllerHint()
+        return
+    }
     hwnd := CPFocusRingTargetHwnd(CPFocusedHwnd())
     if !hwnd {
         CPUpdateFontSizeControllerHint()
@@ -11206,6 +11214,7 @@ CPSetFocusHwnd(hwnd) {
     if !hwnd
         return
     CPFocusVisualNavHwnd := CPFocusRingTargetHwnd(hwnd)
+    CPDesktopRevealNavigationFocus()
     ; Make keyboard focus indicators visible even when focus is moved programmatically.
     try SendMessage(0x0127, 0x00030002, 0, ui.Hwnd) ; WM_CHANGEUISTATE, UIS_CLEAR, HIDEFOCUS|HIDEACCEL
     try {
@@ -11783,6 +11792,8 @@ CPMaxPngAdjustCancel() {
 CPNavMove(dir, *) {
     global eCapMax, btnCapPick
 
+    CPDesktopRevealNavigationFocus()
+
     if CPFontSizeAdjustHandleDirection(dir)
         return
     if CPMaxPngAdjustHandleDirection(dir)
@@ -12040,6 +12051,7 @@ CPNavRight(*) {
 }
 
 CPNavActivate(keyName := "Enter", *) {
+    CPDesktopRevealNavigationFocus()
     if CPFontSizeAdjustActive() {
         CPFontSizeAdjustFinish(true)
         return
@@ -12151,6 +12163,8 @@ CPDesktopSectionNavigationPages() {
 CPNavSwitchTab(dir) {
     global tab, CPFocusVisualNavHwnd, CPDesktop
 
+    CPDesktopRevealNavigationFocus()
+
     if !(IsSet(tab) && tab && tab.Hwnd)
         return
 
@@ -12226,6 +12240,8 @@ try Hotkey("$Left", CPNavLeft, "On")
     ; cover under the still-active mouse click; Windows then occasionally plays
     ; its disabled-window notification sound even though the page changes normally.
     try Hotkey("~LButton Up", CPMouseTabClick, "On")
+    try Hotkey("~Tab", CPDesktopKeyboardTab, "On")
+    try Hotkey("~+Tab", CPDesktopKeyboardTab, "On")
     try Hotkey("$Esc", CPNavEscape, "On")
     HotIfWinActive()
 
@@ -14019,12 +14035,20 @@ CPModelRequestLaunch(command) {
     return NumGet(info, 0, "ptr")
 }
 
+CPModelRequestTimeoutMs(requestKind) {
+    ; Match scripts/model_job.py. Allow 45 seconds beyond the provider deadline
+    ; for interpreter startup, result validation, and saving Study Library data.
+    static seconds := Map("translation", 75, "explanation", 300, "evaluation", 600, "example", 120)
+    return (seconds[requestKind] + 45) * 1000
+}
+
 CPModelRequestRun(command, state, progressPath := "", timeoutMs := 120000) {
     ; This function is for generation ONLY, not Add to Anki or other external
     ; writes whose outcome may be uncertain after termination.
     job := Map("handle", 0, "cancel", false)
     state["modelJob"] := job
     state["modelOutcome"] := "running"
+    state["modelTimeoutMs"] := timeoutMs
     state["modelFailureSummary"] := ""
     state["modelFailureDetails"] := ""
     started := A_TickCount, batch := 0
@@ -14073,7 +14097,8 @@ CPModelRequestRun(command, state, progressPath := "", timeoutMs := 120000) {
 
 CPModelRequestError(state, path, fallback := "The model helper did not return a usable result.") {
     if state.Get("modelOutcome", "") = "timeout"
-        return "The model request timed out after two minutes. Please try again or choose another model."
+        return "The model request timed out after " Round(state.Get("modelTimeoutMs", 120000) / 1000)
+            . " seconds. Please try again or choose another model."
     return CPModelRequestRead(path, fallback)
 }
 
@@ -14205,7 +14230,6 @@ ExplainNowCore() {
     errFile := A_Temp "\JRPG_Explain_" safeRequestId ".err"
     try FileDelete(errFile)
     EnvSet("JRPG_REQUEST_ID", requestId)
-    EnvSet("JRPG_MODEL_TIMEOUT_SECONDS", "75")
     EnvSet("EXPLAIN_ERROR_FILE", errFile)
     cmd := Format('"{1}" "{2}"', px, ex)
     DbgCP("ExplainNow -> " cmd)
@@ -14221,9 +14245,10 @@ ExplainNowCore() {
     }
 
     startedAt := A_TickCount
+    explainTimeoutMs := CPModelRequestTimeoutMs("explanation")
     timedOut := false
     while ProcessExist(pid) {
-        if ((A_TickCount - startedAt) >= 120000) {
+        if ((A_TickCount - startedAt) >= explainTimeoutMs) {
             timedOut := true
             try ProcessClose(pid)
             break
@@ -14243,7 +14268,8 @@ ExplainNowCore() {
         doneToken := Trim(FileRead(donePath, "UTF-8"))
 
     if timedOut {
-        msg := "Explanation timed out.`n`nThe selected model did not finish within two minutes. Please try again, check the internet connection, or select another model."
+        msg := "Explanation timed out.`n`nThe explanation did not finish within " Round(explainTimeoutMs / 1000)
+            . " seconds. Please try again, check the internet connection, or select another model."
         CPReportExplanationFailure(msg, requestId)
         DbgCP("ExplainNow timeout")
         return
@@ -16968,7 +16994,7 @@ StudyReaderGenerateVocabularyExample(saAddState, *) {
         EnvSet("PYTHONIOENCODING", "utf-8")
         saCommand := CPModelRequestCommand(saPython, saExampleScript, saOutFile, saErrFile)
         DbgCP("Vocabulary example -> " saCommand)
-        saExitCode := CPModelRequestRun(saCommand, saAddState)
+        saExitCode := CPModelRequestRun(saCommand, saAddState, "", CPModelRequestTimeoutMs("example"))
     } catch Error as saError {
         saRunError := saError.Message
     } finally {
@@ -19826,7 +19852,8 @@ StudyCandidatesRunBridge(scState, scAction, scFront := "") {
             }
             scExitCode := modelWork
                 ? CPModelRequestRun(scCommand, scState, scAction = "generate-recommendations"
-                    ? scState["outputDir"] "\candidate_recommendation_progress.txt" : "")
+                    ? scState["outputDir"] "\candidate_recommendation_progress.txt" : "",
+                    CPModelRequestTimeoutMs("evaluation"))
                 : RunWait(scCommand, A_ScriptDir, "Hide")
         }
         catch as scError {
@@ -25061,7 +25088,7 @@ StudyReaderGenerateNewVersion(srNewState, *) {
         EnvSet("PYTHONIOENCODING", "utf-8")
         srCommand := CPModelRequestCommand(srPython, srExplainer, srOutFile, srErrFile)
         DbgCP("Study Reader new version -> " srCommand)
-        srExitCode := CPModelRequestRun(srCommand, srNewState)
+        srExitCode := CPModelRequestRun(srCommand, srNewState, "", CPModelRequestTimeoutMs("explanation"))
     } catch Error as srError {
         srRunError := srError.Message
     } finally {
@@ -39567,6 +39594,8 @@ CPDesktopCreate() {
     OnMessage(0x84, CPDesktopHitTest) ; WM_NCHITTEST: native drag/double-click/system menu
     OnMessage(0x200, CPDesktopCaptionHover)
     OnMessage(0x2A3, CPDesktopCaptionLeave)
+    for inputMsg in CPDesktopFocusInputMessages()
+        OnMessage(inputMsg, CPDesktopFocusInputMessage)
     CPDesktopLoadLogo()
     CPDesktop["ready"] := true
     CPDesktopPrepareNativeControls()
@@ -39773,14 +39802,16 @@ CPDesktopLayoutScreenshot(w) {
     panelW := Min(1040, w - panelX - 24), x := panelX + 20, contentW := panelW - 40
     right := x + contentW, columnGap := 20, wide := contentW >= 760
     CPDesktop["contentW"] := panelW
-    aiY := CPDesktop["headerH"] + 96, aiH := wide ? 166 : 236
+    aiY := CPDesktop["headerH"] + 96, aiH := wide ? 166 : 248
     CPDesktopPlace(s["aiPanel"], panelX, aiY, panelW, aiH)
     CPDesktopPlace(s["ai"], x, aiY + 18, contentW, 26)
     providerW := wide ? 140 : 172
     modelX := x + providerW + 16
     modelW := wide ? Floor((contentW - providerW - 32) * 0.43) : contentW - providerW - 16
     promptX := wide ? modelX + modelW + 16 : x
-    promptY := wide ? aiY + 54 : aiY + 138
+    ; The model link ends at +144. Leave a gap before the full-width prompt
+    ; label, otherwise that sibling clips the link's bottom focus border.
+    promptY := wide ? aiY + 54 : aiY + 150
     promptW := wide ? right - promptX : contentW
     CPDesktopPlace(s["provider"], x, aiY + 54, providerW, 22)
     CPDesktopPlace(ddlProv, x, aiY + 78, providerW, 30)
@@ -40480,13 +40511,13 @@ CPDesktopLayoutAudio(w) {
     panelW := Min(1040, w - panelX - 24), x := panelX + 20, contentW := panelW - 40
     right := x + contentW, wide := contentW >= 760
     CPDesktop["contentW"] := panelW
-    aiY := CPDesktop["headerH"] + 96, aiH := wide ? 166 : 236
+    aiY := CPDesktop["headerH"] + 96, aiH := wide ? 166 : 248
     CPDesktopPlace(a["aiPanel"], panelX, aiY, panelW, aiH)
     CPDesktopPlace(a["ai"], x, aiY + 18, contentW, 26)
     providerW := wide ? 140 : 172, languageW := wide ? 200 : contentW
     modelX := x + providerW + 16
     modelW := contentW - providerW - 16 - (wide ? languageW + 16 : 0)
-    languageX := wide ? right - languageW : x, languageY := aiY + (wide ? 54 : 138)
+    languageX := wide ? right - languageW : x, languageY := aiY + (wide ? 54 : 150)
     CPDesktopPlace(a["provider"], x, aiY + 54, providerW, 22)
     CPDesktopPlace(ddlAProv, x, aiY + 78, providerW, 30)
     CPDesktopPlace(a["model"], modelX, aiY + 54, modelW, 22)
@@ -40695,13 +40726,13 @@ CPDesktopLayoutExplanation(w) {
     panelW := Min(1040, w - panelX - 24), x := panelX + 20, contentW := panelW - 40
     right := x + contentW, wide := contentW >= 760, scale := GetWindowDPI(ui.Hwnd) / 96
     CPDesktop["contentW"] := panelW
-    aiY := CPDesktop["headerH"] + 96, aiH := wide ? 166 : 236
+    aiY := CPDesktop["headerH"] + 96, aiH := wide ? 166 : 248
     CPDesktopPlace(expPage["aiPanel"], panelX, aiY, panelW, aiH)
     CPDesktopPlace(expPage["ai"], x, aiY + 18, contentW, 26)
     providerW := wide ? 140 : 172, modelX := x + providerW + 16
     modelW := wide ? Floor((contentW - providerW - 32) * 0.43) : contentW - providerW - 16
     promptX := wide ? modelX + modelW + 16 : x
-    promptY := aiY + (wide ? 54 : 138), promptW := wide ? right - promptX : contentW
+    promptY := aiY + (wide ? 54 : 150), promptW := wide ? right - promptX : contentW
     CPDesktopPlace(expPage["provider"], x, aiY + 54, providerW, 22)
     CPDesktopPlace(ddlEProv, x, aiY + 78, providerW, 30)
     CPDesktopPlace(expPage["model"], modelX, aiY + 54, modelW, 22)
@@ -41097,6 +41128,78 @@ CPDesktopCaptionContext(hwnd) {
     return IsObject(d) && d["paint"].Has(hwnd) && d["paint"][hwnd]["kind"] = "caption" ? d : 0
 }
 
+CPDesktopFocusInputMessages() {
+    return [0x200, 0xA0, 0x201, 0x204, 0x207, 0x20B, 0x20A, 0x20E,
+        0xA1, 0xA4, 0xA7, 0xAB, 0x100, 0x104]
+}
+
+CPDesktopNavigationFocusVisible(hwnd) {
+    global ui
+    ; Other windows (including Big Box) retain their existing focus policy.
+    if !CPDesktopActive() || DllCall("user32\GetAncestor", "ptr", hwnd, "uint", 2, "ptr") != ui.Hwnd
+        return true
+    return !(SendMessage(0x129, 0, 0, ui.Hwnd) & 1) ; WM_QUERYUISTATE / UISF_HIDEFOCUS
+}
+
+CPDesktopFocusPointerPosition() {
+    point := Buffer(8, 0)
+    DllCall("user32\GetCursorPos", "ptr", point)
+    return [NumGet(point, 0, "int"), NumGet(point, 4, "int")]
+}
+
+CPDesktopRevealNavigationFocus(*) {
+    global ui, CPDesktop
+    if !CPDesktopActive()
+        return
+    ; A relayout or repaint can synthesize WM_MOUSEMOVE without moving the
+    ; pointer. Remember its screen position so that does not hide fresh cues.
+    CPDesktop["focusPointer"] := CPDesktopFocusPointerPosition()
+    wasVisible := CPDesktopNavigationFocusVisible(ui.Hwnd)
+    SendMessage(0x127, 0x00030002, 0, ui.Hwnd) ; UIS_CLEAR: HIDEFOCUS | HIDEACCEL
+    if !wasVisible
+        CPRedrawActiveTabPage()
+}
+
+CPDesktopKeyboardTab(*) {
+    CPDesktopRevealNavigationFocus()
+    SetTimer(CPDesktopTabFocusChanged, -1)
+}
+
+CPDesktopTabFocusChanged(*) {
+    global CPFocusVisualNavHwnd
+    CPFocusVisualNavHwnd := CPFocusRingTargetHwnd(CPFocusedHwnd())
+    UpdateCPFocusRing()
+    CPEnsureFocusedControlVisible()
+}
+
+CPDesktopFocusInputMessage(wParam, lParam, msg, hwnd) {
+    global ui
+    if !CPDesktopActive() || DllCall("user32\GetAncestor", "ptr", hwnd, "uint", 2, "ptr") != ui.Hwnd
+        return
+    if msg = 0x100 || msg = 0x104 {
+        if wParam = 9 || wParam = 13 || wParam = 32 || (wParam >= 33 && wParam <= 40)
+            CPDesktopRevealNavigationFocus()
+        return
+    }
+    CPDesktopPointerFocusInput(msg = 0x200 || msg = 0xA0, CPDesktopFocusPointerPosition())
+}
+
+CPDesktopPointerFocusInput(moving, position) {
+    global ui, CPDesktop, CPFocusVisualNavHwnd
+    previous := CPDesktop.Get("focusPointer", position)
+    if moving && Abs(position[1] - previous[1]) < 3 && Abs(position[2] - previous[2]) < 3
+        return
+    CPDesktop["focusPointer"] := position
+    if !CPDesktopNavigationFocusVisible(ui.Hwnd)
+        return
+    ; Keep actual focus (and editable text/carets). Only hide navigation cues;
+    ; native clicks, hover, scrolling and controller activation stay intact.
+    SendMessage(0x127, 0x00030001, 0, ui.Hwnd) ; UIS_SET: HIDEFOCUS | HIDEACCEL
+    CPFocusVisualNavHwnd := 0
+    UpdateCPFocusRing()
+    CPRedrawActiveTabPage()
+}
+
 CPDesktopCaptionHover(wParam, lParam, msg, hwnd) {
     d := CPDesktopCaptionContext(hwnd)
     if !IsObject(d) || d["hover"] = hwnd
@@ -41226,7 +41329,7 @@ CPDesktopPaintCheckBox(hwnd, dc) {
     DllCall("user32\FillRect", "ptr", dc, "ptr", rect, "ptr", CPDesktopBrush(surface))
 
     enabled := DllCall("user32\IsWindowEnabled", "ptr", hwnd, "int")
-    focused := DllCall("user32\GetFocus", "ptr") = hwnd
+    focused := DllCall("user32\GetFocus", "ptr") = hwnd && CPDesktopNavigationFocusVisible(hwnd)
     checkState := SendMessage(0x00F0, 0, 0, hwnd) ; BM_GETCHECK
     boxSize := Max(13, Round(15 * scale))
     boxLeft := Max(1, Round(scale)), boxTop := Floor((h - boxSize) / 2)
@@ -41334,7 +41437,8 @@ CPDesktopPaintCombo(hwnd, dc) {
     saved := DllCall("gdi32\SaveDC", "ptr", dc, "int")
     DllCall("user32\FillRect", "ptr", dc, "ptr", rect, "ptr", CPDesktopBrush(colors["panel"]))
     focus := DllCall("user32\GetFocus", "ptr")
-    focused := focus = hwnd || (focus && DllCall("user32\GetParent", "ptr", focus, "ptr") = hwnd)
+    focused := (focus = hwnd || (focus && DllCall("user32\GetParent", "ptr", focus, "ptr") = hwnd))
+        && CPDesktopNavigationFocusVisible(hwnd)
     border := colors[focused ? "link" : "border"]
     pen := DllCall("gdi32\CreatePen", "int", 0, "int", Max(1, Round(scale)), "uint", CPColorRef(border), "ptr")
     DllCall("gdi32\SelectObject", "ptr", dc, "ptr", pen)
@@ -41561,6 +41665,8 @@ CPDesktopDestroyBrushes(*) {
     try OnMessage(0x84, CPDesktopHitTest, 0)
     try OnMessage(0x200, CPDesktopCaptionHover, 0)
     try OnMessage(0x2A3, CPDesktopCaptionLeave, 0)
+    for inputMsg in CPDesktopFocusInputMessages()
+        try OnMessage(inputMsg, CPDesktopFocusInputMessage, 0)
     if !(IsSet(CPDesktop) && CPDesktop.Has("brushes"))
         return
     for hex, brush in CPDesktop["brushes"]
@@ -41643,6 +41749,7 @@ CPDesktopPaintPanel(dc, ctrl, hex, scale, rounded := true) {
 }
 
 CPDesktopPaintInputFrame(dc, frame, selected, scale) {
+    selected := selected && CPDesktopNavigationFocusVisible(frame.Hwnd)
     colors := CPDesktopPalette()
     frame.GetPos(&x, &y, &w, &h)
     penWidth := Max(1, Round(scale))

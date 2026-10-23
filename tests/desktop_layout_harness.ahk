@@ -142,6 +142,7 @@ CPCreateComboArrowOverlays()
 OnError(DesktopTestUnhandledError)
 try {
     ; @STUDY_ONLY@
+    TestDesktopFocusInput()
     TestDesktopResizing()
     DesktopAssert(IniRead(iniPath, "cfg_control", "modernLayout", 0) = 1,
         "Legacy classic-layout preference migrates to modern")

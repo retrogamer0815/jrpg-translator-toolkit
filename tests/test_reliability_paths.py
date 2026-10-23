@@ -146,6 +146,34 @@ class ReliabilityPaths(unittest.TestCase):
         with closing(sqlite3.connect(prefs)) as db:
             self.assertEqual(db.execute("SELECT count(*) FROM " + candidates.RECOMMENDATION_TABLE).fetchone()[0], 36)
 
+    def test_15_sentences_and_80_vocabulary_items_use_evaluation_timeout_each_batch(self):
+        ids = [hashlib.sha256(str(n).encode()).hexdigest() for n in range(95)]
+        sentences = [["", "", "", candidates.encode_field("日本語 " + str(n)), "", key, "-1", "0", ""]
+                     for n, key in enumerate(ids[:15])]
+        vocabulary = [["", "", "", "", candidates.encode_field("単語 " + str(n)), "", "", "",
+                       key, "-1", "0", ""] for n, key in enumerate(ids[15:])]
+        for filename, rows in [("candidate_sentences.tsv", sentences), ("candidate_vocabulary.tsv", vocabulary)]:
+            (self.root / filename).write_text("\n".join("\t".join(row) for row in rows), encoding="utf-8")
+        batches = []
+        def reply(provider, model, prompt, *, request_kind):
+            self.assertEqual(request_kind, "evaluation")
+            batch = json.loads(prompt.split("\nCandidates:\n", 1)[1])
+            batches.append(batch)
+            self.assertEqual((self.root / "candidate_recommendation_progress.txt").read_text(), str(len(batches)))
+            return self.response([item["id"] for item in batch])
+        prefs = self.root / "preferences.db"
+        with patch.object(candidates, "call_model", side_effect=reply):
+            self.assertEqual(candidates.generate_recommendations(self.root, prefs, "gemini", "fixture"), 0)
+        self.assertEqual([len(batch) for batch in batches], [36, 36, 23])
+        with closing(sqlite3.connect(prefs)) as db:
+            counts = dict(db.execute("SELECT candidate_kind, count(*) FROM " + candidates.RECOMMENDATION_TABLE
+                                     + " GROUP BY candidate_kind"))
+        self.assertEqual(counts, {"sentence": 15, "vocabulary": 80})
+        # Retrying the stale UI snapshot does not pay for completed work again.
+        with patch.object(candidates, "call_model") as model:
+            self.assertEqual(candidates.generate_recommendations(self.root, prefs, "gemini", "fixture"), 0)
+            model.assert_not_called()
+
     def test_archive_postcommit_log_failure_keeps_committed_media(self):
         database, ns = self.archive()
         def broken_log(*args, **kwargs): raise BrokenPipeError("closed log")
