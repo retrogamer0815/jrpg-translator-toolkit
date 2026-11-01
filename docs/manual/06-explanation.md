@@ -16,7 +16,7 @@ It uses its own provider, model, and prompt. A fast translation model and a diff
 2. Capture and translate a dialogue line.
 3. Open **Explanation**.
 4. Choose its **Provider**, **Model**, and **Prompt**.
-5. Choose **Explain last text**, or use the configured explanation action.
+5. Choose **Detailed explanation**, or use the configured explanation action.
 6. Read the response in the Explainer overlay.
 
 If no Japanese source is available, check the translation prompt and output format rather than repeatedly requesting explanations. A translation-only response may not provide the source the Explainer needs.
@@ -28,6 +28,58 @@ If no Japanese source is available, check the translation prompt and output form
 ![Explainer analysis on the left of a Japanese game, with the Translator's Japanese transcript and English translation on the right](images/explainer-output.png)
 
 *Figure S11. The Explainer breaks down the latest Japanese source while the Translator shows the transcript and translation. This is a real output example, not a guarantee of AI accuracy.*
+
+## Quick explanations during play
+
+For a shorter answer, use **Quick explanation** on the same Explanation page. Its
+bundled prompt asks for a small vocabulary list with readings and meanings, plus
+the key grammar needed to understand the current dialogue. Both actions use the
+latest translated source and display their result in the same Explainer overlay.
+The Quick result is labeled and has its own ready notification.
+
+Quick has a separate **Prompt** selector and **Manage…** menu. Its bundled
+`default_*` prompts support English, German, Spanish, French, Italian, Japanese,
+Korean, Dutch, Polish, Portuguese, Russian, Ukrainian, Simplified Chinese, and
+Traditional Chinese—the same languages as Detailed explanations. Choose the
+desired language here in the desktop UI or Big Box's Quick row; for example,
+`default_de` gives German vocabulary meanings and grammar explanations.
+
+Edit a prompt's language or detail level, or create another prompt; keep `{jp}` where the Japanese
+source should appear. Under **Model options**, leave **Use detailed explanation
+model** enabled, or turn it off to choose a separate provider and model. Add models
+through **Manage models…** in the Detailed section above.
+
+Quick explanations are never saved to the Study Library or plain-text archives.
+The saving options below apply to Detailed explanations. Generating Quick does not
+change those preferences or the Detailed prompt and model. A shorter response can
+finish sooner, but response time still depends on the provider, model, and input.
+
+In **Settings → Controls**, assign **Quick explanation** a keyboard shortcut or
+direct controller button. It starts unassigned; your existing explanation binding
+continues to request Detailed explanations. With JoyToKey, you can map a short
+press to Quick and a long press to Detailed, using two different keyboard shortcuts.
+See [controls and JoyToKey](03a-controls-and-shortcuts.md#use-joytokey-for-short-and-long-presses).
+
+Only one gameplay explanation runs at a time. Requesting the other kind while one
+is running leaves the current request in progress. Quick requests allow up to two
+minutes at the provider; Detailed requests retain their five-minute allowance.
+The interface allows another 45 seconds for startup and finishing the result.
+
+## Detailed and Quick in Big Box
+
+The dashboard header shows separate **Detailed explanation** and **Quick
+explanation** rows, each with its effective provider, model, and prompt.
+
+Open **Explanation AI** from Home to configure both kinds in separate rows.
+In the Quick row, choose **Provider → Use detailed model** to share the Detailed
+provider and model, or choose Gemini / OpenAI to use an independent Quick model.
+The Quick prompt stays separate in either case. Model and prompt selection screens
+also provide their management controls. These settings are shared with the desktop UI.
+
+The full **Explanation** page, reached with LB / RB, L1 / R1, or the page arrows,
+also includes separate **Detailed explanation** and **Quick explanation** buttons.
+Its **Detailed saving** controls apply only to Detailed results; Quick results are
+never saved to the Study Library or plain-text archives.
 
 ## Explain versus show/hide
 

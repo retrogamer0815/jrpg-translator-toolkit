@@ -20,6 +20,8 @@ Settings/prompts/*
 !Settings/prompts/default_*.txt
 Settings/prompts_explain/*
 !Settings/prompts_explain/default_*.txt
+Settings/prompts_quick_explain/*
+!Settings/prompts_quick_explain/default_*.txt
 Settings/glossaries/*
 !Settings/glossaries/example/
 !Settings/glossaries/example/*.txt

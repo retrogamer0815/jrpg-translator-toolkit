@@ -36,16 +36,16 @@ class ModelRequests(unittest.TestCase):
         source = (ROOT / "JRPG Translator.ahk").read_text(encoding="utf-8-sig")
         policy = re.search(r"(?ms)^CPModelRequestTimeoutMs\(.*?^}", source).group()
         defaults = dict((kind, float(seconds)) for kind, seconds in
-                        re.findall(r'"(translation|explanation|evaluation|example)", (\d+)', policy))
+                        re.findall(r'"(translation|explanation|quick_explanation|evaluation|example)", (\d+)', policy))
         self.assertEqual(defaults, model_job.MODEL_TIMEOUT_SECONDS)
         self.assertIn('(seconds[requestKind] + 45) * 1000', policy)
-        for function, kind in [("ExplainNowCore", "explanation"),
-                               ("StudyReaderGenerateNewVersion", "explanation"),
+        for function, kind in [("StudyReaderGenerateNewVersion", "explanation"),
                                ("StudyReaderGenerateVocabularyExample", "example"),
                                ("StudyCandidatesRunBridge", "evaluation")]:
             body = re.search(r"(?ms)^" + function + r"\(.*?^}", source).group()
             self.assertIn('CPModelRequestTimeoutMs("' + kind + '")', body)
         explain = re.search(r"(?ms)^ExplainNowCore\(.*?^}", source).group()
+        self.assertIn('CPModelRequestTimeoutMs(quick ? "quick_explanation" : "explanation")', explain)
         self.assertNotIn('EnvSet("JRPG_MODEL_TIMEOUT_SECONDS"', explain)
         self.assertNotIn('>= 120000', explain)
         overlay = (ROOT / "bin/overlay.ahk").read_text(encoding="utf-8-sig")
@@ -57,7 +57,7 @@ class ModelRequests(unittest.TestCase):
         tree = ast.parse(source)
         assignment = next(n for n in tree.body if isinstance(n, ast.Assign)
                           and any(isinstance(t, ast.Name) and t.id == "MODEL_TIMEOUT_SECONDS" for t in n.targets))
-        namespace = {"model_timeout_seconds": model_job.model_timeout_seconds}
+        namespace = {"model_timeout_seconds": model_job.model_timeout_seconds, "QUICK_EXPLANATION": False}
         with patch.dict(os.environ, {"JRPG_MODEL_TIMEOUT_SECONDS": "75"}):
             exec(compile(ast.Module(body=[assignment], type_ignores=[]), "fixture", "exec"), namespace)
         self.assertEqual(namespace["MODEL_TIMEOUT_SECONDS"], 300)

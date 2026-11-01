@@ -33,7 +33,8 @@ Choose **Keyboard** under **Input bindings** to change a shortcut, disable it, o
 | Action | Default |
 | --- | --- |
 | Capture + Translate | Ctrl+Shift+T |
-| Explain last translation | Ctrl+Shift+E |
+| Detailed explanation (previously Explain last translation) | Ctrl+Shift+E |
+| Quick explanation | Unassigned; choose a shortcut |
 | Show/Hide Translator | Ctrl+Shift+H |
 | Show/Hide Explainer | Ctrl+Shift+X |
 | Show/Hide Control Panel | Ctrl+Shift+C |
@@ -44,6 +45,12 @@ Choose **Keyboard** under **Input bindings** to change a shortcut, disable it, o
 | Audio Translation On/Off | Ctrl+Shift+L |
 
 Keyboard shortcuts are shared settings, not per-game Profile contents. Avoid shortcuts already reserved by the game, emulator, streaming software, or Windows tools.
+
+Quick explanation is also available in the direct Controller binding list. It
+starts unassigned there too. For a short/long-press pair, assign two different
+keyboard shortcuts to Quick and Detailed, then map them in JoyToKey as described
+below. Quick uses its own prompt and optional model on the existing Explanation
+page, and never saves the response to the Study Library or text archives.
 
 ## Use JoyToKey for short and long presses
 

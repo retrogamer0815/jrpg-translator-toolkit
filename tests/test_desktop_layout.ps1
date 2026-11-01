@@ -16,12 +16,13 @@ param(
     [switch]$WelcomeOnly,
     [switch]$CaptionOnly,
     [switch]$FocusOnly,
+    [switch]$QuickExplanationOnly,
     [string]$SourcePath,
     [string]$AutoHotkey = 'C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe',
     [string]$OutputDirectory = (Join-Path ([IO.Path]::GetTempPath()) ('jrpg-desktop-tests-' + [Guid]::NewGuid().ToString('N')))
 )
 $ErrorActionPreference = 'Stop'
-if (@($StudyOnly, $DialogsOnly, $ShutdownOnly, $ResizeOnly, $AudioFeedbackOnly, $ProfileFeedbackOnly, $ChapterOnly, $PromptUnsavedOnly, $GenerationActivityOnly, $MessageNavigationOnly, $ProfileSelectionOnly, $ProfileSwitchOnly, $OverlayColorsOnly, $CaptureNavigationOnly, $WelcomeOnly, $CaptionOnly, $FocusOnly).Where({ [bool]$_ }).Count -gt 1) {
+if (@($StudyOnly, $DialogsOnly, $ShutdownOnly, $ResizeOnly, $AudioFeedbackOnly, $ProfileFeedbackOnly, $ChapterOnly, $PromptUnsavedOnly, $GenerationActivityOnly, $MessageNavigationOnly, $ProfileSelectionOnly, $ProfileSwitchOnly, $OverlayColorsOnly, $CaptureNavigationOnly, $WelcomeOnly, $CaptionOnly, $FocusOnly, $QuickExplanationOnly).Where({ [bool]$_ }).Count -gt 1) {
     throw 'Choose only one focused test mode.'
 }
 $repo = Split-Path -Parent $PSScriptRoot
@@ -528,6 +529,8 @@ New-Item -ItemType Directory -Path (Join-Path $output.FullName 'assets') -Force 
 Copy-Item -LiteralPath (Join-Path $repo 'assets/bigbox-logo.png') -Destination (Join-Path $output.FullName 'assets')
 Copy-Item -LiteralPath (Join-Path $repo 'assets/bigbox-game-placeholder.png') -Destination (Join-Path $output.FullName 'assets')
 Copy-Item -LiteralPath (Join-Path $repo 'assets/desktop-logo.png') -Destination (Join-Path $output.FullName 'assets')
+New-Item -ItemType Directory -Path (Join-Path $output.FullName 'Settings/prompts_quick_explain') -Force | Out-Null
+Copy-Item -Path (Join-Path $repo 'Settings/prompts_quick_explain/default_*.txt') -Destination (Join-Path $output.FullName 'Settings/prompts_quick_explain')
 Copy-Item -LiteralPath $SourcePath -Destination (Join-Path $output.FullName 'JRPG Translator.ahk')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'audio_runtime_fixture.ahk') -Destination $output.FullName
 # Opaque, differently shaped captures exercise replacing the native Picture
@@ -563,6 +566,10 @@ $generated = $harness.Replace('; @UI_GLOBALS@', ($uiGlobals -join "`r`n")).Repla
 $generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'desktop_focus_harness.ahk'))
 if ($FocusOnly) {
     $generated = $generated.Replace('; @STUDY_ONLY@', 'TestDesktopFocusInput()' + "`r`n" + '    DesktopTestOwnerDrawFocusCues()' + "`r`n" + '    DesktopTestOwnerDrawNavigationStability()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " desktop focus assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
+}
+if ($QuickExplanationOnly) {
+    $generated = $generated.Replace('; @STUDY_ONLY@', 'TestQuickExplanationUI()' + "`r`n" + '    ui.Destroy()' + "`r`n" + '    FileAppend("PASS: " TestAssertions " quick explanation UI assertions.`n", "*")' + "`r`n" + '    ExitApp(0)')
+    $generated += "`r`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'quick_explanation_harness.ahk'))
 }
 # Exercise the actual Study control construction and event wiring without its
 # bridge/database/startup calls. All paths/settings below belong to this fixture.
@@ -812,7 +819,7 @@ if (Test-Path -LiteralPath $namingBounds) {
     }
     Write-Output "PASS: $namingChecks naming-control visibility checks."
 }
-if ($StudyOnly -or $ShutdownOnly -or $DialogsOnly -or $ResizeOnly -or $AudioFeedbackOnly -or $ProfileFeedbackOnly -or $ChapterOnly -or $PromptUnsavedOnly -or $GenerationActivityOnly -or $MessageNavigationOnly -or $ProfileSelectionOnly -or $ProfileSwitchOnly -or $OverlayColorsOnly -or $CaptureNavigationOnly -or $WelcomeOnly -or $CaptionOnly -or $FocusOnly) {
+if ($StudyOnly -or $ShutdownOnly -or $DialogsOnly -or $ResizeOnly -or $AudioFeedbackOnly -or $ProfileFeedbackOnly -or $ChapterOnly -or $PromptUnsavedOnly -or $GenerationActivityOnly -or $MessageNavigationOnly -or $ProfileSelectionOnly -or $ProfileSwitchOnly -or $OverlayColorsOnly -or $CaptureNavigationOnly -or $WelcomeOnly -or $CaptionOnly -or $FocusOnly -or $QuickExplanationOnly) {
     Write-Output $result.Trim()
     Write-Output "Test artifacts: $output"
     return

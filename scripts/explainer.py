@@ -46,7 +46,10 @@ EXPLAINER_TXT = os.path.join(OVERLAY_DIR, "explainer.txt")
 EXPLAINER_DONE = os.path.join(OVERLAY_DIR, "explainer.done")
 os.makedirs(OVERLAY_DIR, exist_ok=True)
 
-MODEL_TIMEOUT_SECONDS = model_timeout_seconds("explanation")
+# A command-line mode cannot leak into a later Study Reader child process via
+# inherited environment variables. Existing callers remain detailed by default.
+QUICK_EXPLANATION = "--quick-explanation" in sys.argv[1:]
+MODEL_TIMEOUT_SECONDS = model_timeout_seconds("quick_explanation" if QUICK_EXPLANATION else "explanation")
 
 import time  # add near the other imports
 
@@ -108,7 +111,9 @@ def friendly_provider_error(provider_name: str, exc: Exception) -> str:
 
 def read_text(path: str) -> str:
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # AHK-written source/manifest files may contain a UTF-8 BOM. It must
+        # never become part of the Japanese text or the first image filename.
+        with open(path, "r", encoding="utf-8-sig") as f:
             return f.read()
     except Exception:
         return ""
@@ -807,7 +812,17 @@ def gemini_safety_settings(types):
         )
     ]
 
-prompt_tpl = BASE_PROMPT
+QUICK_PROMPT = """Explain this Japanese game dialogue briefly in English.
+Use plain text, Japanese script and hiragana readings, never romaji.
+Give only two sections: Vocabulary (3-8 useful words, readings and concise meanings)
+and Key grammar (1-3 important constructions with a short explanation in context).
+Use fewer entries when appropriate. Do not invent context or grammatical points.
+No full translation, exhaustive analysis, extra examples, metadata or summaries.
+Japanese input:
+{jp}
+"""
+
+prompt_tpl = QUICK_PROMPT if QUICK_EXPLANATION else BASE_PROMPT
 if EXPLAIN_PROMPT_FILE and os.path.isfile(EXPLAIN_PROMPT_FILE):
     try:
         with open(EXPLAIN_PROMPT_FILE, "r", encoding="utf-8") as f:
@@ -854,7 +869,8 @@ else:
 source_glossary_prompt = build_source_glossary_prompt(JP2TL_GLOSSARY)
 if source_glossary_prompt:
     prompt += "\n\n" + source_glossary_prompt
-prompt += "\n\n" + KEY_GRAMMAR_METADATA_INSTRUCTION
+if not QUICK_EXPLANATION:
+    prompt += "\n\n" + KEY_GRAMMAR_METADATA_INSTRUCTION
 
 try:
     text = ""
@@ -1060,7 +1076,7 @@ if TL2TL_GLOSSARY:
 # can opt out so reviewing an archived line does not replace the player's
 # current in-game explanation or last-source context.
 if env_flag("EXPLAIN_UPDATE_OVERLAY", True):
-    atomic_write_text(EXPLAINER_TXT, text)
+    atomic_write_text(EXPLAINER_TXT, "Quick explanation\n\n" + text if QUICK_EXPLANATION else text)
     signal_explainer_completion()
     print(f"Wrote explanation to: {EXPLAINER_TXT}")
 else:
@@ -1073,13 +1089,13 @@ if not settings_dir:
     settings_dir = os.path.join(os.getcwd(), "Settings")
 
 text_archive_path = ""
-if env_flag("SAVE_EXPLAINS"):
+if not QUICK_EXPLANATION and env_flag("SAVE_EXPLAINS"):
     explains_dir = os.environ.get("EXPLAIN_SAVE_DIR", "").strip()
     if not explains_dir:
         explains_dir = os.path.join(settings_dir, "Explanations")
     text_archive_path = archive_plain_text(explains_dir, jp, source_paths, text)
 
-if env_flag("SAVE_STUDY_LIBRARY"):
+if not QUICK_EXPLANATION and env_flag("SAVE_STUDY_LIBRARY"):
     study_dir = os.environ.get("STUDY_LIBRARY_DIR", "").strip()
     if not study_dir:
         study_dir = os.path.join(settings_dir, "Study Library")

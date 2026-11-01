@@ -2,6 +2,49 @@
 
 All notable changes to JRPG Translator are documented here.
 
+## 1.1.0 - 2026-11-01
+
+### Quick and Detailed explanations
+
+- Choose Quick for a concise vocabulary list and key grammar during play, or
+  Detailed for a fuller explanation and material to revisit in the Study Library.
+  Both actions are available on the existing Explanation page and use the latest
+  Japanese source from Game Text Translation.
+- Quick has its own editable prompt. It can use the Detailed model or a separate
+  provider and model, without changing the Detailed settings.
+- Added Quick prompts in all 14 languages supported by Detailed explanations,
+  with localized headings, vocabulary meanings, and grammar notes. Missing
+  bundled prompts are added without replacing edited prompt files.
+- Added separate Quick keyboard and controller bindings, initially unassigned.
+  Existing Detailed bindings and saving preferences are preserved. JoyToKey can
+  map Quick and Detailed shortcuts to different press lengths on one button.
+- Quick results use the same Explainer overlay with a distinct label and ready
+  notice. They are never saved to the Study Library or plain-text archives;
+  Detailed explanations continue to follow the selected saving preferences.
+
+### Big Box
+
+- Added separate Detailed and Quick provider, model, and prompt summaries to the
+  permanent dashboard header.
+- Added both sets of AI settings to Home's Explanation AI view and both generation
+  actions to the full Explanation page. Desktop and Big Box share the settings.
+- Updated controller navigation, model and prompt management, and compact layouts
+  to accommodate Quick explanations within the existing pages.
+
+### Reliability
+
+- Isolated explanation requests from later source captures and shared process
+  environment changes. Quick and Detailed requests cannot run over each other.
+- Quick allows two minutes at the provider plus 45 seconds for startup and saving
+  the result. Detailed retains its five-minute provider timeout and finishing
+  allowance; other task deadlines are unchanged.
+- Fixed the first source screenshot being skipped when explanation input lists
+  contained a UTF-8 encoding marker. New Detailed explanations retain every
+  capture for Study Library review and Anki, including single-image captures.
+  This does not restore screenshots missing from previously saved entries.
+- Added regression coverage for Quick/Detailed settings, request isolation,
+  screenshot preservation, and desktop and Big Box navigation.
+
 ## 1.0.1 - 2026-10-23
 
 ### Model request timeouts

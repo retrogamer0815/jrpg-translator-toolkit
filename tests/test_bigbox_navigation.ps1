@@ -111,7 +111,9 @@ $artPaths = foreach ($spec in @(@('box', 180, 300), @('logo', 400, 90))) {
 $dashboard = [regex]::Match($source, '(?ms)^CPBigBoxDashboardAlive\(\).*?(?=^CPApplyPresentationModeTransition\()').Value
 if (!$dashboard) { throw 'Dashboard source block was not found.' }
 $globals = [regex]::Matches($source, '(?m)^global CPBigBox[^\r\n]*') | ForEach-Object { $_.Value }
-$functions = @('CPPalette', 'CPSetWindowCloaked', 'StudyLibraryImageDimensions', 'CPExplanationFailureStatus', 'CPTranslationFailureStatus',
+$functions = @('CPQuickExplanationSettings', 'CPQuickExplanationDirectory',
+    'CPQuickExplanationPromptPath', 'CPQuickExplanationChanged', 'CPQuickExplanationRefreshModels',
+    'CPQuickExplanationRefreshPrompts', 'StudyLibrarySafeName', 'CPPalette', 'CPSetWindowCloaked', 'StudyLibraryImageDimensions', 'CPExplanationFailureStatus', 'CPTranslationFailureStatus',
     'CPShowDialogFocusCues', 'CPControllerNavigationState', 'CPControllerResetNavigation',
     'CPControllerBeginSurfaceTransition', 'CPControllerFinishSurfaceTransition',
     'CPControllerSurfaceTransitionBlocks',
@@ -168,7 +170,7 @@ $generated = $generated.Replace('; @BIGBOX_SOURCE@', ($dashboard + "`r`n" + ($ex
 $generatedPath = Join-Path $output.FullName 'bigbox-navigation-generated.ahk'
 [IO.File]::WriteAllText($generatedPath, $generated, [Text.UTF8Encoding]::new($true))
 
-if (!$overlayOnly) {
+if (!$overlayOnly -and !$NavigationOnly) {
 $studyFunctions = @(
     'StudyDesktopRegistry', 'StudyDesktopContext',
     'StudyLibraryFocusOnOpen', 'StudyLibraryImageCounterText', 'StudyLibraryApplyBigBoxFonts',

@@ -20,6 +20,7 @@ import traceback
 MODEL_TIMEOUT_SECONDS = {
     "translation": 75.0,
     "explanation": 300.0,
+    "quick_explanation": 120.0,
     "evaluation": 600.0,
     "example": 120.0,
 }

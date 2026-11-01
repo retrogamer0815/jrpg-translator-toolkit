@@ -15,7 +15,7 @@ Input, or DS4Windows remain optional for custom and multi-function mappings.
 
 ## User manual
 
-Read the **[complete user manual for v1.0.1](docs/manual/README.md)**
+Read the **[complete user manual for v1.1.0](docs/manual/README.md)**
 for setup, controllers, every main feature, LaunchBox / Big Box, Study Library,
 Anki, troubleshooting, and backups. The manual includes real screenshots, a labeled
 desktop overview, and clearly marked placeholders for the remaining screenshots.
@@ -63,7 +63,12 @@ size.
 
 ### Explanations and Frontend Integration
 
-The separate Explainer can break down vocabulary, readings, grammar, and nuance.
+Choose **Quick explanation** for a short vocabulary list and key grammar while
+playing, or **Detailed explanation** for vocabulary, readings, grammar, and nuance
+you can save for later study. Quick has its own prompt, an optional separate model,
+and a separate shortcut; its results stay out of the Study Library. Both modes
+are available in the desktop and Big Box interfaces, with bundled prompts in
+**14 languages**. See [Quick and Detailed explanations](docs/manual/06-explanation.md).
 The optional LaunchBox / Big Box plugin prepares the selected JRPG Translator
 Profile automatically for each game.
 

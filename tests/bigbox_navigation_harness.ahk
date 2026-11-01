@@ -41,6 +41,11 @@ global ddlProv := TestCombo(["Gemini", "OpenAI"]), ddlIMG_GM := TestCombo(model_
 global ddlIMG := TestCombo(model_openai_img), ddlPrompt := TestCombo(["default", "literal"])
 global ddlEProv := TestCombo(["Gemini", "OpenAI"], 2), ddlEGem := TestCombo(model_gemini_explain)
 global ddlEOpenAI := TestCombo(model_openai_explain), ddlEPr := TestCombo(["default", "detailed"])
+global CPDesktop := Map("explanationPage", Map(
+    "quickProvider", TestCombo(["Gemini", "OpenAI"], 2),
+    "quickGemini", TestCombo(model_gemini_explain), "quickOpenAI", TestCombo(model_openai_explain),
+    "quickPrompt", TestCombo(["default_en", "brief"]), "quickUseDetailed", ui.AddCheckbox("Checked")))
+global TestDetailedRequests := 0, TestQuickRequests := 0
 global ddlAProv := TestCombo(["Gemini", "OpenAI"]), ddlTR := TestCombo(model_openai_audio)
 global ddlA_GM := TestCombo(model_gemini_audio), ddlAudioTarget := TestCombo(["English", "German", "French"])
 global btnIMG_Add := ui.AddButton(), btnIMG_Del := ui.AddButton()
@@ -152,6 +157,9 @@ DirCreate(gameProfilesDir)
 DirCreate(glossariesDir "\default")
 DirCreate(promptsDir)
 DirCreate(explainPromptsDir)
+DirCreate(CPQuickExplanationDirectory())
+FileAppend("Quick {jp}", CPQuickExplanationPromptPath("default_en"), "UTF-8")
+FileAppend("Brief {jp}", CPQuickExplanationPromptPath("brief"), "UTF-8")
 FileAppend("Translate {jp}", promptsDir "\default.txt", "UTF-8")
 FileAppend("Literal {jp}", promptsDir "\literal.txt", "UTF-8")
 FileAppend("Explain {jp}", explainPromptsDir "\default.txt", "UTF-8")
@@ -277,7 +285,7 @@ try {
         TestAssert(CPBigBoxControls["pageNext"].Enabled = quickAI, "AI quick view exposes page-switching arrows")
         TestAssert(TestControlShown(CPBigBoxControls["pageNext"]) = quickAI, "AI quick view shows page arrows")
         TestAssert(CPBigBoxNavigationControls.Length = (CPBigBoxAIDomain() != "" || testTile[3] = "quickCapture"
-            || testTile[3] = "quickControls" ? (quickAI ? 8 : 6) : testTile[3] = "quickOverlays" ? 8 : 3),
+            || testTile[3] = "quickControls" ? (testTile[3] = "quickExplanation" ? 10 : quickAI ? 8 : 6) : testTile[3] = "quickOverlays" ? 8 : 3),
             "Quick view focus includes only shown page arrows")
         TestAssert(InStr(CPBigBoxControls["pageHint"].Text, "Home ›"), "Quick view shows Home breadcrumb")
         for testQuickDirection in [1, -1] {
@@ -429,6 +437,7 @@ try {
     TestBigBoxModelManagement()
     TestBigBoxSetupManagement()
     TestPickerReturnFocus()
+    TestQuickExplanationFullscreen()
     TestGroupedFocusAndPainting()
 
     CPBigBoxSetPage("home", false)
@@ -771,7 +780,7 @@ TestExplanationPreferences() {
     IniWrite("keep", iniPath, "test_unrelated", "sentinel")
     testPrefConfigBefore := FileRead(iniPath)
     CPBigBoxSetPage("explanation")
-    TestAssert(CPBigBoxNavigationControls.Length = 13, "Full Explanation page includes eight settings and navigation")
+    TestAssert(CPBigBoxNavigationControls.Length = 17, "Full Explanation page includes Detailed and Quick settings/actions plus navigation")
     TestAssert(FileRead(iniPath) = testPrefConfigBefore, "Opening settings page does not change configuration")
     for testOption in CPBigBoxExplanationOptions() {
         testPref := CPExplanationPreference(testOption)
@@ -979,7 +988,7 @@ TestScreenshotPreferences() {
     }
     TestAssert(FileRead(iniPath) = testProtectedIni, "Quick view cannot toggle hidden Screenshot preferences")
     CPBigBoxSetPage("explanation", false)
-    TestAssert(CPBigBoxControls["settingsGroup2"].Text = "STUDY LIBRARY", "Explanation group is named STUDY LIBRARY")
+    TestAssert(CPBigBoxControls["settingsGroup3"].Text = "DETAILED`nSAVING", "Saving preferences are explicitly Detailed-only")
     CPBigBoxToggleScreenshotOption("clearOnStartup")
     TestAssert(FileRead(iniPath) = testProtectedIni, "Explanation page cannot change Screenshot cleanup preference")
     for testOption in CPBigBoxScreenshotOptions()
@@ -3075,11 +3084,16 @@ TestGroupedFocusAndPainting() {
     TestAssert(explanationHint.Length = 2
         && explanationHint[1] = "Create study-focused explanations from captured game text. AI, saving, and startup changes are saved immediately.",
         "Explanation page describes its purpose instead of using generic AI-setting help")
-    TestAssert(CPBigBoxNavigationRows.Length = 5, "Explanation has arrows, three semantic rows and bottom actions")
+    TestAssert(CPBigBoxNavigationRows.Length = 6, "Explanation has arrows, four semantic rows and bottom actions")
     for groupIndex, group in CPBigBoxExplanationGroups() {
-        for index, key in group[2]
+        index := 0
+        for key in group[2] {
+            if !CPBigBoxControls[key].Enabled
+                continue
+            index += 1
             TestAssert(CPBigBoxNavigationRows[groupIndex + 1][index].Hwnd = CPBigBoxControls[key].Hwnd,
                 "Navigation follows semantic group: " key)
+        }
     }
     for key in ["ai_provider", "exp_library", "exp_openOnStartup", "advanced", "pageNext"] {
         CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls[key]))
@@ -3088,7 +3102,9 @@ TestGroupedFocusAndPainting() {
     }
     CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls["ai_provider"]))
     CPBigBoxDashboardMoveFocus("Down")
-    TestAssert(CPBigBoxFocusFrame["key"] = "exp_library", "Down reaches Study Library from AI settings")
+    TestAssert(CPBigBoxFocusFrame["key"] = "qai_provider", "Down reaches Quick from Detailed settings")
+    CPBigBoxDashboardMoveFocus("Down")
+    TestAssert(CPBigBoxFocusFrame["key"] = "exp_library", "Down reaches Detailed saving from Quick settings")
     CPBigBoxDashboardMoveFocus("Down")
     TestAssert(CPBigBoxFocusFrame["key"] = "exp_openOnStartup", "Down reaches Explainer startup from Study Library")
     CPBigBoxDashboardMoveFocus("Right")
@@ -3119,12 +3135,14 @@ TestGroupedFocusAndPainting() {
     TestAssert(CPBigBoxFocusFrame["key"] = "exp_plainText", "Stale Focus callback cannot move frame back")
     CPBigBoxOpenAIChoice("provider")
     TestAssert(SubStr(CPBigBoxFocusFrame["key"], 1, 6) = "choice", "Picker frame moves to a choice")
-    Loop 3
+    Loop 4
         TestAssert(!TestControlShown(CPBigBoxControls["settingsGroup" A_Index]), "Picker hides group caption " A_Index)
     CPBigBoxBack()
     CPBigBoxSetPage("quickExplanation", false)
-    Loop 3
-        TestAssert(!TestControlShown(CPBigBoxControls["settingsGroup" A_Index]), "Quick view hides group caption " A_Index)
+    Loop 4
+        TestAssert(TestControlShown(CPBigBoxControls["settingsGroup" A_Index]) = (A_Index <= 2),
+            "Explanation AI shows only Detailed and Quick group captions " A_Index)
+    CPBigBoxSetPage("quickTranslation", false)
     TestAssert(TestFontHeight(CPBigBoxControls["ai_provider"]) = TestFontHeight(CPBigBoxControls["advanced"]),
         "Leaving grouped page restores standard button font size")
     controlDarkMode := 0
@@ -3724,7 +3742,7 @@ TestLayout(width, height) {
     TestAssert(brandX + brandW < headingX && brandY + brandH <= headingY + headingH,
         "Brand logo stays beside the heading without overlap")
     previousRowBottom := headingY + headingH
-    for key in ["translation", "explanation", "audio"] {
+    for key in ["translation", "explanation", "quickExplanation", "audio"] {
         previousRight := 0
         rowY := 0
         for field in ["label", "model", "detail"] {
@@ -3899,7 +3917,7 @@ TestLayout(width, height) {
                     "Group caption fits beside its row: " key)
             }
             previousBottom := settingY + settingH
-            if groupIndex < 3 {
+            if groupIndex < CPBigBoxSettingsGroups().Length {
                 CPBigBoxControls["settingsDivider" groupIndex].GetPos(, &dividerY,, &dividerH)
                 TestAssert(dividerY >= previousBottom && dividerY + dividerH < bottomY,
                     "Divider is between groups, not over a button")
@@ -3909,7 +3927,7 @@ TestLayout(width, height) {
         TestAssert(!TestControlShown(CPBigBoxControls["aiNote"]), "Grouped settings page hides the quick-view note")
         for key in CPBigBoxSettingsKeys() {
             CPBigBoxControls[key].GetPos(,, &settingW, &settingH)
-            TestAssert(TestFontHeight(CPBigBoxControls[key]) * 2 + 8 <= settingH,
+            TestAssert(TestFontHeight(CPBigBoxControls[key]) * 2 + 2 * (CPBigBoxFocusFrame.Get("thickness", 3) + 3) <= settingH,
                 "Settings tile has room for label and state: " key)
         }
     } else if CPBigBoxAIDomain() != "" {
@@ -4216,3 +4234,125 @@ CPShowControlPanelReady(*) {
 }
 
 ; @BIGBOX_SOURCE@
+
+CPDesktopRelayout(*) => 0
+ExplainNow(*) {
+    global TestDetailedRequests
+    TestDetailedRequests += 1
+}
+QuickExplainNow(*) {
+    global TestQuickRequests
+    TestQuickRequests += 1
+}
+
+TestQuickExplanationFullscreen() {
+    global CPBigBoxControls, CPBigBoxAIChoice, CPBigBoxGui, CPDesktop, iniPath
+    global ddlEProv, ddlEGem, ddlEOpenAI, ddlEPr, CPBigBoxCurrentPage, CPBigBoxFocusFrame
+    global TestDetailedRequests, TestQuickRequests, CPBigBoxAINotice, CPBigBoxSetupState
+    global CPBigBoxModelManage, CPBigBoxSetupNotice
+    page := CPDesktop["explanationPage"]
+    before := ddlEProv.Text "|" ddlEGem.Text "|" ddlEOpenAI.Text "|" ddlEPr.Text
+    CPBigBoxSetPage("quickExplanation", false)
+    TestAssert(CPBigBoxHeaderStatus()["quickExplanation"]["model"] = CPBigBoxHeaderStatus()["explanation"]["model"],
+        "Quick header resolves the inherited Detailed provider and model")
+    TestAssert(CPBigBoxControls["status_explanation_label"].Text = "Detailed explanation"
+        && CPBigBoxControls["status_quickExplanation_label"].Text = "Quick explanation",
+        "Permanent header distinguishes both explanations")
+    TestAssert(!CPBigBoxControls["qai_model"].Enabled, "Inherited Quick model cannot be edited independently")
+    CPBigBoxOpenQuickAIChoice("provider")
+    TestAssert(CPBigBoxAIChoice["options"][1] = "Use detailed model", "Quick provider offers inheritance")
+    beforeCancel := FileRead(iniPath)
+    CPBigBoxDashboardMoveFocus("Right")
+    CPBigBoxCloseAIChoice()
+    TestAssert(FileRead(iniPath) = beforeCancel && CPBigBoxFocusFrame["key"] = "qai_provider",
+        "Browsing/cancelling Quick provider changes nothing and restores its tile")
+    CPBigBoxOpenQuickAIChoice("provider")
+    CPBigBoxCommitAIChoiceIndex(2)
+    TestAssert(!CPQuickExplanationSettings()["useDetailedModel"] && page["quickProvider"].Text = "Gemini",
+        "Choosing Quick provider disables inheritance and updates desktop settings")
+    CPBigBoxOpenQuickAIChoice("model")
+    CPBigBoxCommitAIChoiceIndex(ArrayIndexOf(CPBigBoxAIChoice["options"], "gemini-explain-alternate"))
+    TestAssert(CPQuickExplanationSettings()["geminiModel"] = "gemini-explain-alternate",
+        "Independent Quick model persists")
+    TestAssert(CPBigBoxHeaderStatus()["quickExplanation"]["model"] = "Gemini · gemini-explain-alternate",
+        "Quick header shows the independent model")
+    CPBigBoxOpenQuickAIChoice("detail")
+    CPBigBoxCommitAIChoiceIndex(2)
+    TestAssert(CPQuickExplanationSettings()["prompt"] = "brief"
+        && CPBigBoxControls["status_quickExplanation_detail"].Text = "Prompt: brief",
+        "Quick prompt choice updates header and desktop")
+    TestAssert(before = ddlEProv.Text "|" ddlEGem.Text "|" ddlEOpenAI.Text "|" ddlEPr.Text,
+        "Quick selections leave Detailed settings unchanged")
+    CPBigBoxOpenQuickAIChoice("model")
+    TestAssert(CPBigBoxModelManageButtonVisible(), "Quick model selection exposes model management")
+    CPBigBoxOpenModelManager()
+    TestAssert(CPBigBoxModelManage["combo"].Hwnd = page["quickGemini"].Hwnd,
+        "Quick model management targets the independent dropdown")
+    CPBigBoxStartManualModel()
+    CPBigBoxControls["setup_edit"].Value := "quick-only-test-model"
+    CPBigBoxSaveSetup()
+    TestAssert(CPQuickExplanationSettings()["geminiModel"] = "quick-only-test-model"
+        && before = ddlEProv.Text "|" ddlEGem.Text "|" ddlEOpenAI.Text "|" ddlEPr.Text,
+        "Adding a Quick model selects it without replacing Detailed settings")
+    CPBigBoxOpenQuickAIChoice("model")
+    CPBigBoxOpenModelManager()
+    CPBigBoxShowModelRemoval()
+    CPBigBoxRequestModelRemoval(ArrayIndexOf(CPBigBoxAIChoice["options"], "quick-only-test-model"))
+    CPBigBoxConfirmModelRemoval()
+    TestAssert(CPQuickExplanationSettings()["geminiModel"] = page["quickGemini"].Text
+        && page["quickGemini"].Text != "quick-only-test-model",
+        "Removing the selected Quick model persists its replacement")
+    TestAssert(CPBigBoxFocusFrame["key"] = "qai_model", "Model manager returns to Quick model tile")
+    CPBigBoxOpenQuickAIChoice("detail")
+    CPBigBoxOpenPromptManager()
+    TestAssert(CPBigBoxPromptSpec(CPBigBoxSetupState["domain"])["dir"] = CPQuickExplanationDirectory(),
+        "Quick prompt manager uses separate prompt directory")
+    CPBigBoxPromptAction("edit")
+    CPBigBoxControls["setup_raw"].Value := "Edited Quick {jp}"
+    CPBigBoxSaveSetup()
+    TestAssert(FileRead(CPQuickExplanationPromptPath("brief"), "UTF-8") = "Edited Quick {jp}"
+        && CPBigBoxFocusFrame["key"] = "qai_detail", "Prompt edit saves only Quick and restores Quick focus")
+    CPBigBoxOpenQuickAIChoice("provider")
+    ; Simulate a desktop change while the picker is open.
+    page["quickUseDetailed"].Value := 1
+    CPQuickExplanationChanged()
+    CPBigBoxCommitAIChoiceIndex(3)
+    TestAssert(CPQuickExplanationSettings()["useDetailedModel"] && InStr(CPBigBoxAINotice, "changed"),
+        "Stale Quick picker cannot overwrite a newer desktop model-sharing choice")
+    CPBigBoxOpenQuickAIChoice("provider")
+    CPBigBoxCommitAIChoiceIndex(3)
+    CPBigBoxOpenQuickAIChoice("model")
+    CPBigBoxCommitAIChoiceIndex(ArrayIndexOf(CPBigBoxAIChoice["options"], "gpt-explain-alternate"))
+    TestAssert(CPQuickExplanationSettings()["provider"] = "openai"
+        && CPQuickExplanationSettings()["openAIModel"] = "gpt-explain-alternate", "Quick OpenAI settings work too")
+    for dimension in [[1280,720], [1920,1080], [3840,2160]] {
+        CPBigBoxGui.Show("Hide w" dimension[1] " h" dimension[2])
+        CPBigBoxDashboardResize(CPBigBoxGui, 0, dimension[1], dimension[2])
+        for target in ["quickExplanation", "explanation"] {
+            CPBigBoxSetPage(target, false)
+            TestLayout(dimension[1], dimension[2])
+            TestCapture(target "-quick-" dimension[1] ".png", dimension[1], dimension[2])
+            CPBigBoxDashboardSetFocus(CPBigBoxDashboardControlIndex(CPBigBoxControls["ai_model"]))
+            CPBigBoxDashboardMoveFocus("Down")
+            TestAssert(CPBigBoxFocusFrame["key"] = "qai_model", "Down from Detailed model reaches Quick model")
+            CPBigBoxSwitchPage(1)
+            TestAssert(CPBigBoxCurrentPage = "explanationWindow", "R continues the full page ring from either Explanation view")
+        }
+    }
+    CPBigBoxSetPage("explanation", false)
+    priorQuickRequests := TestQuickRequests, priorDetailedRequests := TestDetailedRequests
+    SendMessage(0xF5, 0, 0, CPBigBoxControls["explain_quick"].Hwnd)
+    Sleep(30)
+    SendMessage(0xF5, 0, 0, CPBigBoxControls["explain_detailed"].Hwnd)
+    Sleep(30)
+    TestAssert(TestQuickRequests = priorQuickRequests + 1 && TestDetailedRequests = priorDetailedRequests + 1,
+        "Generation buttons dispatch the correct existing action: " TestQuickRequests "/" TestDetailedRequests)
+    CPBigBoxOpenQuickAIChoice("provider")
+    CPBigBoxCommitAIChoiceIndex(1)
+    TestAssert(CPQuickExplanationSettings()["useDetailedModel"] && !CPBigBoxControls["qai_model"].Enabled,
+        "Quick can return to sharing Detailed model")
+    TestAssert(CPQuickExplanationSettings()["prompt"] = "brief", "Returning to inherited model preserves Quick prompt")
+    CPBigBoxSetPage("home", false)
+    TestAssert(!TestControlShown(CPBigBoxControls["qai_provider"])
+        && !TestControlShown(CPBigBoxControls["explain_quick"]), "Explanation controls hide on other pages")
+}

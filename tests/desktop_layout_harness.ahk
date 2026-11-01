@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+﻿#Requires AutoHotkey v2.0
 #SingleInstance Off
 #NoTrayIcon
 #Warn All, StdOut
@@ -1459,7 +1459,7 @@ DesktopTestExplanationPage() {
             "Explanation exposes prompt editing only through Manage")
         DesktopAssert(CPDesktop["paint"][CPDesktop["chrome"]["explanation"].Hwnd]["selected"], "Explanation sidebar row is selected")
         DesktopAssert(!DesktopShown(chkOpenEW) && !DesktopShown(chkTop_EW), "Explanation startup choices begin collapsed")
-        DesktopAssert(CPDesktop["paint"][btnExplainNow.Hwnd]["kind"] = "primary" && btnExplainNow.Text = "Explain latest text", "Explanation has one clear primary action")
+        DesktopAssert(CPDesktop["paint"][btnExplainNow.Hwnd]["kind"] = "primary" && btnExplainNow.Text = "Detailed explanation", "Explanation has one clear primary action")
         ddlEGem.GetPos(, &modelY), ddlEPr.GetPos(, &promptY)
         DesktopAssert(w >= 1120 ? modelY = promptY : promptY > modelY, "Explanation AI fields reflow at narrow widths")
         DesktopAssert(DllCall("user32\GetNextDlgTabItem", "ptr", ui.Hwnd, "ptr", ddlEProv.Hwnd, "int", 0, "ptr") = ddlEGem.Hwnd, "Explanation keyboard order reaches the active model")

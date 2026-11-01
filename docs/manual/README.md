@@ -2,7 +2,7 @@
 
 JRPG Translator helps you translate Japanese game text and spoken dialogue while you play. Its optional learning tools explain the Japanese and let you build a searchable Study Library and Anki cards.
 
-*For version 1.0.1.*
+*For version 1.1.0.*
 
 ## Start here
 

@@ -2,7 +2,7 @@
 #SingleInstance Off
 #Warn
 #NoTrayIcon
-;@Ahk2Exe-SetVersion 1.0.1.0
+;@Ahk2Exe-SetVersion 1.1.0.0
 ;@Ahk2Exe-SetName JRPG Translator
 ;@Ahk2Exe-SetDescription JRPG Translator
 ;@Ahk2Exe-SetCopyright Copyright (c) 2025 retrogamer0815
@@ -80,7 +80,7 @@ global CPBigBoxFocusFrame := Map("key", "", "rect", "", "thickness", 3, "parts",
 global CPBigBoxPaintButtons := Map()
 global CPBigBoxPaintRegistered := false
 global GameProfileLastError := ""
-global APP_VERSION := "1.0.1"
+global APP_VERSION := "1.1.0"
 global PROJECT_URL := "https://github.com/retrogamer0815/jrpg-translator-toolkit"
 global BUG_REPORT_URL := PROJECT_URL "/issues/new"
 global WRITTEN_GUIDE_URL := PROJECT_URL "/blob/main/docs/manual/README.md"
@@ -3119,6 +3119,7 @@ global __HK_STARTSTOP_AUDIO := ""
 global __HK_HIDE_SHOW_CP := ""
 Rebind_ExplainLastTranslation() {
     global __HK_EXPLAIN_LAST, iniPath
+    Rebind_QuickExplanation()
 
     newHK := Trim(IniRead(iniPath, "hotkeys", "explain_last_translation", ""))
 
@@ -3319,7 +3320,7 @@ CPBigBoxPageDefinitions() {
         "controls", ["Controls", "Complete keyboard shortcut and controller configuration", "Stage 3F"],
         "apiKeys", ["API Keys", "Provider credentials and general setup", "Stage 3H"],
         "quickTranslation", ["Translation AI", "Quick settings: provider, model and prompt", "Stage 3C"],
-        "quickExplanation", ["Explanation AI", "Quick settings: provider, model and prompt", "Stage 3C"],
+        "quickExplanation", ["Explanation AI", "Detailed and Quick: provider, model and prompt", "Stage 3C"],
         "quickAudio", ["Audio Translation AI", "Quick settings: provider, model and language", "Stage 3C"],
         "quickAudioToggle", ["Audio Translation On/Off", "Start or stop audio translation directly from Home", "Stage 3D"],
         "quickCapture", ["Capture", "Choose a game window or select a capture region", "Stage 3D"],
@@ -4952,6 +4953,9 @@ CPBigBoxPromptSpec(domain := "") {
     global ddlPrompt, ddlEPr, promptsDir, explainPromptsDir
     if domain = ""
         domain := CPBigBoxAIDomain()
+    if domain = "quick_explanation"
+        return Map("domain", domain, "combo", CPBigBoxAIControl(domain, "detail"), "dir", CPQuickExplanationDirectory(),
+            "kind", "explanation", "label", "Quick explanation prompt")
     if domain = "translation"
         return Map("domain", domain, "combo", ddlPrompt, "dir", promptsDir,
             "kind", "translation", "label", "translation prompt")
@@ -4974,7 +4978,7 @@ CPBigBoxPromptManageButtonVisible() {
     global CPBigBoxAIChoice
     return CPBigBoxAIChoiceActive() && !CPBigBoxModelManageActive()
         && CPBigBoxAIChoice["field"] = "detail"
-        && (CPBigBoxAIChoice["domain"] = "translation" || CPBigBoxAIChoice["domain"] = "explanation")
+        && ArrHas(["translation", "explanation", "quick_explanation"], CPBigBoxAIChoice["domain"])
 }
 
 CPBigBoxChoiceManageButtonVisible() {
@@ -5041,6 +5045,11 @@ CPBigBoxPromptAction(action, *) {
         state["savedText"] := CPPromptEditorComparableText(CPBigBoxControls["setup_raw"].Value)
         CPBigBoxSetupEnter("setupEdit")
     } else if action = "delete" {
+        if spec["domain"] = "quick_explanation" && state["selected"] = "default_en" {
+            CPBigBoxSetupNotice := "The bundled Quick prompt cannot be deleted."
+            CPBigBoxDashboardUpdateContent()
+            return
+        }
         if ControlGetItems(spec["combo"].Hwnd).Length <= 1 {
             CPBigBoxSetupNotice := "At least one prompt profile must remain."
             CPBigBoxDashboardUpdateContent()
@@ -5055,6 +5064,8 @@ CPBigBoxPromptAction(action, *) {
 CPBigBoxRefreshPromptSelection(spec, name) {
     if spec["domain"] = "translation"
         RefreshPromptProfilesList(name)
+    else if spec["domain"] = "quick_explanation"
+        CPQuickExplanationRefreshPrompts(name)
     else
         RefreshExplainPromptProfilesList(name)
     CPBigBoxApplyAISelection(spec["domain"], "detail")
@@ -5096,7 +5107,7 @@ CPBigBoxFinishPromptManage(name := "") {
         CPBigBoxAINotice := notice
         CPBigBoxDashboardRelayoutAndUpdate()
         CPBigBoxApplyPageVisibility()
-        CPBigBoxPageFocus[page] := "ai_detail"
+        CPBigBoxPageFocus[page] := state["origin"]["returnKey"]
     } finally {
         CPBigBoxPageChanging := previousChanging
     }
@@ -6179,8 +6190,9 @@ CPBigBoxExplanationOptions() {
 
 CPBigBoxExplanationGroups() {
     return [
-        ["AI SETTINGS", ["ai_provider", "ai_model", "ai_detail"]],
-        ["STUDY LIBRARY", ["exp_library", "exp_screenshots", "exp_plainText"]],
+        ["DETAILED", ["ai_provider", "ai_model", "ai_detail", "explain_detailed"]],
+        ["QUICK", ["qai_provider", "qai_model", "qai_detail", "explain_quick"]],
+        ["DETAILED`nSAVING", ["exp_library", "exp_screenshots", "exp_plainText"]],
         ["EXPLAINER`nSTARTUP", ["exp_openOnStartup", "exp_alwaysOnTop"]]
     ]
 }
@@ -6197,6 +6209,9 @@ CPBigBoxSettingsGroups(page := "") {
     global CPBigBoxCurrentPage
     switch page = "" ? CPBigBoxCurrentPage : page {
         case "explanation": return CPBigBoxExplanationGroups()
+        case "quickExplanation":
+            return [["DETAILED", ["ai_provider", "ai_model", "ai_detail"]],
+                ["QUICK", ["qai_provider", "qai_model", "qai_detail"]]]
         case "screenshot":
             return [
                 ["AI SETTINGS", ["ai_provider", "ai_model", "ai_detail"]],
@@ -6397,7 +6412,9 @@ CPBigBoxUpdateSettingsHint(key := "") {
         : CPBigBoxCurrentPage = "audio"
             ? "Capture game audio from a Windows output device. New settings apply on the next audio start."
         : "Translate text captured from your game. AI, formatting, and startup changes are saved immediately."
-    if SubStr(key, 1, 4) = "exp_"
+    if CPBigBoxExplanationPage() && (SubStr(key, 1, 4) = "qai_" || SubStr(key, 1, 8) = "explain_" || CPBigBoxCurrentPage = "quickExplanation")
+        help := CPBigBoxQuickAIHelp(key)
+    else if SubStr(key, 1, 4) = "exp_"
         help := CPExplanationPreference(SubStr(key, 5))["help"]
     else if SubStr(key, 1, 5) = "shot_"
         help := CPScreenshotPreference(SubStr(key, 6))["help"]
@@ -6435,12 +6452,12 @@ CPBigBoxUpdateSettingsHint(key := "") {
         : CPBigBoxCurrentPage = "apiKeys"
             ? "Keys stay masked throughout the dashboard. In-app entry is written only after Save."
         : CPBigBoxAINotice != "" ? CPBigBoxAINotice
-        : CPBigBoxCurrentPage = "explanation"
-            ? "Model/prompt editing and study actions remain available in Advanced Settings during migration."
+        : CPBigBoxExplanationPage()
+            ? "Quick results are never saved. Detailed uses the Study Library and screenshot preferences."
             : CPBigBoxCurrentPage = "audio"
                 ? CPBigBoxAudioHintDetail(key)
             : CPBigBoxScreenshotHintDetail(key))
-    if CPBigBoxCurrentPage = "explanation" && CPExplanationFailureStatus() != ""
+    if CPBigBoxExplanationPage() && CPExplanationFailureStatus() != ""
         text := CPExplanationFailureStatus() "`nFull error details are in the Explainer overlay."
     if CPBigBoxCurrentPage = "screenshot" && CPTranslationFailureStatus() != ""
         text := CPTranslationFailureStatus() "`nFull error details are in the Translator overlay."
@@ -6787,10 +6804,55 @@ CPBigBoxCancelCaptureWatch(*) {
     try SetTimer(CPBigBoxWatchCapture, 0)
 }
 
+CPBigBoxExplanationPage() {
+    global CPBigBoxCurrentPage
+    return CPBigBoxCurrentPage = "explanation" || CPBigBoxCurrentPage = "quickExplanation"
+}
+
+CPBigBoxOpenQuickAIChoice(field, *) {
+    if CPBigBoxExplanationPage()
+        CPBigBoxOpenAIChoice(field, "quick_explanation")
+}
+
+CPBigBoxGenerateExplanation(kind, *) {
+    global CPBigBoxCurrentPage
+    if !CPBigBoxPageNavigationAllowed() || CPBigBoxAIChoiceActive() || CPBigBoxCurrentPage != "explanation"
+        return
+    if kind = "quick"
+        QuickExplainNow()
+    else
+        ExplainNow()
+    CPBigBoxDashboardUpdateContent()
+}
+
+CPBigBoxQuickAIHelp(key) {
+    switch key {
+        case "qai_provider": return "Choose Use detailed model to share its provider and model, or select a provider for Quick only."
+        case "qai_model": return "Choose a separate Quick model. To change it, first select a provider in the Quick row."
+        case "qai_detail": return "Choose or manage the concise Quick prompt independently of the Detailed prompt."
+        case "explain_quick": return "Generate a short vocabulary list and key grammar from the last translation. Quick results are never saved."
+        case "explain_detailed": return "Generate a full explanation from the last translation, using the Detailed saving options below."
+    }
+    return "Configure Detailed explanations for study and Quick explanations for vocabulary and key grammar while playing."
+}
+
+CPBigBoxUpdateQuickAIContent() {
+    global CPBigBoxControls
+    quick := CPQuickExplanationSettings()
+    for field in ["provider", "model", "detail"] {
+        value := CPBigBoxAIControl("quick_explanation", field).Text
+        if quick["useDetailedModel"] && field != "detail"
+            value := field = "provider" ? "Use detailed model" : CPBigBoxAIControl("explanation", "model").Text
+        CPBigBoxControls["qai_" field].Text := CPBigBoxAIFieldLabel("quick_explanation", field)
+            . "`n" StrReplace(CPBigBoxShortText(value != "" ? value : "No selection", 56), "&", "&&")
+    }
+}
+
 CPBigBoxAIControl(domain, field) {
     global ddlProv, ddlIMG, ddlIMG_GM, ddlPrompt
     global ddlEProv, ddlEOpenAI, ddlEGem, ddlEPr
     global ddlAProv, ddlTR, ddlA_GM, ddlAudioTarget, ddlSpeaker
+    global CPDesktop
     switch domain {
         case "translation":
             switch field {
@@ -6803,6 +6865,13 @@ CPBigBoxAIControl(domain, field) {
                 case "provider": return ddlEProv
                 case "model": return StrLower(ddlEProv.Text) = "gemini" ? ddlEGem : ddlEOpenAI
                 case "detail": return ddlEPr
+            }
+        case "quick_explanation":
+            page := CPDesktop["explanationPage"]
+            switch field {
+                case "provider": return page["quickProvider"]
+                case "model": return page[StrLower(page["quickProvider"].Text) = "gemini" ? "quickGemini" : "quickOpenAI"]
+                case "detail": return page["quickPrompt"]
             }
         case "audio":
             switch field {
@@ -6873,6 +6942,11 @@ CPBigBoxModelSpec(domain := "", providerText := "") {
                 "provider", provider, "providerText", providerText, "purpose", "explanation")
             : Map("array", model_openai_explain, "key", "openai_explain", "combo", ddlEOpenAI,
                 "provider", provider, "providerText", providerText, "purpose", "explanation")
+    if domain = "quick_explanation" {
+        spec := CPBigBoxModelSpec("explanation", providerText)
+        spec["combo"] := CPBigBoxAIControl(domain, "model")
+        return spec
+    }
     if domain = "audio"
         return provider = "gemini"
             ? Map("array", model_gemini_audio, "key", "gemini_audio", "combo", ddlA_GM,
@@ -6933,6 +7007,8 @@ CPBigBoxModelManageValidation() {
         throw ValueError("Model management is no longer active.")
     state := CPBigBoxModelManage
     spec := CPBigBoxModelSpec(state["domain"], state["providerText"])
+    if state["domain"] = "quick_explanation" && CPQuickExplanationSettings()["useDetailedModel"]
+        throw ValueError("Quick now uses the Detailed model. Reopen its Provider setting to choose an independent model.")
     if spec["key"] != state["key"] || spec["provider"] != state["provider"]
         || CPBigBoxAIControl(state["domain"], "provider").Text != state["providerText"]
         || IniRead(iniPath, "game_profiles", "active", "") != state["profile"]
@@ -7140,7 +7216,7 @@ CPBigBoxFinishModelManage() {
         CPBigBoxDashboardRelayoutAndUpdate()
         CPBigBoxApplyPageVisibility()
         if CPBigBoxCurrentPage = state["page"]
-            CPBigBoxPageFocus[CPBigBoxCurrentPage] := "ai_model"
+            CPBigBoxPageFocus[CPBigBoxCurrentPage] := state["origin"]["returnKey"]
     } finally {
         CPBigBoxPageChanging := previousChanging
     }
@@ -7162,16 +7238,21 @@ CPBigBoxAIListKeys() {
     return ["listChoice1", "listChoice2", "listChoice3", "listChoice4", "listChoice5"]
 }
 
-CPBigBoxOpenAIChoice(field, *) {
+CPBigBoxOpenAIChoice(field, domainOverride := "", *) {
     global CPBigBoxAIChoice, CPBigBoxAINotice, CPBigBoxCurrentPage, iniPath
     if !CPBigBoxPageNavigationAllowed() || CPBigBoxAIChoiceActive()
         return
     if field = "device" && (CPBigBoxCurrentPage != "audio" || AudioInputJobBusy())
         return
-    domain := CPBigBoxAIDomain()
+    domain := domainOverride = "quick_explanation" ? domainOverride : CPBigBoxAIDomain()
+    quick := domain = "quick_explanation" ? CPQuickExplanationSettings() : 0
+    if IsObject(quick) && field = "model" && quick["useDetailedModel"]
+        return
     if domain = ""
         return
     try {
+        if IsObject(quick)
+            CPQuickExplanationRefreshModels()
         ctrl := CPBigBoxAIControl(domain, field)
         options := ControlGetItems(ctrl.Hwnd)
         if !options.Length {
@@ -7182,10 +7263,15 @@ CPBigBoxOpenAIChoice(field, *) {
         }
         CPBigBoxRememberPageFocus()
         selected := ctrl.Value
+        if IsObject(quick) && field = "provider" {
+            options.InsertAt(1, "Use detailed model")
+            selected := quick["useDetailedModel"] ? 1 : selected + 1
+        }
         CPBigBoxAIChoice := Map("active", true, "domain", domain, "field", field,
             "options", options, "index", Max(1, selected),
             "value", ctrl.Text, "hwnd", ctrl.Hwnd, "page", CPBigBoxCurrentPage,
-            "returnKey", field = "device" ? "audio_device" : "ai_" field,
+            "returnKey", field = "device" ? "audio_device" : (IsObject(quick) ? "qai_" : "ai_") field,
+            "useDetailedModel", IsObject(quick) ? quick["useDetailedModel"] : -1,
             "provider", CPBigBoxAIControl(domain, "provider").Text,
             "profile", IniRead(iniPath, "game_profiles", "active", ""))
         CPBigBoxStopPageAnimation()
@@ -7361,31 +7447,39 @@ CPBigBoxCommitAIChoiceIndex(index) {
             || CPBigBoxAIControl(state["domain"], "provider").Text != state["provider"]
             || IniRead(iniPath, "game_profiles", "active", "") != state["profile"])
             throw ValueError("Settings changed while choosing. Please select again.")
+        if state["domain"] = "quick_explanation"
+            && CPQuickExplanationSettings()["useDetailedModel"] != state["useDetailedModel"]
+            throw ValueError("Quick model settings changed while choosing. Please select again.")
         value := state["options"][index]
-        liveIndex := 0
-        for itemIndex, item in ControlGetItems(ctrl.Hwnd) {
-            if item == value {
-                liveIndex := itemIndex
-                break
-            }
-        }
-        if !liveIndex
-            throw ValueError("This choice is no longer available. Please select again.")
-        if !(value == ctrl.Text) {
-            if state["field"] = "device" {
-                ; Persist before changing the native selection; a failed write
-                ; must leave the old audio input selected in both presentations.
-                CPSetAudioDeviceSelection(value)
-            } else {
-                ctrl.Choose(liveIndex)
-                ; Choose() does not emit Change. Use the same persistence and
-                ; runtime-update routines as the desktop's Change handlers.
-                CPBigBoxApplyAISelection(state["domain"], state["field"])
-            }
-            CPBigBoxAINotice := "Saved · " CPBigBoxAIFieldLabel(state["domain"], state["field"])
-                . ": " CPBigBoxShortText(value, 80)
+        if state["domain"] = "quick_explanation" && state["field"] = "provider" {
+            CPBigBoxCommitQuickProvider(index)
+            CPBigBoxAINotice := "Saved · Quick: " value
         } else {
-            CPBigBoxAINotice := "Already selected; no settings changed."
+            liveIndex := 0
+            for itemIndex, item in ControlGetItems(ctrl.Hwnd) {
+                if item == value {
+                    liveIndex := itemIndex
+                    break
+                }
+            }
+            if !liveIndex
+                throw ValueError("This choice is no longer available. Please select again.")
+            if !(value == ctrl.Text) {
+                if state["field"] = "device" {
+                    ; Persist before changing the native selection; a failed write
+                    ; must leave the old audio input selected in both presentations.
+                    CPSetAudioDeviceSelection(value)
+                } else {
+                    ctrl.Choose(liveIndex)
+                    ; Choose() does not emit Change. Use the same persistence and
+                    ; runtime-update routines as the desktop's Change handlers.
+                    CPBigBoxApplyAISelection(state["domain"], state["field"])
+                }
+                CPBigBoxAINotice := "Saved · " CPBigBoxAIFieldLabel(state["domain"], state["field"])
+                    . ": " CPBigBoxShortText(value, 80)
+            } else {
+                CPBigBoxAINotice := "Already selected; no settings changed."
+            }
         }
     } catch ValueError as ex {
         CPBigBoxAINotice := ex.Message
@@ -7399,7 +7493,23 @@ CPBigBoxCommitAIChoiceIndex(index) {
     CPBigBoxCloseAIChoice()
 }
 
+CPBigBoxCommitQuickProvider(index) {
+    global CPDesktop
+    page := CPDesktop["explanationPage"]
+    page["quickUseDetailed"].Value := index = 1
+    if index > 1
+        page["quickProvider"].Choose(index - 1)
+    CPQuickExplanationChanged()
+}
+
 CPBigBoxApplyAISelection(domain, field) {
+    if domain = "quick_explanation" {
+        CPQuickExplanationChanged()
+        ; Model lists are shared: a removed model may also change Detailed's selection.
+        AutoPersist()
+        ToggleExplanationControls()
+        return
+    }
     if domain = "explanation" && field = "detail" {
         ExplainPromptChanged()
         return
@@ -7496,6 +7606,8 @@ CPBigBoxUpdateAIContent() {
     if domain = "" && !(CPBigBoxAIChoiceActive()
         && ArrHas(["overlayFont", "controlAction", "glossaryProfile", "glossaryEntry", "gameProfile", "startupOverlays"], CPBigBoxAIChoice["field"]))
         return
+    if CPBigBoxExplanationPage()
+        CPBigBoxUpdateQuickAIContent()
     if domain != "" {
     for field in ["provider", "model", "detail"] {
         value := "Unavailable"
@@ -7530,7 +7642,7 @@ CPBigBoxUpdateAIContent() {
     } else {
     CPBigBoxControls["modeTitle"].Text := "Choose " StrLower(CPBigBoxAIFieldLabel(domain, state["field"]))
     CPBigBoxControls["pageHint"].Text := CPBigBoxPageDefinitions()[state["page"]][1]
-        . " › " CPBigBoxAIFieldLabel(domain, state["field"])
+        . " › " (domain = "quick_explanation" ? "Quick › " : domain = "explanation" ? "Detailed › " : "") CPBigBoxAIFieldLabel(domain, state["field"])
         . (CPBigBoxAIListActive() ? "     ·     Item " state["index"] " of " state["options"].Length : "")
     CPBigBoxControls["modeBody"].Text := glossaryEntries
         ? "Choose an existing entry to edit, or add a new one.`nB / Esc returns without changing the terminology file."
@@ -7956,6 +8068,17 @@ CPBigBoxApplyPageVisibility() {
         CPBigBoxControls[key].Visible := isAI && !choosing
         CPBigBoxControls[key].Enabled := isAI && !choosing
     }
+    for field in ["provider", "model", "detail"] {
+        active := CPBigBoxExplanationPage() && !choosing
+        CPBigBoxControls["qai_" field].Visible := active
+        CPBigBoxControls["qai_" field].Enabled := active
+            && (field != "model" || !CPQuickExplanationSettings()["useDetailedModel"])
+    }
+    for kind in ["detailed", "quick"] {
+        active := CPBigBoxCurrentPage = "explanation" && !choosing
+        CPBigBoxControls["explain_" kind].Visible := active
+        CPBigBoxControls["explain_" kind].Enabled := active
+    }
     if CPBigBoxGroupedSettingsActive()
         CPBigBoxControls["aiNote"].Visible := false
     for option in CPBigBoxExplanationOptions() {
@@ -7973,10 +8096,12 @@ CPBigBoxApplyPageVisibility() {
         CPBigBoxControls[key].Visible := active
         CPBigBoxControls[key].Enabled := active && (SubStr(key, 1, 12) = "audio_status" || !AudioInputJobBusy())
     }
-    Loop 3 {
+    Loop 4 {
         CPBigBoxControls["settingsGroup" A_Index].Visible := CPBigBoxGroupedSettingsActive()
-        if A_Index < 3
+            && A_Index <= CPBigBoxSettingsGroups().Length
+        if A_Index < 4
             CPBigBoxControls["settingsDivider" A_Index].Visible := CPBigBoxGroupedSettingsActive()
+                && A_Index < CPBigBoxSettingsGroups().Length
     }
     for key in CPBigBoxAIChoiceKeys() {
         active := choosing
@@ -8483,10 +8608,10 @@ CPBigBoxDashboardResize(bigBoxGui, minMax, width, height) {
     cpHeaderLeftW := Max(
         260, cpGameCardX - cpMargin - cpSectionGap
     )
-    cpEyebrowH := Max(24, Ceil(24 * cpDashDpiScale))
-    cpTitleH := Max(58, Ceil(58 * cpDashDpiScale))
+    cpEyebrowH := Max(18, Ceil(24 * cpDashDpiScale))
+    cpTitleH := Max(44, Ceil(58 * cpDashDpiScale))
     cpStatusRowH := Max(23, Ceil(28 * cpDashDpiScale))
-    cpSubtitleH := cpStatusRowH * 3
+    cpSubtitleH := cpStatusRowH * 4
     cpTitleY := cpTop + cpEyebrowH + cpHeaderGap
     cpSubtitleY := cpTitleY + cpTitleH + cpHeaderGap
     cpHeaderBottom := cpSubtitleY + cpSubtitleH
@@ -8513,7 +8638,7 @@ CPBigBoxDashboardResize(bigBoxGui, minMax, width, height) {
 
     cpGameTextX := cpGameCardX + cpArtworkSize + cpSectionGap
     cpGameTextW := Max(120, cpGameCardW - cpArtworkSize - cpSectionGap)
-    cpGameLabelH := Max(24, Ceil(24 * cpDashDpiScale))
+    cpGameLabelH := Max(18, Ceil(24 * cpDashDpiScale))
     cpHasSeparateLogo := CP_GAME_BOX_ART != "" && FileExist(CP_GAME_BOX_ART)
         && CP_GAME_CLEAR_LOGO != "" && FileExist(CP_GAME_CLEAR_LOGO)
     cpGameLogoH := cpHasSeparateLogo
@@ -8528,14 +8653,14 @@ CPBigBoxDashboardResize(bigBoxGui, minMax, width, height) {
     ; The native SS_ENDELLIPSIS style on this control deliberately keeps the
     ; game title to one reserved row.  A long title therefore cannot wrap
     ; underneath the platform or leave a clipped third line behind.
-    cpGameTitleH := Max(30, Ceil(32 * cpDashDpiScale))
+    cpGameTitleH := Max(22, Ceil(32 * cpDashDpiScale))
     cpGamePlatformY := cpGameTitleY + cpGameTitleH + cpHeaderGap
-    cpGamePlatformH := Max(28, Ceil(28 * cpDashDpiScale))
+    cpGamePlatformH := Max(18, Ceil(28 * cpDashDpiScale))
     cpProfileLabelY := cpGamePlatformY + cpGamePlatformH
         + cpHeaderGap * 2
-    cpProfileLabelH := Max(22, Ceil(22 * cpDashDpiScale))
+    cpProfileLabelH := Max(16, Ceil(22 * cpDashDpiScale))
     cpProfileValueY := cpProfileLabelY + cpProfileLabelH + cpHeaderGap
-    cpProfileValueH := Max(38, Ceil(38 * cpDashDpiScale))
+    cpProfileValueH := Max(24, Ceil(38 * cpDashDpiScale))
 
     CPBigBoxControls["gameLabel"].Move(
         cpGameTextX, cpTop, cpGameTextW, cpGameLabelH
@@ -8576,10 +8701,10 @@ CPBigBoxDashboardResize(bigBoxGui, minMax, width, height) {
     CPBigBoxControls["subtitle"].Move(
         cpMargin, cpSubtitleY, cpHeaderLeftW, cpSubtitleH
     )
-    cpStatusLabelW := Max(88, Round(100 * cpDashDpiScale))
+    cpStatusLabelW := Max(146, Round(174 * cpDashDpiScale))
     cpStatusGap := Max(10, Round(16 * cpDashDpiScale))
     cpStatusValueW := Max(100, Floor((cpHeaderLeftW - cpStatusLabelW - cpStatusGap * 2) / 2))
-    for cpStatusIndex, cpStatusKey in ["translation", "explanation", "audio"] {
+    for cpStatusIndex, cpStatusKey in ["translation", "explanation", "quickExplanation", "audio"] {
         cpStatusY := cpSubtitleY + (cpStatusIndex - 1) * cpStatusRowH
         CPBigBoxControls["status_" cpStatusKey "_label"].Move(
             cpMargin, cpStatusY, cpStatusLabelW, cpStatusRowH)
@@ -8594,7 +8719,7 @@ CPBigBoxDashboardResize(bigBoxGui, minMax, width, height) {
     )
     cpPanelInnerX := cpMargin + Max(26, Round(cpContentW * 0.035))
     cpPanelInnerW := cpContentW - (cpPanelInnerX - cpMargin) * 2
-    cpPanelTopPad := Max(18, Round(20 * cpDashDpiScale))
+    cpPanelTopPad := CPBigBoxCurrentPage = "explanation" ? Max(12, Round(14 * cpDashDpiScale)) : Max(18, Round(20 * cpDashDpiScale))
     cpModeTitleH := Max(32, Ceil(38 * cpDashDpiScale))
     cpGroupedSettings := CPBigBoxGroupedSettingsActive()
     cpModeBodyH := cpGroupedSettings ? Max(40, Ceil(48 * cpDashDpiScale))
@@ -8684,22 +8809,25 @@ CPBigBoxDashboardResize(bigBoxGui, minMax, width, height) {
                 cpBottomY, cpAIWidth, cpBottomButtonH)
     }
     if cpGroupedSettings {
-        ; Three semantic rows, with left-side captions instead of extra header
-        ; rows. This retains comfortable two-line buttons even at 1280x720.
+        ; Size semantic rows and their columns to the page. Explanation adds
+        ; a Quick row without changing the shoulder-navigation page ring.
         cpGroupLabelW := Max(112, Round(156 * cpDashDpiScale))
-        cpGroupGap := Max(14, Round(16 * cpDashDpiScale))
+        cpGroupGap := CPBigBoxCurrentPage = "explanation" ? Max(6, Round(6 * cpDashDpiScale)) : Max(14, Round(16 * cpDashDpiScale))
         cpGroupButtonX := cpPanelInnerX + cpGroupLabelW + cpGroupGap
         cpGroupButtonW := Floor((cpPanelInnerW - cpGroupLabelW - cpGroupGap - 2 * cpTileGapX) / 3)
-        cpGroupH := Floor((cpGridBottom - cpActionTop - 2 * cpGroupGap) / 3)
-        cpGroupLabelH := Max(34, Ceil(38 * cpDashDpiScale))
+        cpGroupCount := CPBigBoxSettingsGroups().Length
+        cpGroupH := Floor((cpGridBottom - cpActionTop - (cpGroupCount - 1) * cpGroupGap) / cpGroupCount)
+        cpGroupLabelH := Min(cpGroupH, Max(28, Ceil(38 * cpDashDpiScale)))
         for groupIndex, group in CPBigBoxSettingsGroups() {
+            cpColumns := Max(3, group[2].Length)
+            cpGroupButtonW := Floor((cpPanelInnerW - cpGroupLabelW - cpGroupGap - (cpColumns - 1) * cpTileGapX) / cpColumns)
             cpGroupY := cpActionTop + (groupIndex - 1) * (cpGroupH + cpGroupGap)
             CPBigBoxControls["settingsGroup" groupIndex].Move(cpPanelInnerX,
                 cpGroupY + Floor((cpGroupH - cpGroupLabelH) / 2), cpGroupLabelW, cpGroupLabelH)
             for index, key in group[2]
                 CPBigBoxControls[key].Move(cpGroupButtonX + (index - 1) * (cpGroupButtonW + cpTileGapX),
                     cpGroupY, key = "ctrl_status" ? 3 * cpGroupButtonW + 2 * cpTileGapX : cpGroupButtonW, cpGroupH)
-            if groupIndex < 3
+            if groupIndex < cpGroupCount
                 CPBigBoxControls["settingsDivider" groupIndex].Move(cpPanelInnerX,
                     cpGroupY + cpGroupH + Floor(cpGroupGap / 2), cpPanelInnerW, Max(1, Round(cpDashDpiScale)))
         }
@@ -8998,13 +9126,20 @@ CPBigBoxHeaderStatus() {
     global imgProvider, imgModel, geminiImgModel, promptProfile
     global explainProvider, explainOpenAIModel, explainGeminiModel, explainPromptProfile
     global audioProvider, trModel, geminiAudioModel, audioTargetLang
+    quick := CPQuickExplanationSettings()
+    quickProvider := quick["useDetailedModel"] ? explainProvider : quick["provider"]
+    quickModel := quick["useDetailedModel"]
+        ? (StrLower(explainProvider) = "gemini" ? explainGeminiModel : explainOpenAIModel)
+        : quick[StrLower(quickProvider) = "gemini" ? "geminiModel" : "openAIModel"]
     return Map(
         "translation", Map("label", "Translation", "model", CPBigBoxProviderLabel(imgProvider)
             " · " (StrLower(imgProvider) = "gemini" ? geminiImgModel : imgModel),
             "detail", "Prompt: " (promptProfile != "" ? promptProfile : "Not selected")),
-        "explanation", Map("label", "Explanation", "model", CPBigBoxProviderLabel(explainProvider)
+        "explanation", Map("label", "Detailed explanation", "model", CPBigBoxProviderLabel(explainProvider)
             " · " (StrLower(explainProvider) = "gemini" ? explainGeminiModel : explainOpenAIModel),
             "detail", "Prompt: " (explainPromptProfile != "" ? explainPromptProfile : "Not selected")),
+        "quickExplanation", Map("label", "Quick explanation", "model", CPBigBoxProviderLabel(quickProvider)
+            " · " quickModel, "detail", "Prompt: " quick["prompt"]),
         "audio", Map("label", "Audio", "model", CPBigBoxProviderLabel(audioProvider)
             " · " (StrLower(audioProvider) = "gemini" ? geminiAudioModel : trModel),
             "detail", "Language: " (audioTargetLang != "" ? audioTargetLang : "Not selected"))
@@ -9031,8 +9166,8 @@ CPBigBoxUpdateHomeHint(key := "") {
                 help := "Choose the AI provider, model, and prompt for captured game text."
                     . "`nChanges are saved immediately and apply to the next translation."
             case "explanation":
-                help := "Choose the AI provider, model, and prompt for study-focused explanations."
-                    . "`nChanges are saved immediately and apply to the next explanation."
+                help := "Choose separate AI settings for Detailed study-focused explanations and Quick vocabulary / grammar help."
+                    . "`nQuick can use the Detailed model or its own provider and model. Changes are saved immediately."
             case "audio":
                 help := "Choose the AI provider, model, and output language for spoken dialogue."
                     . "`nChanges apply the next time Audio Translation starts."
@@ -9257,7 +9392,8 @@ CPBigBoxSetGameContextField(fieldName, fieldValue) {
 
 CPBigBoxButtonKeys() {
     keys := ["pagePrevious", "pageNext", "backHome", "advanced", "return",
-        "ai_provider", "ai_model", "ai_detail", "listChoice3", "capture_settings", "audio_power",
+        "ai_provider", "ai_model", "ai_detail", "qai_provider", "qai_model", "qai_detail",
+        "explain_detailed", "explain_quick", "listChoice3", "capture_settings", "audio_power",
         "cap_region", "cap_window", "cap_max"]
     for key in CPBigBoxCaptureLimitKeys()
         keys.Push(key)
@@ -9564,7 +9700,7 @@ CPBigBoxDashboardApplyFonts(ratio, force := false) {
         CPBigBoxControls[spec[1]].SetFont(
             "s" Round(spec[2] * ratio, 2) (spec[3] ? " Bold" : " Norm"))
     }
-    for statusKey in ["translation", "explanation", "audio"] {
+    for statusKey in ["translation", "explanation", "quickExplanation", "audio"] {
         CPBigBoxControls["status_" statusKey "_label"].SetFont("s" Round(11 * ratio, 2) " Bold")
         for field in ["model", "detail"]
             CPBigBoxControls["status_" statusKey "_" field].SetFont("s" Round(11 * ratio, 2) " Norm")
@@ -9593,7 +9729,7 @@ CPBigBoxDashboardApplyFonts(ratio, force := false) {
     }
     for row, listPointSize in [11, 14, 18, 14, 11]
         CPBigBoxControls["listChoice" row].SetFont("s" Round(listPointSize * ratio, 2) (row = 3 ? " Bold" : " Norm"))
-    Loop 3
+    Loop 4
         CPBigBoxControls["settingsGroup" A_Index].SetFont("s" Round(10 * ratio, 2) " Bold")
 }
 
@@ -9613,10 +9749,10 @@ CPBigBoxDashboardApplyTheme(*) {
         CPBigBoxControls[cpKey].Opt("+Background" CPBigBoxBackgroundColor("surface"))
     CPBigBoxControls["pageTrack"].Opt("+Background" cpColors["surfaceAlt"])
     CPBigBoxControls["pageHighlight"].Opt("+Background" cpColors["accent"])
-    Loop 3 {
+    Loop 4 {
         CPBigBoxControls["settingsGroup" A_Index].Opt("+Background" CPBigBoxBackgroundColor("surface"))
         CPBigBoxControls["settingsGroup" A_Index].SetFont("c" cpColors["muted"])
-        if A_Index < 3
+        if A_Index < 4
             CPBigBoxControls["settingsDivider" A_Index].Opt("+Background" cpColors["border"])
     }
     for part in CPBigBoxFocusFrame.Get("parts", [])
@@ -9627,7 +9763,7 @@ CPBigBoxDashboardApplyTheme(*) {
         CPBigBoxControls[cpKey].SetFont("c" cpColors["muted"])
     CPBigBoxControls["ctrl_status"].SetFont("c" cpColors["text"])
     CPBigBoxControls["eyebrow"].SetFont("c" cpColors["accent"])
-    for statusKey in ["translation", "explanation", "audio"] {
+    for statusKey in ["translation", "explanation", "quickExplanation", "audio"] {
         for field in ["label", "model", "detail"] {
             CPBigBoxControls["status_" statusKey "_" field].Opt("+Background" CPBigBoxBackgroundColor())
             CPBigBoxControls["status_" statusKey "_" field].SetFont("c"
@@ -9707,7 +9843,7 @@ CPBigBoxDashboardCreate() {
         "Text", "x40 y132 w800 h50 Hidden", ""
     )
     CPBigBoxControls["brandLogo"] := cpGui.Add("Picture", "x40 y40 w1 h1 Hidden", "")
-    for statusKey in ["translation", "explanation", "audio"] {
+    for statusKey in ["translation", "explanation", "quickExplanation", "audio"] {
         for field in ["label", "model", "detail"]
             CPBigBoxControls["status_" statusKey "_" field] := cpGui.Add(
                 "Text", "x40 y132 w100 h28 +0x4200", "") ; centered, ellipsized, no tab stop
@@ -9760,7 +9896,16 @@ CPBigBoxDashboardCreate() {
     CPBigBoxControls["backHome"] := cpGui.Add("Button", "x480 y480 w280 h54 Hidden", "Back to Home")
     for field in ["provider", "model", "detail"] {
         CPBigBoxControls["ai_" field] := cpGui.Add("Button", "x80 y350 w350 h80 Hidden", "")
-        CPBigBoxControls["ai_" field].OnEvent("Click", CPBigBoxOpenAIChoice.Bind(field))
+        CPBigBoxControls["ai_" field].OnEvent("Click", CPBigBoxOpenAIChoice.Bind(field, ""))
+    }
+    for field in ["provider", "model", "detail"] {
+        CPBigBoxControls["qai_" field] := cpGui.Add("Button", "x80 y350 w350 h80 Hidden", "")
+        CPBigBoxControls["qai_" field].OnEvent("Click", CPBigBoxOpenQuickAIChoice.Bind(field))
+    }
+    for kind in ["detailed", "quick"] {
+        CPBigBoxControls["explain_" kind] := cpGui.Add("Button", "x80 y350 w250 h80 Hidden",
+            kind = "quick" ? "Quick explanation" : "Detailed explanation")
+        CPBigBoxControls["explain_" kind].OnEvent("Click", CPBigBoxGenerateExplanation.Bind(kind))
     }
     CPBigBoxControls["aiNote"] := cpGui.Add("Text", "x80 y440 w1120 h65 Center Hidden", "")
     for option in CPBigBoxExplanationOptions() {
@@ -9799,9 +9944,9 @@ CPBigBoxDashboardCreate() {
     CPBigBoxControls["cap_save"].OnEvent("Click", CPBigBoxSaveCaptureLimit)
     CPBigBoxControls["cap_cancel"] := cpGui.Add("Button", "x80 y530 w350 h54 Hidden", "Cancel")
     CPBigBoxControls["cap_cancel"].OnEvent("Click", CPBigBoxCloseCaptureLimit)
-    Loop 3 {
+    Loop 4 {
         CPBigBoxControls["settingsGroup" A_Index] := cpGui.Add("Text", "x80 y350 w150 h38 Hidden", "")
-        if A_Index < 3
+        if A_Index < 4
             CPBigBoxControls["settingsDivider" A_Index] := cpGui.Add("Text", "x80 y440 w1120 h1 Hidden", "")
     }
     Loop 4 {
@@ -10387,6 +10532,29 @@ CPExplainLastHotkey(*) {
     if CPControllerNavigationTarget()
         return
     SafeCall(ExplainNow)
+}
+
+CPQuickExplainHotkey(*) {
+    if CPControllerNavigationTarget()
+        return
+    SafeCall(QuickExplainNow)
+}
+
+Rebind_QuickExplanation() {
+    global iniPath
+    static registered := ""
+    if registered != ""
+        try Hotkey(registered, "Off")
+    registered := ""
+    key := Trim(IniRead(iniPath, "hotkeys", "quick_explanation", ""))
+    if key != "" {
+        try {
+            Hotkey(key, CPQuickExplainHotkey)
+            registered := key
+        } catch as err {
+            DbgCP("Failed to bind quick_explanation: " err.Message)
+        }
+    }
 }
 
 CaptureControlPanelReturnWindow() {
@@ -12257,6 +12425,7 @@ try Hotkey("$Left", CPNavLeft, "On")
 global hotkeyActions := [
     "screenshot_translate",
 	"explain_last_translation",
+    "quick_explanation",
 	"hide_show_translator",
 	"hide_show_explainer",
 	"hide_show_control_panel",
@@ -12269,7 +12438,8 @@ global hotkeyActions := [
 
 global hotkeyLabels := Map(
     "screenshot_translate",       "Capture + Translate",
-    "explain_last_translation",   "Explain last translation",
+    "explain_last_translation",   "Detailed explanation",
+    "quick_explanation",          "Quick explanation",
 	"hide_show_translator",       "Show/Hide Translator",
     "hide_show_explainer",        "Show/Hide Explainer",
     "hide_show_control_panel",    "Show/Hide Control Panel",
@@ -12283,6 +12453,7 @@ global hotkeyLabels := Map(
 global hotkeyDefaults := Map(
     "screenshot_translate",       "^+t",    ; Ctrl+Shift+T
     "explain_last_translation",   "^+e",    ; Ctrl+Shift+E
+    "quick_explanation",          "",       ; Opt-in: avoid existing game/controller bindings.
     "hide_show_translator",       "^+h",    ; Ctrl+Shift+H
     "hide_show_explainer",        "^+x",    ; Ctrl+Shift+X
     "hide_show_control_panel",    "^+c",    ; Ctrl+Shift+C
@@ -13905,21 +14076,27 @@ CPSyncExplanationSelectionFromControls() {
 }
 
 ExplainNow(*) {
+    return CPExplainRequest(false)
+}
+
+QuickExplainNow(*) {
+    return CPExplainRequest(true)
+}
+
+CPExplainRequest(quick) {
     static explainRunning := false
     if explainRunning {
         Toast("An explanation is already being generated")
         return
     }
     explainRunning := true
-    previousErrorFile := EnvGet("EXPLAIN_ERROR_FILE")
     CPExplanationFailureStatus("")
-    try ExplainNowCore()
+    try ExplainNowCore(quick)
     catch as ex {
         CPReportExplanationFailure("Explanation could not finish. You can try again.`n`n" ex.Message)
     } finally {
         ; Even a locked result file or a closed dialog must release the guard.
         explainRunning := false
-        EnvSet("EXPLAIN_ERROR_FILE", previousErrorFile)
     }
 }
 
@@ -14038,7 +14215,7 @@ CPModelRequestLaunch(command) {
 CPModelRequestTimeoutMs(requestKind) {
     ; Match scripts/model_job.py. Allow 45 seconds beyond the provider deadline
     ; for interpreter startup, result validation, and saving Study Library data.
-    static seconds := Map("translation", 75, "explanation", 300, "evaluation", 600, "example", 120)
+    static seconds := Map("translation", 75, "explanation", 300, "quick_explanation", 120, "evaluation", 600, "example", 120)
     return (seconds[requestKind] + 45) * 1000
 }
 
@@ -14148,7 +14325,57 @@ CPReportExplanationFailure(message, requestId := "") {
     DbgCP("Explanation failed: " message)
 }
 
-ExplainNowCore() {
+CPExplanationLaunch(command, environment, &pid) {
+    previous := Map(), wasCritical := A_IsCritical
+    ; Only the child launch needs shared process environment variables. Restore
+    ; them before another GUI callback or Study generation can run.
+    Critical("On")
+    try {
+        for name, value in environment {
+            previous[name] := EnvGet(name)
+            EnvSet(name, value)
+        }
+        Run(command, A_ScriptDir, "Hide", &pid)
+    } finally {
+        try {
+            for name, value in previous
+                EnvSet(name, value)
+        } finally {
+            Critical(wasCritical)
+        }
+    }
+}
+
+CPExplanationSnapshot(requestId) {
+    global overlayDir
+    directory := A_Temp "\JRPG_ExplanationRequests\" requestId
+    DirCreate(directory)
+    try {
+        jp := FileExist(overlayDir "\last_jp.txt") ? FileRead(overlayDir "\last_jp.txt", "UTF-8") : ""
+        paths := FileExist(overlayDir "\last_src.txt") ? FileRead(overlayDir "\last_src.txt", "UTF-8") : ""
+        ; Python consumes these as plain UTF-8. Do not prefix the first image
+        ; path (or Japanese source) with an encoding marker.
+        FileAppend(jp, directory "\source.txt", "UTF-8-RAW")
+        copies := "", index := 0
+        for line in StrSplit(paths, "`n", "`r") {
+            path := Trim(line)
+            if path = "" || !FileExist(path)
+                continue
+            SplitPath(path,,, &extension)
+            index += 1
+            target := directory "\source-" index "." extension
+            FileCopy(path, target)
+            copies .= target "`n"
+        }
+        FileAppend(copies, directory "\paths.txt", "UTF-8-RAW")
+        return directory
+    } catch {
+        try DirDelete(directory, true)
+        throw
+    }
+}
+
+ExplainNowCore(quick := false) {
     static requestSequence := 0
     global pythonExe, explainScript
     global explainProvider, explainOpenAIModel, explainGeminiModel
@@ -14163,40 +14390,40 @@ ExplainNowCore() {
     ; The visible Explanation controls are authoritative. This prevents a
     ; defensive INI/UI refresh from leaving the internal provider stale.
     prov := CPSyncExplanationSelectionFromControls()
+    quickSettings := quick ? CPQuickExplanationSettings() : 0
+    if quick && !quickSettings["useDetailedModel"]
+        prov := quickSettings["provider"]
     if !CPApiKeyConfigured(prov) {
         CPReportExplanationFailure("The " prov " API key is missing. Open Settings > API keys to configure it.")
         DbgCP("ExplainNow blocked: " prov " API key is missing")
         return
     }
 
-	; Use the selected EXPLAIN profile
-    p := ExplainProfilePath(Trim(ddlEPr.Text))
-    if FileExist(p)
-        EnvSet "EXPLAIN_PROMPT_FILE", p
-    else
-        EnvSet "EXPLAIN_PROMPT_FILE", ""  ; Python falls back to BASE_PROMPT
-
-
-        ; NEW: propagate debug toggle to the Python explainer process
-        EnvSet "JRPG_DEBUG", (debugMode ? "1" : "0")
-
-    ; Provider/model for explainer: use Explanation tab
-    EnvSet("EXPLAIN_PROVIDER", prov)
-    if (prov = "gemini") {
-        modelToSet := explainGeminiModel
-        if (SubStr(modelToSet, 1, 7) != "models/")
-            modelToSet := "models/" . modelToSet
-        EnvSet("GEMINI_EXPLAIN_MODEL", modelToSet)
-        EnvSet("EXPLAIN_MODEL","")
-    } else {
-        EnvSet("EXPLAIN_MODEL", explainOpenAIModel)
-        EnvSet("GEMINI_EXPLAIN_MODEL","")
+    promptName := quick ? quickSettings["prompt"] : Trim(ddlEPr.Text)
+    p := quick ? CPQuickExplanationPromptPath(promptName) : ExplainProfilePath(promptName)
+    if quick && (!FileExist(p) || Trim(FileRead(p, "UTF-8")) = "") {
+        CPReportExplanationFailure("The quick explanation prompt is missing or empty. Select or edit it on the Explanation page.")
+        return
     }
-    EnvSet("PYTHONIOENCODING","utf-8")
+    if quick && !InStr(FileRead(p, "UTF-8"), "{jp}") {
+        CPReportExplanationFailure("The quick explanation prompt needs {jp} where the Japanese source should be inserted. Edit it on the Explanation page.")
+        return
+    }
+    modelToSet := quick && !quickSettings["useDetailedModel"]
+        ? quickSettings[prov = "gemini" ? "geminiModel" : "openAIModel"]
+        : (prov = "gemini" ? explainGeminiModel : explainOpenAIModel)
+    if Trim(modelToSet) = "" {
+        CPReportExplanationFailure("Select a model in Quick explanation options before generating a quick explanation.")
+        return
+    }
+    environment := Map("EXPLAIN_PROVIDER", prov, "EXPLAIN_PROMPT_FILE", FileExist(p) ? p : "",
+        "GEMINI_EXPLAIN_MODEL", prov = "gemini" ? modelToSet : "",
+        "EXPLAIN_MODEL", prov = "openai" ? modelToSet : "", "PYTHONIOENCODING", "utf-8",
+        "JRPG_DEBUG", debugMode ? "1" : "0", "EXPLAIN_UPDATE_OVERLAY", "1")
 	
 	; --- Explanation archive wiring for explainer.py ---
-    saveExpl := ReadIniInt(iniPath, "cfg", "saveExplains", 0)
-    saveStudyLibrary := ReadIniInt(iniPath, "cfg", "saveStudyLibrary", 0)
+    saveExpl := !quick && ReadIniInt(iniPath, "cfg", "saveExplains", 0)
+    saveStudyLibrary := !quick && ReadIniInt(iniPath, "cfg", "saveStudyLibrary", 0)
     saveStudyScreenshots := ReadIniInt(iniPath, "cfg", "studyLibraryScreenshots", 1)
 
     ; Pass environment variables to explainer.py
@@ -14212,31 +14439,35 @@ ExplainNowCore() {
         if (safeProfileFolder != "")
             explainSaveDir := explainsDir "\" safeProfileFolder
     }
-    EnvSet "SAVE_EXPLAINS", (saveExpl ? "1" : "0")
-    EnvSet "EXPLAIN_SAVE_DIR", explainSaveDir
-    EnvSet "SETTINGS_DIR", A_ScriptDir "\Settings"
-    EnvSet "SAVE_STUDY_LIBRARY", (saveStudyLibrary ? "1" : "0")
-    EnvSet "STUDY_LIBRARY_SCREENSHOTS", (saveStudyScreenshots ? "1" : "0")
-    EnvSet "STUDY_LIBRARY_DIR", studyLibraryDir
-    EnvSet "STUDY_LIBRARY_PROFILE", activeGameProfile
-    EnvSet "STUDY_LIBRARY_CHAPTER", StudyLibraryCurrentChapter(
+    environment["SAVE_EXPLAINS"] := saveExpl ? "1" : "0"
+    environment["EXPLAIN_SAVE_DIR"] := explainSaveDir
+    environment["SETTINGS_DIR"] := A_ScriptDir "\Settings"
+    environment["SAVE_STUDY_LIBRARY"] := saveStudyLibrary ? "1" : "0"
+    environment["STUDY_LIBRARY_SCREENSHOTS"] := saveStudyScreenshots ? "1" : "0"
+    environment["STUDY_LIBRARY_DIR"] := studyLibraryDir
+    environment["STUDY_LIBRARY_PROFILE"] := activeGameProfile
+    environment["STUDY_LIBRARY_CHAPTER"] := quick ? "" : StudyLibraryCurrentChapter(
         activeGameProfile, studyLibraryDir
     )
-    EnvSet "EXPLAIN_PROMPT_PROFILE", Trim(ddlEPr.Text)
+    environment["EXPLAIN_PROMPT_PROFILE"] := promptName
     
     requestSequence += 1
     requestId := A_NowUTC "-" A_TickCount "-" requestSequence
     safeRequestId := RegExReplace(requestId, "[^0-9A-Za-z_-]", "_")
     errFile := A_Temp "\JRPG_Explain_" safeRequestId ".err"
     try FileDelete(errFile)
-    EnvSet("JRPG_REQUEST_ID", requestId)
-    EnvSet("EXPLAIN_ERROR_FILE", errFile)
-    cmd := Format('"{1}" "{2}"', px, ex)
+    environment["JRPG_REQUEST_ID"] := requestId
+    environment["EXPLAIN_ERROR_FILE"] := errFile
+    snapshot := CPExplanationSnapshot(safeRequestId)
+    try {
+    environment["EXPLAIN_SOURCE_TEXT_FILE"] := snapshot "\source.txt"
+    environment["EXPLAIN_SOURCE_PATHS_FILE"] := snapshot "\paths.txt"
+    cmd := Format('"{1}" "{2}"', px, ex) . (quick ? " --quick-explanation" : "")
     DbgCP("ExplainNow -> " cmd)
-    Toast("Generating explanation…", 1600, 2)
+    Toast(quick ? "Generating quick explanation…" : "Generating detailed explanation…", 1600, 2)
     SignalExplainerBusy()
     pid := 0
-    try Run(cmd, A_ScriptDir, "Hide", &pid)
+    try CPExplanationLaunch(cmd, environment, &pid)
     catch as launchError {
         msg := "Explanation could not start.`n`nThe bundled Python process could not be launched.`n`nDetails: " launchError.Message
         CPReportExplanationFailure(msg, requestId)
@@ -14245,7 +14476,7 @@ ExplainNowCore() {
     }
 
     startedAt := A_TickCount
-    explainTimeoutMs := CPModelRequestTimeoutMs("explanation")
+    explainTimeoutMs := CPModelRequestTimeoutMs(quick ? "quick_explanation" : "explanation")
     timedOut := false
     while ProcessExist(pid) {
         if ((A_TickCount - startedAt) >= explainTimeoutMs) {
@@ -14282,12 +14513,16 @@ ExplainNowCore() {
     }
 
     if (exitCode = 0) {
-        Toast("Explanation updated", 1600, 2)
+        Toast(quick ? "Quick explanation ready" : "Detailed explanation ready", 1600, 2)
         DbgCP("ExplainNow OK")
     } else {
         msg := err
         CPReportExplanationFailure(msg, requestId)
         DbgCP("ExplainNow ERR: " msg)
+    }
+    } finally {
+        try FileDelete(errFile)
+        try DirDelete(snapshot, true)
     }
 }
 
@@ -31977,6 +32212,8 @@ CPControllerDispatchAction(action) {
                 CPControllerTranslatorAction("cmd.oneshot_translate")
             case "explain_last_translation":
                 ExplainNow()
+            case "quick_explanation":
+                QuickExplainNow()
             case "hide_show_translator":
                 CPControllerToggleTranslator()
             case "hide_show_explainer":
@@ -33134,6 +33371,8 @@ RefreshModelCombos(key, activeCombo := 0, activePreferredText := "") {
     global model_openai_audio, model_gemini_audio
     global ddlIMG, ddlIMG_GM, ddlEOpenAI, ddlEGem, ddlTR, ddlA_GM
 
+    global CPDesktop
+    quickChanged := false, quickCombo := 0
     arr := 0
     combos := []
     switch key {
@@ -33166,6 +33405,13 @@ RefreshModelCombos(key, activeCombo := 0, activePreferredText := "") {
     }
     if !IsObject(arr)
         return
+    if IsSet(CPDesktop) && CPDesktop.Has("explanationPage") {
+        quickKey := key = "gemini_explain" ? "quickGemini" : key = "openai_explain" ? "quickOpenAI" : ""
+        if quickKey != "" && CPDesktop["explanationPage"].Has(quickKey) {
+            quickCombo := CPDesktop["explanationPage"][quickKey]
+            combos.Push(quickCombo)
+        }
+    }
     ModelListSort(arr)
 
     for combo in combos {
@@ -33174,7 +33420,12 @@ RefreshModelCombos(key, activeCombo := 0, activePreferredText := "") {
             modelSelectionText := activePreferredText
         SetComboItems(combo, arr)
         SetComboToExistingItem(combo, arr, modelSelectionText)
+        if IsObject(quickCombo) && combo.Hwnd = quickCombo.Hwnd
+            && modelSelectionText != combo.Text
+            quickChanged := true
     }
+    if quickChanged
+        CPQuickExplanationChanged()
 }
 
 AddModelValue(arr, key, combo, newModel) {
@@ -40617,10 +40868,13 @@ CPDesktopCreateExplanationPage() {
     global saveLibraryChk, saveLibraryScreenshotsChk, saveExplChk, chkOpenEW, chkTop_EW
     tab.UseTab(4)
     expPage := CPDesktop["explanationPage"]
-    for spec in [["ai", "AI settings"], ["provider", "Provider"], ["model", "Model"], ["prompt", "Prompt"],
+    for spec in [["ai", "Detailed explanation"], ["provider", "Provider"], ["model", "Model"], ["prompt", "Prompt"],
+        ["quickTitle", "Quick explanation"], ["quickPromptLabel", "Prompt"],
+        ["quickHelp", "A short vocabulary list and key grammar for playing. Quick explanations are never saved to the Study Library or text archives."],
+        ["quickProviderLabel", "Provider"], ["quickModelLabel", "Model"],
         ["action", "Create an explanation"],
         ["actionHelp", "Explain the latest Japanese text from Game Text Translation. No new capture is made."],
-        ["saving", "Save explanations"],
+        ["saving", "Save detailed explanations"],
         ["libraryHelp", "Keep explanations for later study, grouped by the active Profile (or Unsorted when none is active)."],
         ["screenshotsHelp", "Keep the original game images alongside saved Library entries."],
         ["plainTextHelp", "Also save text files in Settings\Explanations and its Profile subfolders, independently of the Library."],
@@ -40630,7 +40884,7 @@ CPDesktopCreateExplanationPage() {
         if InStr(spec[1], "Help")
             CPRegisterMutedControl(expPage[spec[1]])
     }
-    for key in ["ai", "action", "saving"]
+    for key in ["ai", "quickTitle", "action", "saving"]
         expPage[key].SetFont("s13 Bold")
 
     ddlEProv := CPDesktopPageRegisterControl(4, "providerChoice",
@@ -40654,11 +40908,42 @@ CPDesktopCreateExplanationPage() {
         CPDesktopRegisterPaint(expPage[spec[1]], "link", "panel")
     }
     btnExplainNow := CPDesktopPageRegisterControl(4, "createExplanation",
-        ui.AddButton("x0 y0 w184 h38 Hidden", "Explain latest text"), "panel")
+        ui.AddButton("x0 y0 w184 h38 Hidden", "Detailed explanation"), "panel")
     btnOpenStudyLibrary := CPDesktopPageRegisterControl(4, "openLibrary",
         ui.AddButton("x0 y0 w180 h38 Hidden", "Open Study Library"), "panel")
     CPDesktopRegisterPaint(btnExplainNow, "primary", "panel")
     CPDesktopRegisterPaint(btnOpenStudyLibrary, "button", "panel")
+    CPQuickExplanationSeedPrompt()
+    quick := CPQuickExplanationSettings()
+    expPage["quickPrompt"] := CPDesktopPageRegisterControl(4, "quickPrompt",
+        ui.AddDropDownList("x0 y0 w280 Hidden 0x210", []), "panel")
+    expPage["quickUseDetailed"] := CPDesktopPageRegisterControl(4, "quickUseDetailed",
+        ui.AddCheckbox("x0 y0 w320 h26 Hidden", "Use detailed explanation model"), "panel")
+    expPage["quickUseDetailed"].Value := quick["useDetailedModel"]
+    expPage["quickProvider"] := CPDesktopPageRegisterControl(4, "quickProvider",
+        ui.AddDropDownList("x0 y0 w180 Hidden 0x210", ["Gemini", "OpenAI"]), "panel")
+    expPage["quickProvider"].Choose(quick["provider"] = "gemini" ? 1 : 2)
+    for spec in [["quickGemini", model_gemini_explain, "geminiModel"], ["quickOpenAI", model_openai_explain, "openAIModel"]] {
+        expPage[spec[1]] := CPDesktopPageRegisterControl(4, spec[1],
+            ui.AddDropDownList("x0 y0 w280 Hidden 0x210", spec[2]), "panel")
+        SetComboToExistingItem(expPage[spec[1]], spec[2], quick[spec[3]])
+    }
+    for spec in [["quickPrompts", "Manage…", CPQuickExplanationPromptMenu],
+        ["quickOptions", "Model options", CPQuickExplanationToggleOptions],
+        ["quickGenerate", "Quick explanation", QuickExplainNow]] {
+        expPage[spec[1]] := CPDesktopPageRegisterControl(4, spec[1],
+            ui.AddButton("x0 y0 w184 h38 Hidden", spec[2]), "panel")
+        expPage[spec[1]].OnEvent("Click", spec[3])
+        CPDesktopRegisterPaint(expPage[spec[1]], spec[1] = "quickGenerate" ? "button" : "link", "panel")
+    }
+    expPage["quickUseDetailed"].OnEvent("Click", CPQuickExplanationChanged)
+    for key in ["quickPrompt", "quickProvider", "quickGemini", "quickOpenAI"] {
+        expPage[key].OnEvent("Change", CPQuickExplanationChanged)
+        ctrl := expPage[key]
+        CPDesktop["combos"][ctrl.Hwnd] := Map("ctrl", ctrl, "height", SendMessage(0x0154, -1, 0, ctrl.Hwnd))
+        CPPrepareStudyCombo(ctrl.Hwnd)
+    }
+    CPQuickExplanationRefreshPrompts(quick["prompt"])
 
     ; Preserve the existing archive migration while making the modern page the
     ; sole owner of the controls which display and persist these preferences.
@@ -40689,7 +40974,7 @@ CPDesktopCreateExplanationPage() {
         ui.AddCheckbox("x0 y0 w320 h26 Hidden", "Explainer always on top"), "panel")
     chkTop_EW.Value := ReadIniInt(iniPath, "cfg_explainer", "winTop", 0) ? 1 : 0
 
-    for key in ["aiPanel", "actionPanel", "savingPanel"] {
+    for key in ["aiPanel", "quickPanel", "actionPanel", "savingPanel"] {
         expPage[key] := CPDesktopPageRegisterControl(4, key,
             ui.AddText("x0 y0 w100 h100 Hidden +0xD +0x04000000"), "window")
         CPDesktopRegisterPaint(expPage[key], "panel", "window")
@@ -40748,16 +41033,43 @@ CPDesktopLayoutExplanation(w) {
     expPage["actionHelp"].Text := CPExplanationFailureStatus() != ""
         ? CPExplanationFailureStatus() "`nFull error details are in the Explainer overlay."
         : "Explain the latest Japanese text from Game Text Translation. No new capture is made."
-    actionY := aiY + aiH + 16
+    quickY := aiY + aiH + 16
+    CPDesktopPlace(expPage["quickTitle"], x, quickY + 18, contentW, 26)
+    quickHelpH := Max(22, Ceil(CPMeasureWrappedTextHeight(expPage["quickHelp"], contentW * scale) / scale) + 4)
+    CPDesktopPlace(expPage["quickHelp"], x, quickY + 52, contentW, quickHelpH)
+    rowY := quickY + 52 + quickHelpH + 12
+    CPDesktopPlace(expPage["quickPromptLabel"], x, rowY, contentW, 22)
+    CPDesktopPlace(expPage["quickPrompt"], x, rowY + 24, contentW - 116, 30)
+    CPDesktopPlace(expPage["quickPrompts"], right - 100, rowY + 24, 100, 30)
+    rowY += 66
+    expandedQuick := CPDesktop.Get("quickExplanationOptionsOpen", false)
+    expPage["quickOptions"].Text := (expandedQuick ? "▾" : "▸") "  Model options"
+    CPDesktopPlace(expPage["quickOptions"], x, rowY, 240, 28)
+    rowY += 40
+    CPDesktopPlace(expPage["quickUseDetailed"], x, rowY, contentW, 26, expandedQuick)
+    inherit := expPage["quickUseDetailed"].Value
+    geminiQuick := StrLower(expPage["quickProvider"].Text) = "gemini"
+    CPDesktopPlace(expPage["quickProviderLabel"], x, rowY + 40, providerW, 22, expandedQuick)
+    CPDesktopPlace(expPage["quickProvider"], x, rowY + 64, providerW, 30, expandedQuick)
+    CPDesktopPlace(expPage["quickModelLabel"], modelX, rowY + 40, right - modelX, 22, expandedQuick)
+    CPDesktopPlace(expPage["quickGemini"], modelX, rowY + 64, right - modelX, 30, expandedQuick && geminiQuick)
+    CPDesktopPlace(expPage["quickOpenAI"], modelX, rowY + 64, right - modelX, 30, expandedQuick && !geminiQuick)
+    for key in ["quickProvider", "quickGemini", "quickOpenAI"]
+        expPage[key].Enabled := !inherit
+    quickBottom := rowY + (expandedQuick ? 114 : 6)
+    CPDesktopPlace(expPage["quickPanel"], panelX, quickY, panelW, quickBottom - quickY)
+    actionY := quickBottom + 16
     actionHelpH := Max(22, Ceil(CPMeasureWrappedTextHeight(expPage["actionHelp"], contentW * scale) / scale) + 4)
-    actionH := 48 + actionHelpH + 16 + 38 + 20
+    actionH := 48 + actionHelpH + 16 + 38 + 20 + (contentW < 572 ? 50 : 0)
     CPDesktopPlace(expPage["actionPanel"], panelX, actionY, panelW, actionH)
     CPDesktopPlace(expPage["action"], x, actionY + 18, contentW, 26)
     CPDesktopPlace(expPage["actionHelp"], x, actionY + 48, contentW, actionHelpH)
-    btnExplainNow.Text := "Explain latest text"
+    btnExplainNow.Text := "Detailed explanation"
     btnOpenStudyLibrary.Text := "Open Study Library"
     CPDesktopPlace(btnExplainNow, x, actionY + 48 + actionHelpH + 16, 184, 38)
-    CPDesktopPlace(btnOpenStudyLibrary, x + 196, actionY + 48 + actionHelpH + 16, 180, 38)
+    CPDesktopPlace(expPage["quickGenerate"], x + 196, actionY + 48 + actionHelpH + 16, 184, 38)
+    CPDesktopPlace(btnOpenStudyLibrary, contentW < 572 ? x : x + 392,
+        actionY + 48 + actionHelpH + 16 + (contentW < 572 ? 50 : 0), 180, 38)
 
     savingY := actionY + actionH + 16, rowY := savingY + 56
     CPDesktopPlace(expPage["saving"], x, savingY + 18, contentW, 26)
@@ -40819,6 +41131,155 @@ CPDesktopExplanationPromptMenu(anchorCtrl, *) {
     return CPDesktopActionMenu(anchorCtrl,
         ["Edit selected prompt…", "New prompt…", "Delete selected prompt…"],
         [OpenExplainPromptEditor_Multi, NewExplainPromptProfile, DeleteExplainPromptProfile])
+}
+
+CPQuickExplanationDirectory() {
+    global explainPromptsDir
+    SplitPath(explainPromptsDir, , &settingsDirectory)
+    return settingsDirectory "\prompts_quick_explain"
+}
+
+CPQuickExplanationPromptPath(name) {
+    if StudyLibrarySafeName(name) = ""
+        return ""
+    return CPQuickExplanationDirectory() "\" name ".txt"
+}
+
+CPQuickExplanationSeedPrompt() {
+    directory := CPQuickExplanationDirectory()
+    DirCreate(directory)
+    ; Add missing bundled languages without replacing edited prompts or changing the selection.
+    if !FileExist(directory "\default_en.txt")
+        FileInstall("Settings\prompts_quick_explain\default_en.txt", directory "\default_en.txt", false)
+    if !FileExist(directory "\default_de.txt")
+        FileInstall("Settings\prompts_quick_explain\default_de.txt", directory "\default_de.txt", false)
+    if !FileExist(directory "\default_es.txt")
+        FileInstall("Settings\prompts_quick_explain\default_es.txt", directory "\default_es.txt", false)
+    if !FileExist(directory "\default_fr.txt")
+        FileInstall("Settings\prompts_quick_explain\default_fr.txt", directory "\default_fr.txt", false)
+    if !FileExist(directory "\default_it.txt")
+        FileInstall("Settings\prompts_quick_explain\default_it.txt", directory "\default_it.txt", false)
+    if !FileExist(directory "\default_ja.txt")
+        FileInstall("Settings\prompts_quick_explain\default_ja.txt", directory "\default_ja.txt", false)
+    if !FileExist(directory "\default_ko.txt")
+        FileInstall("Settings\prompts_quick_explain\default_ko.txt", directory "\default_ko.txt", false)
+    if !FileExist(directory "\default_nl.txt")
+        FileInstall("Settings\prompts_quick_explain\default_nl.txt", directory "\default_nl.txt", false)
+    if !FileExist(directory "\default_pl.txt")
+        FileInstall("Settings\prompts_quick_explain\default_pl.txt", directory "\default_pl.txt", false)
+    if !FileExist(directory "\default_pt.txt")
+        FileInstall("Settings\prompts_quick_explain\default_pt.txt", directory "\default_pt.txt", false)
+    if !FileExist(directory "\default_ru.txt")
+        FileInstall("Settings\prompts_quick_explain\default_ru.txt", directory "\default_ru.txt", false)
+    if !FileExist(directory "\default_uk.txt")
+        FileInstall("Settings\prompts_quick_explain\default_uk.txt", directory "\default_uk.txt", false)
+    if !FileExist(directory "\default_zh-CN.txt")
+        FileInstall("Settings\prompts_quick_explain\default_zh-CN.txt", directory "\default_zh-CN.txt", false)
+    if !FileExist(directory "\default_zh-TW.txt")
+        FileInstall("Settings\prompts_quick_explain\default_zh-TW.txt", directory "\default_zh-TW.txt", false)
+}
+
+CPQuickExplanationSettings() {
+    global iniPath, explainProvider, explainGeminiModel, explainOpenAIModel
+    return Map("prompt", IniRead(iniPath, "quick_explanation", "prompt", "default_en"),
+        "useDetailedModel", ReadIniInt(iniPath, "quick_explanation", "useDetailedModel", 1),
+        "provider", StrLower(IniRead(iniPath, "quick_explanation", "provider", explainProvider)),
+        "geminiModel", IniRead(iniPath, "quick_explanation", "geminiModel", explainGeminiModel),
+        "openAIModel", IniRead(iniPath, "quick_explanation", "openAIModel", explainOpenAIModel))
+}
+
+CPQuickExplanationChanged(*) {
+    global iniPath, CPDesktop
+    page := CPDesktop["explanationPage"]
+    for spec in [["prompt", "quickPrompt"], ["provider", "quickProvider"],
+        ["geminiModel", "quickGemini"], ["openAIModel", "quickOpenAI"]]
+        IniWrite(spec[1] = "provider" ? StrLower(page[spec[2]].Text) : page[spec[2]].Text,
+            iniPath, "quick_explanation", spec[1])
+    IniWrite(page["quickUseDetailed"].Value, iniPath, "quick_explanation", "useDetailedModel")
+    CPDesktopRelayout()
+}
+
+CPQuickExplanationRefreshModels() {
+    global CPDesktop, model_gemini_explain, model_openai_explain
+    page := CPDesktop["explanationPage"]
+    for spec in [["quickGemini", model_gemini_explain], ["quickOpenAI", model_openai_explain]] {
+        combo := page[spec[1]], selected := combo.Text
+        combo.Delete(), combo.Add(spec[2])
+        SetComboToExistingItem(combo, spec[2], selected)
+    }
+}
+
+CPQuickExplanationToggleOptions(*) {
+    global CPDesktop
+    CPQuickExplanationRefreshModels()
+    CPDesktop["quickExplanationOptionsOpen"] := !CPDesktop.Get("quickExplanationOptionsOpen", false)
+    CPQuickExplanationChanged()
+}
+
+CPQuickExplanationRefreshPrompts(select := "") {
+    global CPDesktop, iniPath
+    names := "", directory := CPQuickExplanationDirectory()
+    loop files directory "\*.txt"
+        names .= SubStr(A_LoopFileName, 1, -4) "`n"
+    list := names = "" ? [] : StrSplit(RTrim(Sort(names), "`n"), "`n")
+    combo := CPDesktop["explanationPage"]["quickPrompt"]
+    combo.Delete()
+    if list.Length {
+        combo.Add(list)
+        combo.Choose(Max(1, ArrayIndexOf(list, select)))
+    }
+    IniWrite(combo.Text, iniPath, "quick_explanation", "prompt")
+}
+
+CPQuickExplanationPromptMenu(anchorCtrl, *) {
+    return CPDesktopActionMenu(anchorCtrl,
+        ["Edit selected prompt…", "New prompt…", "Delete selected prompt…"],
+        [CPQuickExplanationEditPrompt, CPQuickExplanationNewPrompt, CPQuickExplanationDeletePrompt])
+}
+
+CPQuickExplanationEditPrompt(*) {
+    global CPDesktop
+    name := CPDesktop["explanationPage"]["quickPrompt"].Text
+    path := CPQuickExplanationPromptPath(name)
+    if !FileExist(path)
+        return
+    return CPModernFileEditorOpen(path, "Edit quick explanation prompt - " name,
+        "Keep this prompt concise for a short explanation during play.", "Prompt instructions",
+        "Use {jp} for the Japanese text. Saving creates a backup. Quick explanations are never archived.",
+        FileRead(path, "UTF-8"), "Saved quick explanation prompt: " name, "the quick explanation prompt", "", true)
+}
+
+CPQuickExplanationNewPrompt(*) {
+    global CPDesktop
+    input := CPThemedInputBox("Name for the new quick explanation prompt:", "New quick explanation prompt")
+    if input.Result = "Cancel"
+        return
+    name := Trim(input.Value), path := CPQuickExplanationPromptPath(name)
+    if path = "" || FileExist(path) {
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Choose an unused name without filename punctuation.", "New quick explanation prompt")
+        return
+    }
+    current := CPQuickExplanationPromptPath(CPDesktop["explanationPage"]["quickPrompt"].Text)
+    if !FileExist(current)
+        current := CPQuickExplanationPromptPath("default_en")
+    FileCopy(current, path)
+    CPQuickExplanationRefreshPrompts(name)
+    CPQuickExplanationEditPrompt()
+}
+
+CPQuickExplanationDeletePrompt(*) {
+    global CPDesktop
+    name := CPDesktop["explanationPage"]["quickPrompt"].Text
+    if name = "" || name = "default_en" {
+        CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Keep the default prompt as a starting point. You can edit it or create another prompt.", "Delete quick explanation prompt")
+        return
+    }
+    if CPAdaptiveOwnedMessage(CPDialogDefaultOwner(), "Delete quick explanation prompt '" name "'?", "Delete quick explanation prompt", "yesno") != "Yes"
+        return
+    path := CPQuickExplanationPromptPath(name)
+    FileCopy(path, path ".bak", true)
+    FileDelete(path)
+    CPQuickExplanationRefreshPrompts("default_en")
 }
 
 ; Both overlay pages share one presentation while their page-owned controls
@@ -41718,7 +42179,7 @@ CPDesktopPaintBackground(dc, lParam, msg, hwnd) {
             pageControls := CPDesktop["overlayPages"][tab.Value]
         } else {
             panels := tab.Value = 1 ? ["aiPanel", "capturePanel", "formatPanel"]
-                : tab.Value = 2 ? ["aiPanel", "inputPanel", "sessionPanel"] : ["aiPanel", "actionPanel", "savingPanel"]
+                : tab.Value = 2 ? ["aiPanel", "inputPanel", "sessionPanel"] : ["aiPanel", "quickPanel", "actionPanel", "savingPanel"]
             pageControls := CPDesktop[tab.Value = 1 ? "shot" : tab.Value = 2 ? "audioPage" : "explanationPage"]
         }
         for key in panels
@@ -41973,7 +42434,9 @@ CPDesktopOrderTabStops() {
         pageStops := [ddlAProv, model, a["models"], ddlAudioTarget, ddlSpeaker, btnSpRef, btnAudioTest, a["troubleshoot"], a["power"]]
     } else if tab.Value = 4 {
         expPage := CPDesktop["explanationPage"], model := StrLower(ddlEProv.Text) = "gemini" ? ddlEGem : ddlEOpenAI
-        pageStops := [ddlEProv, model, expPage["models"], ddlEPr, expPage["prompts"], btnExplainNow,
+        pageStops := [ddlEProv, model, expPage["models"], ddlEPr, expPage["prompts"],
+            expPage["quickPrompt"], expPage["quickPrompts"], expPage["quickOptions"], expPage["quickUseDetailed"],
+            expPage["quickProvider"], expPage["quickGemini"], expPage["quickOpenAI"], btnExplainNow, expPage["quickGenerate"],
             btnOpenStudyLibrary, saveLibraryChk, saveLibraryScreenshotsChk, saveExplChk, expPage["startup"], chkOpenEW, chkTop_EW]
     } else {
         overlayPage := CPDesktop["overlayPages"][tab.Value], bindings := CPDesktopOverlayBindings(tab.Value)
